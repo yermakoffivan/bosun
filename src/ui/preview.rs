@@ -198,7 +198,7 @@ pub fn render(
 
     // The cursor is on a row whose tmux session is gone. Say so, and
     // name the two ways out — the row sticking around is deliberate
-    // (it's what `R` restarts from), but leaving the pane blank or
+    // (it's what Ctrl+R restarts from), but leaving the pane blank or
     // stuck on "capturing…" made it look like bosun had lost track of
     // something. See issue #14.
     let selected_is_dead = state
@@ -213,7 +213,7 @@ pub fn render(
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "  R restart · d remove from sidebar",
+                "  Ctrl+R restart · D remove from sidebar",
                 Style::default().fg(theme.dim_fg),
             )),
         ]);

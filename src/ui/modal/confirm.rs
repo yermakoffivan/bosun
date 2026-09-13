@@ -1,10 +1,12 @@
 //! Generic yes/no confirmation modal. Takes a message and a Command
 //! that fires if the user confirms (Enter or 'y'). Esc or 'n' cancels.
 //!
-//! Up to two extra actions (`with_alt`) bind more keys to their own
+//! Up to three extra actions (`with_alt`) bind more keys to their own
 //! Commands — used by the restart modal to offer `r · resume` alongside
-//! the plain restart, and by the kill-cleanup flow to offer `m` / `x`
-//! alongside the default keep, mirroring the existing `y`/`n` keys.
+//! the plain restart, by the kill-cleanup flow to offer `m` / `x`
+//! alongside the default keep, and by the kill prompt on a multi-tab
+//! container to offer `a · kill all N tabs`, mirroring the existing
+//! `y`/`n` keys.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -22,8 +24,8 @@ const MODAL_WIDTH: u16 = 54;
 /// Wider when one alt action is present so the three-action footer
 /// (`enter / y · … r · … esc / n · …`) fits on one line.
 const MODAL_WIDTH_ALT: u16 = 64;
-/// Wider still when two alt actions are present so the four-action
-/// footer fits on one line. Budget: the kill-cleanup footer
+/// Wider still when two or more alt actions are present, so the
+/// four-action footer fits on one line (three alts wrap it to two). Budget: the kill-cleanup footer
 /// (` enter / y · confirm   m · merge & remove   x · remove, keep
 /// branch   esc / n · cancel`) is 86 display columns; the usable text
 /// column is `width - H_PAD`, so 86 + 4 = 90.
@@ -64,7 +66,7 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 }
 
 /// An extra action bound to a single key, rendered in the footer
-/// between the confirm and cancel hints. Up to two may be present.
+/// between the confirm and cancel hints. Up to three may be present.
 struct AltAction {
     key: char,
     label: String,
@@ -81,7 +83,7 @@ pub struct ConfirmModal {
     /// If true, the accent color shifts to red to signal a destructive
     /// action (kill, delete).
     destructive: bool,
-    /// Extra key-bound actions (e.g. `r · resume`), up to two.
+    /// Extra key-bound actions (e.g. `r · resume`), up to three.
     alts: Vec<AltAction>,
 }
 
@@ -103,14 +105,14 @@ impl ConfirmModal {
 
     /// Bind an extra action to `key` (matched case-insensitively),
     /// labelled `label`, firing `command` on press. The footer shows
-    /// it as `{key} · {label}`. At most two alts are supported.
+    /// it as `{key} · {label}`. At most three alts are supported.
     pub fn with_alt(mut self, key: char, label: impl Into<String>, command: Command) -> Self {
         self.alts.push(AltAction {
             key: key.to_ascii_lowercase(),
             label: label.into(),
             command: Some(command),
         });
-        debug_assert!(self.alts.len() <= 2);
+        debug_assert!(self.alts.len() <= 3);
         self
     }
 
@@ -134,29 +136,39 @@ impl ConfirmModal {
         wrap_text(&self.message, self.width().saturating_sub(H_PAD) as usize)
     }
 
-    /// The single-line footer hint string, rendered between the modal
-    /// body and its bottom edge: the primary confirm hint, then one
-    /// `{key} · {label}` per alt, then the cancel hint. `width()` is
-    /// sized so this stays within the usable text column (`width - H_PAD`).
-    fn footer(&self) -> String {
+    /// The footer hint, rendered between the modal body and its bottom
+    /// edge: the primary confirm hint, then one `{key} · {label}` per
+    /// alt, then the cancel hint. `width()` keeps it to one line with up
+    /// to two alts; past the usable text column (`width - H_PAD`) it
+    /// wraps between hints onto another line instead of clipping.
+    fn footer_lines(&self) -> Vec<String> {
         if self.alts.is_empty() {
-            " enter / y · confirm      esc / n · cancel".to_string()
-        } else {
-            let mut footer = String::from(" enter / y · confirm");
-            for alt in &self.alts {
-                footer.push_str(&format!("   {} · {}", alt.key, alt.label));
-            }
-            footer.push_str("   esc / n · cancel");
-            footer
+            return vec![" enter / y · confirm      esc / n · cancel".to_string()];
         }
+        let mut hints = vec!["enter / y · confirm".to_string()];
+        hints.extend(self.alts.iter().map(|a| format!("{} · {}", a.key, a.label)));
+        hints.push("esc / n · cancel".to_string());
+        let usable = self.width().saturating_sub(H_PAD) as usize;
+        let mut lines = Vec::new();
+        let mut line = String::new();
+        for hint in hints {
+            if !line.is_empty() && line.chars().count() + 3 + hint.chars().count() > usable {
+                lines.push(std::mem::take(&mut line));
+            }
+            line.push_str(if line.is_empty() { " " } else { "   " });
+            line.push_str(&hint);
+        }
+        lines.push(line);
+        lines
     }
 
     /// Total modal height. The body is title + blank + N message lines +
-    /// blank + footer (4 + N), plus the top/bottom border rows and two
-    /// rows of trailing padding — so a one-line message keeps the
-    /// original 9-row look and longer messages grow downward.
+    /// blank + F footer lines (3 + N + F), plus the top/bottom border
+    /// rows and two rows of trailing padding — so a one-line message
+    /// with a one-line footer keeps the original 9-row look, and longer
+    /// messages or a wrapped footer grow downward.
     fn height(&self) -> u16 {
-        8 + self.message_lines().len() as u16
+        7 + (self.message_lines().len() + self.footer_lines().len()) as u16
     }
 }
 
@@ -225,7 +237,7 @@ impl Modal for ConfirmModal {
             .bg(body_bg)
             .add_modifier(Modifier::BOLD);
 
-        let footer = self.footer();
+        let footer = self.footer_lines();
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         lines.push(Line::from(Span::styled(self.title.clone(), title_style)));
@@ -237,10 +249,12 @@ impl Modal for ConfirmModal {
             )));
         }
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            footer,
-            Style::default().fg(theme.text_muted).bg(body_bg),
-        )));
+        for footer_line in footer {
+            lines.push(Line::from(Span::styled(
+                footer_line,
+                Style::default().fg(theme.text_muted).bg(body_bg),
+            )));
+        }
 
         Paragraph::new(lines)
             .style(Style::default().bg(body_bg))
@@ -409,6 +423,35 @@ mod tests {
     }
 
     #[test]
+    fn three_alt_footer_wraps_instead_of_clipping() {
+        // A worktree tab in a multi-tab container: m / x plus `a`.
+        let two = ConfirmModal::new("Kill?", "msg", Command::KillSession("keep".into()))
+            .with_alt('m', "merge & remove", Command::KillSession("merge".into()))
+            .with_alt(
+                'x',
+                "remove, keep branch",
+                Command::KillSession("remove".into()),
+            );
+        let mut three = ConfirmModal::new("Kill?", "msg", Command::KillSession("keep".into()))
+            .with_alt('m', "merge & remove", Command::KillSession("merge".into()))
+            .with_alt(
+                'x',
+                "remove, keep branch",
+                Command::KillSession("remove".into()),
+            )
+            .with_alt('a', "kill all 3 tabs", Command::KillSession("all".into()));
+        let usable = three.width().saturating_sub(H_PAD) as usize;
+        let footer = three.footer_lines();
+        assert_eq!(footer.len(), 2);
+        assert!(footer.iter().all(|l| l.chars().count() <= usable));
+        assert_eq!(three.height(), two.height() + 1);
+        match three.handle(key(KeyCode::Char('a'))) {
+            ModalResult::Close(Some(Command::KillSession(n))) => assert_eq!(n, "all"),
+            _ => panic!("expected the a-alt command"),
+        }
+    }
+
+    #[test]
     fn two_alt_footer_fits_within_width() {
         // Locks down MODAL_WIDTH_ALT2 against Task 7's kill-cleanup labels:
         // the rendered footer must fit the usable text column (width - H_PAD)
@@ -423,7 +466,9 @@ mod tests {
         assert_eq!(m.width(), MODAL_WIDTH_ALT2);
         assert_eq!(MODAL_WIDTH_ALT2, 90);
         let usable = m.width().saturating_sub(H_PAD) as usize;
-        let footer_cols = m.footer().chars().count();
+        let footer = m.footer_lines();
+        assert_eq!(footer.len(), 1, "two alts should still fit on one line");
+        let footer_cols = footer[0].chars().count();
         assert!(
             footer_cols <= usable,
             "footer is {footer_cols} cols but only {usable} are usable at width {}",

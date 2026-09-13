@@ -748,22 +748,23 @@ impl AppState {
         self.save_sidebar(out);
     }
 
-    /// Emit a confirm-modal that, on accept, kills every tmux
-    /// session inside the selected container. The sidebar row
-    /// disappears once `remove_session` walks all the way through
-    /// the container's tabs.
-    fn request_kill_container(&mut self, _out: &mut [Command]) {
+    /// The extra `a · kill all N tabs` choice for the `D` kill prompt
+    /// when the selected row is a container with more than one tab.
+    /// `None` for a single-tab row, where killing the tab already
+    /// removes the container. On accept every tmux session in the
+    /// container is killed; the row disappears once `remove_session`
+    /// walks all the way through its tabs.
+    fn kill_all_tabs_alt(&self) -> Option<(String, Command)> {
         let entry = self.sidebar.visible().get(self.selected).copied();
-        let Some(container) = entry.and_then(|e| e.container()) else {
-            return;
-        };
-        let display = container.name.clone();
+        let container = entry.and_then(|e| e.container())?;
+        if container.members.len() < 2 {
+            return None;
+        }
         let tabs = container.members.clone();
-        let title = "Kill all tabs in container?";
-        let msg = format!("This will kill all {} tab(s) in '{}'.", tabs.len(), display);
-        let cmd = Command::KillContainer { tabs };
-        self.modals
-            .push(Box::new(ConfirmModal::new(title, msg, cmd).destructive()));
+        Some((
+            format!("kill all {} tabs", tabs.len()),
+            Command::KillContainer { tabs },
+        ))
     }
 
     /// Whether `name`'s row has unviewed changes — its current pane
@@ -1313,8 +1314,20 @@ impl AppState {
         };
 
         match (k.code, normalized_mods) {
-            (KeyCode::Char('q'), KeyModifiers::NONE)
-            | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+            // Keys that act on a row, or leave bosun, are shifted (`Q`,
+            // `R`, `D`, `E`, `T`) and vim-style `j`/`k` navigation is
+            // gone, so typing into the sidebar when you meant to type
+            // into a session can't quit, rename, kill or open anything.
+            //
+            // Each of those arms also refuses Ctrl, so a Ctrl chord the
+            // terminal reports as the shifted letter (Ctrl+Shift+R is
+            // `Char('R')` + CTRL|SHIFT under the kitty protocol) falls
+            // through to its own Ctrl binding below instead of being
+            // swallowed here.
+            (KeyCode::Char('Q'), m) if !m.contains(KeyModifiers::CONTROL) => {
+                self.quit = true;
+            }
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 self.quit = true;
             }
             // Ctrl+L = force a full repaint. Standard TUI convention
@@ -1322,8 +1335,11 @@ impl AppState {
             // Cmd+R which clears the screen out from under ratatui's
             // diff-based renderer. (Focused mode handles Ctrl+L in the
             // App loop so the inner shell still gets its clear too.)
-            (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
+            // Also forces an immediate session-list refresh, which used
+            // to be Ctrl+R before that became restart.
+            (KeyCode::Char('l') | KeyCode::Char('L'), m) if m.contains(KeyModifiers::CONTROL) => {
                 self.force_redraw = true;
+                out.push(Command::ListNow);
             }
             // Ctrl+Shift+Down / Shift+J: reorder within bucket
             // (session) or move whole group (section header). Plain
@@ -1378,13 +1394,13 @@ impl AppState {
                     }
                 }
             }
-            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+            (KeyCode::Down, _) => {
                 let len = self.sidebar.len();
                 if len > 0 {
                     self.selected = (self.selected + 1).min(len - 1);
                 }
             }
-            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+            (KeyCode::Up, _) => {
                 self.selected = self.selected.saturating_sub(1);
             }
             // Enter = attach the selected session.
@@ -1404,63 +1420,65 @@ impl AppState {
             (KeyCode::Left, KeyModifiers::NONE) => {
                 self.cycle_active_tab(-1, out);
             }
-            (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
-                out.push(Command::ListNow);
-            }
-            (KeyCode::Char('r'), KeyModifiers::NONE) => match self.selected_location() {
-                Some(Location::Header(si)) => {
-                    let s = &self.sidebar.sections[si];
-                    if self.modals.top_id() != Some("section") {
-                        self.pending_modal = Some(ModalRequest::Section {
-                            editing: Some((s.id.clone(), s.name.clone())),
-                        });
+            (KeyCode::Char('R'), m) if !m.contains(KeyModifiers::CONTROL) => {
+                match self.selected_location() {
+                    Some(Location::Header(si)) => {
+                        let s = &self.sidebar.sections[si];
+                        if self.modals.top_id() != Some("section") {
+                            self.pending_modal = Some(ModalRequest::Section {
+                                editing: Some((s.id.clone(), s.name.clone())),
+                            });
+                        }
                     }
-                }
-                Some(_) => {
-                    if let Some(sel) = self.selected_session() {
-                        let internal = sel.name().to_string();
-                        let display = sel.display().to_string();
-                        self.modals
-                            .push(Box::new(RenameModal::new(internal, display)));
-                    }
-                }
-                None => {}
-            },
-            (KeyCode::Char('d'), KeyModifiers::NONE) => match self.selected_location() {
-                Some(Location::Header(si)) => {
-                    // Delete the section header; its members flow
-                    // back into ungrouped. No confirm — trivial to
-                    // re-add with `g`. Also drop any session_history
-                    // entries that pointed at this section name so a
-                    // later recreate doesn't re-place them into a
-                    // section the user just tore down.
-                    let gone_name = self.sidebar.sections[si].name.clone();
-                    self.sidebar.delete_section_at(si);
-                    self.clamp_selection();
-                    self.save_sidebar(out);
-                    let before = self.session_history.len();
-                    self.session_history.retain(|_, v| v != &gone_name);
-                    if self.session_history.len() != before {
-                        self.save_session_history(out);
-                    }
-                }
-                Some(_) => {
-                    if let Some(sel) = self.selected_session() {
-                        if let (Some(wt_path), Some(branch)) = (
-                            sel.session.worktree_path.clone(),
-                            sel.session.branch.clone(),
-                        ) {
+                    Some(_) => {
+                        if let Some(sel) = self.selected_session() {
                             let internal = sel.name().to_string();
                             let display = sel.display().to_string();
-                            let title = "Kill worktree session?";
-                            let msg = format!(
-                                "'{}' lives in a git worktree (branch {}).",
-                                display, branch
-                            );
-                            // Primary / Enter = keep the worktree (plain kill).
-                            let keep = Command::KillSession(internal.clone());
-                            self.modals.push(Box::new(
-                                ConfirmModal::new(title, msg, keep)
+                            self.modals
+                                .push(Box::new(RenameModal::new(internal, display)));
+                        }
+                    }
+                    None => {}
+                }
+            }
+            (KeyCode::Char('D'), m) if !m.contains(KeyModifiers::CONTROL) => {
+                match self.selected_location() {
+                    Some(Location::Header(si)) => {
+                        // Delete the section header; its members flow
+                        // back into ungrouped. No confirm — trivial to
+                        // re-add with `g`. Also drop any session_history
+                        // entries that pointed at this section name so a
+                        // later recreate doesn't re-place them into a
+                        // section the user just tore down.
+                        let gone_name = self.sidebar.sections[si].name.clone();
+                        self.sidebar.delete_section_at(si);
+                        self.clamp_selection();
+                        self.save_sidebar(out);
+                        let before = self.session_history.len();
+                        self.session_history.retain(|_, v| v != &gone_name);
+                        if self.session_history.len() != before {
+                            self.save_session_history(out);
+                        }
+                    }
+                    Some(_) => {
+                        // On a multi-tab container, whichever prompt opens
+                        // also offers `a · kill all N tabs`.
+                        let kill_all = self.kill_all_tabs_alt();
+                        if let Some(sel) = self.selected_session() {
+                            if let (Some(wt_path), Some(branch)) = (
+                                sel.session.worktree_path.clone(),
+                                sel.session.branch.clone(),
+                            ) {
+                                let internal = sel.name().to_string();
+                                let display = sel.display().to_string();
+                                let title = "Kill worktree session?";
+                                let msg = format!(
+                                    "'{}' lives in a git worktree (branch {}).",
+                                    display, branch
+                                );
+                                // Primary / Enter = keep the worktree (plain kill).
+                                let keep = Command::KillSession(internal.clone());
+                                let mut modal = ConfirmModal::new(title, msg, keep)
                                     .destructive()
                                     .with_alt(
                                         'm',
@@ -1481,38 +1499,48 @@ impl AppState {
                                             branch,
                                             merge: false,
                                         },
-                                    ),
-                            ));
-                        } else {
-                            let internal = sel.name().to_string();
-                            let display = sel.display().to_string();
-                            let title = "Kill session?";
-                            let msg = format!("This will kill '{}' and its pane.", display);
+                                    );
+                                if let Some((label, cmd)) = kill_all {
+                                    modal = modal.with_alt('a', label, cmd);
+                                }
+                                self.modals.push(Box::new(modal));
+                            } else {
+                                let internal = sel.name().to_string();
+                                let display = sel.display().to_string();
+                                let title = "Kill session?";
+                                let msg = format!("This will kill '{}' and its pane.", display);
+                                let mut modal =
+                                    ConfirmModal::new(title, msg, Command::KillSession(internal))
+                                        .destructive();
+                                if let Some((label, cmd)) = kill_all {
+                                    modal = modal.with_alt('a', label, cmd);
+                                }
+                                self.modals.push(Box::new(modal));
+                            }
+                        } else if let Some(internal) = self.selected_session_name() {
+                            // Dead/missing entry — the underlying tmux session
+                            // is gone (e.g. server restarted), but the sidebar
+                            // row remains so the user can decide whether to
+                            // remove it. Same command path; `kill_session` is
+                            // idempotent on missing sessions.
+                            let title = "Remove from sidebar?";
+                            let msg = format!(
+                                "'{}' is no longer a live tmux session. Remove the entry?",
+                                internal
+                            );
                             self.modals.push(Box::new(
                                 ConfirmModal::new(title, msg, Command::KillSession(internal))
                                     .destructive(),
                             ));
                         }
-                    } else if let Some(internal) = self.selected_session_name() {
-                        // Dead/missing entry — the underlying tmux session
-                        // is gone (e.g. server restarted), but the sidebar
-                        // row remains so the user can decide whether to
-                        // remove it. Same command path; `kill_session` is
-                        // idempotent on missing sessions.
-                        let title = "Remove from sidebar?";
-                        let msg = format!(
-                            "'{}' is no longer a live tmux session. Remove the entry?",
-                            internal
-                        );
-                        self.modals.push(Box::new(
-                            ConfirmModal::new(title, msg, Command::KillSession(internal))
-                                .destructive(),
-                        ));
                     }
+                    None => {}
                 }
-                None => {}
-            },
-            (KeyCode::Char('R'), _) => {
+            }
+            // Ctrl+R: restart the selected session. Shift+R is rename.
+            // Accepts `r` or `R` so Ctrl+Shift+R restarts too, whichever
+            // case the terminal reports.
+            (KeyCode::Char('r') | KeyCode::Char('R'), m) if m.contains(KeyModifiers::CONTROL) => {
                 if let Some(sel) = self.selected_session() {
                     // Live session — restart in place via the actor,
                     // which reads metadata off the live tmux session.
@@ -1565,7 +1593,7 @@ impl AppState {
                     // drops the new session back into its old section.
                     //
                     // We leave the dead row in place; once the new
-                    // session lands the user can `d` the old row.
+                    // session lands the user can `D` the old row.
                     // Pre-removing on confirm would be lost if the
                     // user hit Esc and the data isn't trivially
                     // recoverable from inside the modal flow.
@@ -1576,7 +1604,7 @@ impl AppState {
                         let title = "Restart from recents?";
                         let msg = format!(
                             "Recreate '{}' from its last-saved spec? \
-                             The old dead row stays — `d` to remove it after.",
+                             The old dead row stays — `D` to remove it after.",
                             display
                         );
                         let mut modal =
@@ -1611,7 +1639,7 @@ impl AppState {
             // from the session's persisted `@bosun_*` metadata so the
             // user can adjust flags (e.g. add `--resume`), rename,
             // change path, or switch agent. Save only — the running
-            // pane keeps its current agent; the next `R` picks up
+            // pane keeps its current agent; the next Ctrl+R picks up
             // the new spec.
             //
             // The pre-fill is async (tmux read), so we just emit the
@@ -1637,7 +1665,7 @@ impl AppState {
             // or when no container is selected. Active path picks
             // the container's existing path; the new tmux session
             // joins the container via `@bosun_container_id`.
-            (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
+            (KeyCode::Char('t') | KeyCode::Char('T'), m) if m.contains(KeyModifiers::CONTROL) => {
                 self.request_add_tab();
             }
             // `]` / `[`: cycle the active tab within the selected
@@ -1650,18 +1678,12 @@ impl AppState {
             (KeyCode::Char('['), KeyModifiers::NONE) => {
                 self.cycle_active_tab(-1, out);
             }
-            // Shift+D: kill the whole container — every tab plus
-            // the container itself. Distinct from plain `d` which
-            // only kills the active tab (and removes the container
-            // only when the last tab is gone). Mirrors how
-            // delete-section already works on headers.
-            (KeyCode::Char('D'), KeyModifiers::SHIFT) => {
-                self.request_kill_container(out);
-            }
             (KeyCode::Char('g'), KeyModifiers::NONE) if self.modals.top_id() != Some("section") => {
                 self.pending_modal = Some(ModalRequest::Section { editing: None });
             }
-            (KeyCode::Char('t'), KeyModifiers::NONE) if self.modals.top_id() != Some("theme") => {
+            (KeyCode::Char('T'), m)
+                if !m.contains(KeyModifiers::CONTROL) && self.modals.top_id() != Some("theme") =>
+            {
                 self.pending_modal = Some(ModalRequest::Theme);
             }
             // `s` (or `,`, the usual "preferences" key) opens the
@@ -1722,19 +1744,19 @@ impl AppState {
             }
             // `?` and `h` open the key-bindings cheat sheet. `h`
             // doesn't collide with anything else on the main list
-            // (we use arrows / j-k for navigation, not h-l), so it's
+            // (navigation is arrows only, no vim h-j-k-l), so it's
             // free to double as a "help" mnemonic alongside `?`.
             (KeyCode::Char('?'), _) | (KeyCode::Char('h'), KeyModifiers::NONE)
                 if self.modals.top_id() != Some("help") =>
             {
                 self.pending_modal = Some(ModalRequest::Help);
             }
-            // `e` opens the configured editor at the selected session's
+            // `E` opens the configured editor at the selected session's
             // path. Requires both an editor configured (`bosun editor
             // <cmd>` or `editor = "..."` in config.toml) and a session
             // with a known path — section headers and path-less rows
             // produce a status-bar warning instead.
-            (KeyCode::Char('e'), KeyModifiers::NONE) => {
+            (KeyCode::Char('E'), m) if !m.contains(KeyModifiers::CONTROL) => {
                 let editor = match self.editor.clone() {
                     Some(e) => e,
                     None => {
@@ -4424,10 +4446,141 @@ mod tests {
     }
 
     #[test]
-    fn q_quits() {
+    fn shift_q_quits() {
         let mut s = AppState::default();
-        s.apply(AppMsg::Key(key(KeyCode::Char('q'))));
+        s.apply(AppMsg::Key(key(KeyCode::Char('Q'))));
         assert!(s.quit);
+    }
+
+    /// Stray lowercase typing in the sidebar does nothing: the keys
+    /// that act on a row (or quit) are shifted, and j/k no longer move
+    /// the selection.
+    #[test]
+    fn unshifted_action_keys_are_inert() {
+        let mut s = state_with(vec![ses("a"), ses("b"), ses("c")], 1);
+        s.editor = Some("zed".into());
+        for c in ['q', 'r', 'd', 'e', 't', 'j', 'k'] {
+            // The first key also syncs the preview to the selected
+            // row; that's the reducer, not the key, so ignore it.
+            let out: Vec<_> = s
+                .apply(AppMsg::Key(key(KeyCode::Char(c))))
+                .into_iter()
+                .filter(|cmd| !matches!(cmd, Command::FocusPreview { .. }))
+                .collect();
+            assert!(out.is_empty(), "`{c}` emitted {out:?}");
+        }
+        assert!(!s.quit);
+        assert_eq!(s.selected, 1);
+        assert!(s.modals.is_empty());
+        assert!(s.pending_modal.is_none());
+    }
+
+    /// Ctrl+L redraws and forces a refresh (the refresh moved off Ctrl+R).
+    #[test]
+    fn ctrl_l_redraws_and_refreshes() {
+        let mut s = state_with(vec![ses("a")], 0);
+        let out = s.apply(AppMsg::Key(KeyEvent::new(
+            KeyCode::Char('l'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(s.force_redraw);
+        assert!(out.iter().any(|c| matches!(c, Command::ListNow)));
+    }
+
+    /// Ctrl+R opens the restart confirm; Enter restarts.
+    #[test]
+    fn ctrl_r_opens_restart_confirm() {
+        let mut s = state_with(vec![ses("a")], 0);
+        s.apply(AppMsg::Key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(s.modals.top_id(), Some("confirm"));
+        let out = s.apply(AppMsg::Key(key(KeyCode::Enter)));
+        assert!(
+            out.iter().any(|c| matches!(
+                c,
+                Command::RestartSession {
+                    continue_session: false,
+                    ..
+                }
+            )),
+            "expected RestartSession, got {out:?}"
+        );
+    }
+
+    /// Ctrl+Shift+R restarts as well. Terminals using the kitty
+    /// protocol report it as `Char('R')` + CTRL|SHIFT, which must not
+    /// land in the `R` rename arm.
+    #[test]
+    fn ctrl_shift_r_restarts_not_renames() {
+        let mut s = state_with(vec![ses("a")], 0);
+        s.apply(AppMsg::Key(KeyEvent::new(
+            KeyCode::Char('R'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+        assert_eq!(s.modals.top_id(), Some("confirm"));
+    }
+
+    /// Shift+R (no Ctrl) still opens rename.
+    #[test]
+    fn shift_r_opens_rename() {
+        let mut s = state_with(vec![ses("a")], 0);
+        s.apply(AppMsg::Key(KeyEvent::new(
+            KeyCode::Char('R'),
+            KeyModifiers::SHIFT,
+        )));
+        assert_eq!(s.modals.top_id(), Some("rename"));
+    }
+
+    /// Ctrl+Shift+T is add-tab, not the theme picker.
+    #[test]
+    fn ctrl_shift_t_is_not_theme() {
+        let mut s = state_with(vec![ses("a")], 0);
+        s.apply(AppMsg::Key(KeyEvent::new(
+            KeyCode::Char('T'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+        assert!(!matches!(s.pending_modal, Some(ModalRequest::Theme)));
+    }
+
+    /// A Ctrl chord never fires the shifted kill.
+    #[test]
+    fn ctrl_shift_d_does_not_kill() {
+        let mut s = state_with(vec![ses("a")], 0);
+        s.apply(AppMsg::Key(KeyEvent::new(
+            KeyCode::Char('D'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+        assert!(s.modals.is_empty());
+    }
+
+    /// `D` on a multi-tab container offers `a` to kill every tab.
+    #[test]
+    fn d_on_multi_tab_container_offers_kill_all() {
+        let mut s = state_with(vec![ses("a"), ses("b")], 0);
+        let mut c = Container::single("a".to_string(), "a".to_string());
+        c.members.push("b".to_string());
+        s.sidebar.ungrouped = vec![c];
+        s.apply(AppMsg::Key(key(KeyCode::Char('D'))));
+        assert_eq!(s.modals.top_id(), Some("confirm"));
+        let out = s.apply(AppMsg::Key(key(KeyCode::Char('a'))));
+        assert!(
+            out.iter()
+                .any(|c| matches!(c, Command::KillContainer { tabs } if tabs.len() == 2)),
+            "expected KillContainer, got {out:?}"
+        );
+    }
+
+    /// A single-tab row's kill prompt has no `a` choice.
+    #[test]
+    fn d_on_single_tab_has_no_kill_all() {
+        let mut s = state_with(vec![ses("a")], 0);
+        s.apply(AppMsg::Key(key(KeyCode::Char('D'))));
+        assert_eq!(s.modals.top_id(), Some("confirm"));
+        let out = s.apply(AppMsg::Key(key(KeyCode::Char('a'))));
+        assert!(out.is_empty(), "expected no command, got {out:?}");
+        assert_eq!(s.modals.top_id(), Some("confirm"));
     }
 
     #[test]
@@ -5056,7 +5209,7 @@ mod tests {
         assert!(s.sidebar.sections[0].members.is_empty());
     }
 
-    /// `d` on a section header dissolves it — members go to ungrouped.
+    /// `D` on a section header dissolves it — members go to ungrouped.
     #[test]
     fn d_on_section_dissolves_members_to_ungrouped() {
         let mut s = AppState::default();
@@ -5064,7 +5217,7 @@ mod tests {
         s.sidebar = model(&["a"], vec![section("g1", "Work", &["b"])]);
         s.selected = 1; // g1 header
 
-        s.apply(AppMsg::Key(key(KeyCode::Char('d'))));
+        s.apply(AppMsg::Key(key(KeyCode::Char('D'))));
 
         assert_eq!(shape(&s.sidebar), shape(&model(&["a", "b"], vec![])));
         assert_eq!(s.selected, 1); // stays at the old header position (now b)
@@ -5098,13 +5251,13 @@ mod tests {
         assert!(matches!(s.pending_modal, Some(ModalRequest::Help)));
     }
 
-    /// `r` on a selected section requests the rename modal in edit mode.
+    /// `R` on a selected section requests the rename modal in edit mode.
     #[test]
     fn r_on_section_requests_rename() {
         let mut s = AppState::default();
         s.sidebar = model(&[], vec![section("g1", "Work", &[])]);
         s.selected = 0;
-        s.apply(AppMsg::Key(key(KeyCode::Char('r'))));
+        s.apply(AppMsg::Key(key(KeyCode::Char('R'))));
         match &s.pending_modal {
             Some(ModalRequest::Section {
                 editing: Some((id, name)),
@@ -5499,7 +5652,7 @@ mod tests {
             .insert("bosun-abc".to_string(), "Work".to_string());
         s.selected = 0;
 
-        s.apply(AppMsg::Key(key(KeyCode::Char('d'))));
+        s.apply(AppMsg::Key(key(KeyCode::Char('D'))));
 
         assert!(s.session_history.is_empty());
     }

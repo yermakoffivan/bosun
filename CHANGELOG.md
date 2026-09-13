@@ -4,6 +4,15 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.13] — 2026-09-13
+
+### Changed
+- **Sidebar keys that act on a session are now shifted.** Typing into the sidebar when you thought a session had focus used to rename, kill or re-theme things, or quit bosun outright. Those keys now need Shift: `R` renames, `D` kills, `E` opens the editor, `T` opens the theme picker and `Q` quits.
+- **Restart moved to `Ctrl+R`**, since `R` is now rename. The force-refresh that used to live on `Ctrl+R` now comes with `Ctrl+L`, which redraws and refreshes.
+- **Killing a whole container is now a choice inside the `D` prompt.** On a multi-tab container the prompt adds `a · kill all N tabs`, and `Shift+D` no longer has its own binding. When the prompt has three choices (a worktree tab in a multi-tab container) its footer wraps onto a second line.
+- **No more vim-style `j`/`k` in the sidebar.** A stray `k` moved the selection, so the next keystroke landed on a different session. Arrow keys move the selection and `J`/`K` still reorder. The help, theme and settings panels keep `j`/`k`.
+- **Ctrl chords don't collide with the shifted keys.** Terminals using the kitty protocol report Ctrl+Shift+R as `R` with Ctrl+Shift held, which landed on rename instead of restart (and Ctrl+Shift+T opened the theme picker instead of adding a tab). Restart now takes `Ctrl+R` or `Ctrl+Shift+R`, add-tab takes `Ctrl+T` or `Ctrl+Shift+T`, and `R`, `D`, `E`, `T` and `Q` ignore anything with Ctrl held.
+
 ## [2.1.12] — 2026-09-02
 
 ### Fixed

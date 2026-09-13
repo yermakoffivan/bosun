@@ -749,7 +749,7 @@ pub fn spawn(
                     }
                     if !any_err {
                         let _ = evt_tx.send(AppMsg::Warn(format!(
-                            "modified {} — press R to apply",
+                            "modified {} — press Ctrl+R to apply",
                             spec.name
                         )));
                     }

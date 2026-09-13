@@ -30,7 +30,7 @@ architecture, designed around a few rules that keep it simple and robust:
   themes — ten dark (opencode, tokyonight, dracula, catppuccin-mocha,
   one-dark-pro, ayu-mirage, nord, gruvbox-dark, rose-pine, github-dark)
   and five light (github-light, one-light, solarized-light, ayu-light,
-  quiet-light) — switched live with `t`.
+  quiet-light) — switched live with `T`.
 
 ## What's new in 2.0
 
@@ -60,14 +60,14 @@ you can click into and drive without leaving bosun.
   (`g` to create, Tab to collapse). Persisted in `config.toml`. Banner
   fonts cyclable per-section (`f` on a header) for visual distinction
   in the preview pane.
-- **Editor key (`e`).** With a session highlighted, press `e` to open
+- **Editor key (`E`).** With a session highlighted, press `E` to open
   the session's path in your configured editor (`zed`, `code`, `subl`,
   `nvim`, etc.). Set it once with `bosun editor <cmd>`.
 - **Modify session (`m`).** Open the new-session modal pre-filled
   from the highlighted session's stored spec — change the name,
   path, agent, or flags (e.g. add `--resume` after the fact).
   Save-only: the running agent keeps its current flags; the next
-  `R` (restart) picks up the new spec.
+  `Ctrl+R` (restart) picks up the new spec.
 - **Tabs inside a sidebar entry.** Each sidebar row is now a
   *container* that can hold multiple tmux sessions ("tabs"),
   surfaced as a browser-style strip above the embed with a `+`
@@ -81,8 +81,9 @@ you can click into and drive without leaving bosun.
   up a small accent dot when any background tab is busy.
   `Shift+→ / Shift+←` cycle tabs, `Shift+↓ / Shift+↑` cycle
   sessions — same chord in both sidebar and focused modes.
-  `Shift+D` kills a whole container at once; plain `d` kills the
-  active tab (drops the container when the last tab goes).
+  `D` kills the active tab (drops the container when the last tab
+  goes); on a multi-tab container its prompt adds `a` to kill every
+  tab at once.
 - **Sidebar-order session cycle.** Shift+↓ / Shift+↑ walk the
   next / previous live session in sidebar order (stable, not
   MRU-shuffled), in both sidebar and focused modes. Sidebar
@@ -104,7 +105,7 @@ you can click into and drive without leaving bosun.
 - Embedded live preview of the selected session — real PTY in the
   right pane, focusable in place via single-window mode
 - Tabs (multi-session containers) per sidebar row with a browser-
-  style tab strip, `Ctrl+T` / `+` to add, `Shift+D` to nuke the
+  style tab strip, `Ctrl+T` / `+` to add, `D` then `a` to nuke the
   whole container, per-tab status glyphs, and survival across tmux
   restart via `@bosun_container_id`
 - Sections for organizing sessions, collapsible, persisted in
@@ -124,14 +125,14 @@ you can click into and drive without leaving bosun.
   SQLite, with live substring filter and delete-from-list
 - Quick-switch (`/`) — type-ahead session picker against name / agent /
   path
-- Session lifecycle: attach (`Enter`), rename (`r`), restart (`R`),
-  modify (`m`), kill (`d`), open in editor (`e`)
+- Session lifecycle: attach (`Enter`), rename (`R`), restart (`Ctrl+R`),
+  modify (`m`), kill (`D`), open in editor (`E`)
 - In-progress feedback while a session operation is in flight — the
   affected row shows a `⟳` marker and a `killing…` / `restarting…`
   label; a create (which has no row yet) shows `⟳ creating <name>…` in
   the status bar. Clears the moment the operation lands
 - Fifteen built-in themes (10 dark + 5 light) plus user themes from
-  `$XDG_CONFIG_HOME/bosun/themes/*.toml`; live preview picker on `t`
+  `$XDG_CONFIG_HOME/bosun/themes/*.toml`; live preview picker on `T`
 - Two-way mouse navigation: click rows to jump, click the embed to focus,
   drag the divider to resize
 - Config file at `$XDG_CONFIG_HOME/bosun/config.toml` with `theme`,
@@ -199,7 +200,7 @@ machinery starts.
 | `bosun update --check` | Report whether an update is available; don't install |
 | `bosun release-notes` | Open the changelog entry for the running version |
 | `bosun editor` | Print the currently configured editor |
-| `bosun editor <cmd>` | Set the editor used by the `e` key (e.g. `bosun editor zed`) |
+| `bosun editor <cmd>` | Set the editor used by the `E` key (e.g. `bosun editor zed`) |
 | `bosun editor ""` | Clear the configured editor |
 | `bosun help` / `--help` / `-h` | Print usage |
 | `bosun --version` / `-V` | Print version |
@@ -208,12 +209,14 @@ machinery starts.
 
 The full list is available at any time inside bosun with `?` or `h`.
 
+Keys that act on a session, or quit, are shifted (`R`, `D`, `E`, `T`, `Q`) and there's no vim-style `j`/`k` navigation, so typing into the sidebar when you meant to type into a session can't rename, kill or open anything.
+
 ### Main list — navigation
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` / `k` / `j` | Move selection |
-| `Enter` / `→` | Attach (or focus, in single-window mode) |
+| `↑` / `↓` | Move selection |
+| `Enter` | Attach (or focus, in single-window mode) |
 | `Tab` | Collapse / expand section (on a section header) |
 | `/` | Quick-switch — type-ahead session picker |
 | Mouse wheel | Scroll session list |
@@ -225,13 +228,13 @@ The full list is available at any time inside bosun with `?` or `h`.
 | Key | Action |
 |-----|--------|
 | `n` | New session |
-| `r` | Rename selected session (on a header: rename the section) |
-| `R` | Restart — kill + recreate with the same spec |
-| `m` | Modify session (name, path, agent, flags) — applies on next `R` |
-| `d` | Kill active tab (on a header: delete the section; killing the last tab removes the container) |
-| `Shift+D` | Kill the whole container — every tab at once |
-| `e` | Open the session's path in your configured editor |
-| `Ctrl+R` | Force immediate refresh |
+| `R` | Rename selected session (on a header: rename the section) |
+| `Ctrl+R` | Restart — kill + recreate with the same spec |
+| `m` | Modify session (name, path, agent, flags) — applies on next `Ctrl+R` |
+| `D` | Kill active tab (on a header: delete the section; killing the last tab removes the container) |
+| `a` in the `D` prompt | Kill the whole container — every tab at once (multi-tab containers only) |
+| `E` | Open the session's path in your configured editor |
+| `Ctrl+L` | Redraw the screen and refresh the session list |
 
 Killing a session that lives in a git worktree opens a dialog with three
 choices: `m` merges the branch and removes the worktree, `x` removes the
@@ -270,11 +273,10 @@ place. A dirty (uncommitted) worktree is never removed.
 
 | Key | Action |
 |-----|--------|
-| `s` | Toggle single-window mode (preview pane becomes the workspace) |
 | `s` or `,` | Settings panel — the `config.toml` options, editable in place |
-| `t` | Theme picker (`↑`/`↓` live-preview, Enter applies + persists) |
+| `T` | Theme picker (`↑`/`↓` live-preview, Enter applies + persists) |
 | `?` / `h` | Show the help cheat sheet |
-| `q` / `Ctrl+C` | Quit |
+| `Q` / `Ctrl+C` | Quit |
 
 ### Inside an attached or focused session
 
@@ -391,10 +393,10 @@ tmux user options so the change persists; the recents picker also
 reflects the new spec on the next open.
 
 The save is **non-destructive**: the running agent process keeps its
-existing flags. The next time you press `R` (restart), the new spec
+existing flags. The next time you press `Ctrl+R` (restart), the new spec
 is what gets recreated — same code path Restart already uses. So the
 common "I forgot to launch Claude with `--resume`" recovery becomes
-`m` → cycle the session-mode field to `Resume` → Enter → `R`.
+`m` → cycle the session-mode field to `Resume` → Enter → `Ctrl+R`.
 
 Modifying works the same whether you're focused in the embed or
 sitting on the row from the sidebar.
@@ -442,7 +444,7 @@ events itself. The big interactions:
 
 ## Themes
 
-Fifteen themes ship built in (ten dark, five light). Press `t` on the
+Fifteen themes ship built in (ten dark, five light). Press `T` on the
 main list to open the picker — arrow keys live-preview the whole UI
 including the modal itself, `Enter` applies and writes the choice to
 `config.toml`, `Esc` reverts.
@@ -521,7 +523,7 @@ max_fps          = 60           # ceiling on repaints per second; 0 turns pacing
 single_window    = true         # `s` key persists this; Enter focuses in-place instead of full-screen attach
 embed_enabled    = true         # set false to fall back to the polled-snapshot preview
 show_group_in_title = false      # prefix grouped sessions as "group/session" in tab pills and terminal title
-editor           = "zed"        # set via `bosun editor <cmd>`; used by the `e` key
+editor           = "zed"        # set via `bosun editor <cmd>`; used by the `E` key
 banner_font      = "newsx"      # section banner font; cycled with `f` on a header
 default_agent    = "opencode"   # agent preselected for new sessions; defaults to "claude"
 remove_dead_sessions = false    # true drops a session's sidebar row when its tmux session ends,
@@ -644,7 +646,7 @@ src/
   commands/
     update.rs                self-update via GitHub releases
     release_notes.rs         open changelog for the running version
-    editor.rs                get/set the editor used by the `e` key
+    editor.rs                get/set the editor used by the `E` key
   store/
     mod.rs / recents.rs      SQLite-backed recents
   tmux/

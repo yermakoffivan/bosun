@@ -192,7 +192,8 @@ pub enum Command {
         merge: bool,
     },
     /// Kill every tmux session named in `tabs` in one batch — used
-    /// by `Shift+D` to tear down all tabs in a container at once.
+    /// by `a` in the `D` kill prompt to tear down all tabs in a
+    /// container at once.
     /// The actor iterates `KillSession` for each name; sidebar
     /// reconcile drops the now-empty container on the next
     /// refresh.

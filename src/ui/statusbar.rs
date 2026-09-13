@@ -39,7 +39,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
     let left = Line::from(left_spans);
 
     let right =
-        "↵ attach · n new · e edit · g group · 1-9 move · r ren · d kill · t theme · ? help · q quit ";
+        "↵ attach · n new · E edit · g group · 1-9 move · R ren · D kill · T theme · ? help · Q quit ";
     let hint_style = Style::default().fg(theme.text_muted).bg(bg);
 
     let width = area.width as usize;
