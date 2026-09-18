@@ -68,6 +68,9 @@ with (root / 'input').open('ab', buffering=0) as out:
             "sink",
             &command,
         ]);
+        // Feed synthetic keystrokes as a batch without tmux 3.4 treating
+        // their sub-millisecond timing as a paste and skipping key bindings.
+        s.tmux(&["set-option", "-t", "sink", "assume-paste-time", "0"]);
         wait_until(|| s.dir.path().join("ready").exists());
         ensure_ctrl_q_bound(Some(&s.socket));
         s.original_root = s.tmux(&["list-keys", "-T", "root"]);
