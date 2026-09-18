@@ -31,6 +31,7 @@ const KEY_COL_WIDTH: usize = 22;
 enum Row {
     Section(&'static str),
     Binding(&'static str, &'static str),
+    Shortcut(crate::keybindings::Action, &'static str),
     Legend(&'static str, Tint, &'static str),
     Blank,
 }
@@ -51,6 +52,7 @@ enum Tint {
 
 pub struct HelpModal {
     rows: Vec<Row>,
+    keybindings: crate::keybindings::KeyBindings,
     /// First row index currently visible. Up/Down scroll this; the
     /// renderer clamps it against the viewport height computed each
     /// frame (the modal doesn't know the terminal height until then).
@@ -69,7 +71,12 @@ impl Default for HelpModal {
 
 impl HelpModal {
     pub fn new() -> Self {
+        Self::with_keybindings(&crate::keybindings::KeyBindings::default())
+    }
+
+    pub fn with_keybindings(keybindings: &crate::keybindings::KeyBindings) -> Self {
         Self {
+            keybindings: keybindings.clone(),
             rows: build_rows(),
             scroll: 0,
             viewport: std::cell::Cell::new(0),
@@ -203,7 +210,7 @@ impl Modal for HelpModal {
         lines.push(Line::from(""));
 
         for row in self.rows.iter().skip(scroll).take(viewport) {
-            lines.push(render_row(row, theme, body_bg));
+            lines.push(render_row(row, theme, body_bg, &self.keybindings));
         }
 
         Paragraph::new(lines)
@@ -212,7 +219,40 @@ impl Modal for HelpModal {
     }
 }
 
-fn render_row(row: &Row, theme: &Theme, bg: ratatui::style::Color) -> Line<'static> {
+fn render_binding(
+    keys: &str,
+    action: &str,
+    theme: &Theme,
+    bg: ratatui::style::Color,
+) -> Line<'static> {
+    // Pad the keys column so action labels line up. Counting
+    // chars (not bytes) keeps the alignment honest when the
+    // key string includes arrows or other multi-byte glyphs.
+    let mut key_padded = format!("  {}", keys);
+    while key_padded.chars().count() < KEY_COL_WIDTH {
+        key_padded.push(' ');
+    }
+    Line::from(vec![
+        Span::styled(
+            key_padded,
+            Style::default()
+                .fg(theme.text)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            action.to_string(),
+            Style::default().fg(theme.text_muted).bg(bg),
+        ),
+    ])
+}
+
+fn render_row(
+    row: &Row,
+    theme: &Theme,
+    bg: ratatui::style::Color,
+    bindings: &crate::keybindings::KeyBindings,
+) -> Line<'static> {
     match row {
         Row::Section(name) => Line::from(vec![Span::styled(
             (*name).to_string(),
@@ -221,27 +261,9 @@ fn render_row(row: &Row, theme: &Theme, bg: ratatui::style::Color) -> Line<'stat
                 .bg(bg)
                 .add_modifier(Modifier::BOLD),
         )]),
-        Row::Binding(keys, action) => {
-            // Pad the keys column so action labels line up. Counting
-            // chars (not bytes) keeps the alignment honest when the
-            // key string includes arrows or other multi-byte glyphs.
-            let mut key_padded = format!("  {}", keys);
-            while key_padded.chars().count() < KEY_COL_WIDTH {
-                key_padded.push(' ');
-            }
-            Line::from(vec![
-                Span::styled(
-                    key_padded,
-                    Style::default()
-                        .fg(theme.text)
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    (*action).to_string(),
-                    Style::default().fg(theme.text_muted).bg(bg),
-                ),
-            ])
+        Row::Binding(keys, action) => render_binding(keys, action, theme, bg),
+        Row::Shortcut(action, description) => {
+            render_binding(bindings.label(*action), description, theme, bg)
         }
         Row::Legend(glyph, tint, meaning) => {
             let color = match tint {
@@ -396,13 +418,33 @@ fn build_rows() -> Vec<Row> {
         Blank,
         Section("Inside attached session"),
         Binding("Ctrl+Q", "Detach back to bosun"),
-        Binding(
-            "Shift+→ / Shift+←",
-            "Cycle next / prev tab within the current container",
+        Shortcut(
+            crate::keybindings::Action::PreviousTab,
+            "Previous tab (full-screen: recent session)",
+        ),
+        Shortcut(
+            crate::keybindings::Action::NextTab,
+            "Next tab (full-screen: recent session)",
+        ),
+        Shortcut(
+            crate::keybindings::Action::PreviousSession,
+            "Previous session (full-screen: recent session)",
+        ),
+        Shortcut(
+            crate::keybindings::Action::NextSession,
+            "Next session (full-screen: recent session)",
+        ),
+        Shortcut(
+            crate::keybindings::Action::SendNextKey,
+            "Send next key to app; press twice to send itself",
         ),
         Binding(
-            "Shift+↓ / Shift+↑",
-            "Cycle next / prev session in sidebar order",
+            "[keybindings]",
+            "Remap in config.toml; \"none\" disables; restart",
+        ),
+        Binding(
+            "After send-next-key",
+            "Next key bypasses Bosun and tmux shortcuts once",
         ),
         Binding("Option+← / Option+→", "Move cursor by word"),
         Binding("Option+Delete", "Delete previous word"),
@@ -452,6 +494,44 @@ fn build_rows() -> Vec<Row> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_renders_configured_shortcuts_and_disabled_actions() {
+        use crate::keybindings::BindingsConfig;
+        let keys = BindingsConfig {
+            next_tab: "Ctrl+Shift+Right".into(),
+            previous_tab: "none".into(),
+            send_next_key: "F12".into(),
+            ..Default::default()
+        }
+        .resolve()
+        .unwrap();
+        let modal = HelpModal::with_keybindings(&keys);
+        let theme = Theme::default_opencode();
+        let lines: Vec<String> = modal
+            .rows
+            .iter()
+            .map(|row| {
+                render_row(row, &theme, theme.panel, &modal.keybindings)
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert!(lines
+            .iter()
+            .any(|s| s.contains("Ctrl+Shift+Right") && s.contains("Next tab")));
+        assert!(lines
+            .iter()
+            .any(|s| s.contains("disabled") && s.contains("Previous tab")));
+        assert!(lines
+            .iter()
+            .any(|s| s.contains("F12") && s.contains("Send next key")));
+        assert!(lines
+            .iter()
+            .any(|s| s.contains("[keybindings]") && s.contains("none")));
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

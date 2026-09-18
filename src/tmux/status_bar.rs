@@ -171,7 +171,13 @@ fn build_hint(socket: Option<&str>) -> String {
     } else {
         prefix.as_str()
     };
-    format!("#[fg=#7c8495]^Q detach · S-←→ cycle · {} 1-9 jump ", prefix)
+    let navigation = show_option(socket, crate::tmux::attach::HINT_OPTION);
+    let navigation = if navigation.is_empty() {
+        "Shift+Left / Shift+Right cycle · Ctrl+v send next"
+    } else {
+        navigation.as_str()
+    };
+    format!("#[fg=#7c8495]^Q detach · {navigation} · {prefix} 1-9 jump ")
 }
 
 /// Wrap `s` in double quotes for passing through tmux's own argv parser.
@@ -243,7 +249,8 @@ mod tests {
     #[test]
     fn hint_includes_shift_arrow_cycle() {
         let hint = build_hint(None);
-        assert!(hint.contains("S-←→ cycle"));
+        assert!(hint.contains("cycle"));
+        assert!(hint.contains("send next"));
         assert!(hint.contains("^Q detach"));
         assert!(hint.contains("1-9 jump"));
     }

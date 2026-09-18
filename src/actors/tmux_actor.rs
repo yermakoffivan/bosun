@@ -46,7 +46,7 @@ use crate::events::{AppMsg, ClaudeSessionMode, Command, SessionSpec, SpecOptions
 use crate::store::Store;
 use crate::tmux::attach::{
     clear_ctrl_q_bound, clear_quick_jump_bound, clear_session_cycle_bound, ensure_ctrl_q_bound,
-    ensure_quick_jump_bound, ensure_session_cycle_bound,
+    ensure_keybindings_bound, ensure_quick_jump_bound,
 };
 use crate::tmux::control::Notification;
 use crate::tmux::control_client::ControlClient;
@@ -216,22 +216,6 @@ pub fn spawn(
             last_self_heal: std::time::Instant::now(),
         };
 
-        // Install the C-q detach binding up-front so it's live even
-        // before the first tmux notification arrives. `do_refresh`
-        // re-asserts it on every tick — cheap, and guards against
-        // anything that clobbers the root key table mid-session.
-        ensure_ctrl_q_bound(socket.as_deref());
-        globals.cq_installed = true;
-
-        // Install the S-Left / S-Right MRU session cycle bindings. Same
-        // self-heal pattern as C-q: do_refresh re-asserts every tick.
-        ensure_session_cycle_bound(socket.as_deref());
-        globals.cycle_installed = true;
-
-        // Install the M-O quick-jump popup binding. Same self-heal.
-        ensure_quick_jump_bound(socket.as_deref());
-        globals.quick_jump_installed = true;
-
         // Start the control-mode monitor subprocess. The guard is
         // held for the lifetime of the actor — dropping it on exit
         // kills the subprocess. `notifs` is the receive side of a
@@ -248,6 +232,20 @@ pub fn spawn(
                 (None, None)
             }
         };
+
+        // The monitor has started the server; install input bindings before
+        // accepting session commands, including on a fresh Bosun socket.
+        ensure_ctrl_q_bound(socket.as_deref());
+        globals.cq_installed = true;
+
+        // Configured navigation and send-next-key share C-q's self-healing
+        // lifecycle and are restored when the actor exits.
+        ensure_keybindings_bound(socket.as_deref(), &config.keybindings);
+        globals.cycle_installed = true;
+
+        // Install the M-O quick-jump popup binding. Same self-heal.
+        ensure_quick_jump_bound(socket.as_deref());
+        globals.quick_jump_installed = true;
 
         // Internal 1Hz refresh timer. Control-mode notifications
         // drive session/window lifecycle updates, but tmux doesn't
@@ -1589,7 +1587,7 @@ async fn do_refresh(
         globals.last_self_heal = std::time::Instant::now();
         ensure_ctrl_q_bound(socket);
         // Same self-heal for the S-Left / S-Right cycle bindings.
-        ensure_session_cycle_bound(socket);
+        ensure_keybindings_bound(socket, &config.keybindings);
         // And for the M-O quick-jump popup binding.
         ensure_quick_jump_bound(socket);
     }

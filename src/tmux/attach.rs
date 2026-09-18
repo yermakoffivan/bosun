@@ -83,10 +83,9 @@ fn run_attach(socket: Option<&str>, name: &str) -> Result<()> {
 /// binds) if Bosun crashes.
 /// Uses `output()` so any error text is captured instead of spilled.
 pub fn emergency_unbind(socket: Option<&str>) {
+    clear_session_cycle_bound(socket);
     let runs: &[&[&str]] = &[
         &["unbind-key", "-T", "root", "C-q"],
-        &["unbind-key", "-n", "S-Left"],
-        &["unbind-key", "-n", "S-Right"],
         &["unbind-key", "-T", "prefix", "o"],
     ];
     for args in runs {
@@ -105,9 +104,8 @@ pub fn emergency_unbind(socket: Option<&str>) {
 ///
 /// We use shift+arrow instead of option+arrow because tmux's default
 /// `M-Left`/`M-Right` bindings (pane navigation) are still useful even
-/// inside bosun's tmux server. `S-Left`/`S-Right` default to
-/// `previous-window`/`next-window` — bosun sessions don't use multiple
-/// windows, so reclaiming those keys costs us nothing.
+/// inside bosun's tmux server. Applications may also use these keys;
+/// configured navigation and send-next-key let them reach the application.
 ///
 /// - `S-Left` (shift+left) → the single most-recently-attached session
 ///   other than the current one. Acts as a fast A↔B toggle.
@@ -124,6 +122,14 @@ pub fn emergency_unbind(socket: Option<&str>) {
 /// Idempotent — `bind-key` overwrites. Failures are logged but not
 /// returned: a transient hiccup on a refresh tick shouldn't bubble up.
 pub fn ensure_session_cycle_bound(socket: Option<&str>) {
+    ensure_keybindings_bound(socket, &crate::keybindings::KeyBindings::default());
+}
+
+/// Install configured navigation and a one-key tmux bypass. Save overwritten
+/// root bindings on the server so shutdown (including panic cleanup) restores
+/// them, and repeated self-healing never mistakes our bindings for originals.
+pub fn ensure_keybindings_bound(socket: Option<&str>, keys: &crate::keybindings::KeyBindings) {
+    use crate::keybindings::Action;
     let tmux = match socket {
         Some(s) => format!("tmux -L {}", shell_quote(s)),
         None => "tmux".to_string(),
@@ -154,7 +160,7 @@ pub fn ensure_session_cycle_bound(socket: Option<&str>) {
          | sort -rnk1 \
          | awk -v cur=\"$({tmux} display-message -p '##S')\" \
                '$2 != cur && $2 != \"{exclude}\" {{print $2; exit}}'); \
-         [ -n \"$T\" ] && {tmux} switch-client -t \"$T\""
+         if [ -n \"$T\" ]; then {tmux} switch-client -t \"$T\"; fi"
     );
 
     // shift+Right → 2nd non-current in MRU desc order, fall back to 1st.
@@ -166,33 +172,156 @@ pub fn ensure_session_cycle_bound(socket: Option<&str>) {
                '$2 != cur && $2 != \"{exclude}\" {{print $2}}'); \
          T=$(printf '%s\\n' \"$L\" | sed -n '2p'); \
          [ -z \"$T\" ] && T=$(printf '%s\\n' \"$L\" | sed -n '1p'); \
-         [ -n \"$T\" ] && {tmux} switch-client -t \"$T\""
+         if [ -n \"$T\" ]; then {tmux} switch-client -t \"$T\"; fi"
     );
 
-    for (key, body) in [("S-Left", &left_cmd), ("S-Right", &right_cmd)] {
-        let out = sync_tmux(socket, ["bind-key", "-n", key, "run-shell", body]).output();
-        match out {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                tracing::warn!("bind-key {}: {}", key, stderr.trim());
+    let mut plan: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    // tmux ships root S-Left/S-Right window bindings. Explicit forwarding
+    // releases those keys when navigation is disabled or moved elsewhere.
+    for key in ["S-Left", "S-Right"] {
+        plan.insert(key.into(), vec!["send-keys".into()]);
+    }
+    for (action, key) in &keys.0 {
+        let command = match action {
+            Action::PreviousTab | Action::PreviousSession => {
+                vec!["run-shell".into(), left_cmd.clone()]
             }
-            Err(e) => tracing::warn!("bind-key {}: {}", key, e),
+            Action::NextTab | Action::NextSession => vec!["run-shell".into(), right_cmd.clone()],
+            Action::SendNextKey => vec![
+                "switch-client".into(),
+                "-T".into(),
+                QUOTE_TABLE.into(),
+                "\\;".into(),
+                "display-message".into(),
+                "Send next key to app…".into(),
+            ],
+        };
+        plan.insert(key.tmux.clone(), command);
+    }
+
+    let mut saved = saved_bindings(socket);
+    // A previous process may have stopped before cleanup. Restore keys no
+    // longer owned by this configuration before installing the new mapping.
+    let removed: Vec<_> = saved
+        .keys()
+        .filter(|key| !plan.contains_key(*key))
+        .cloned()
+        .collect();
+    for key in removed {
+        if let Some(original) = saved.remove(&key) {
+            restore_binding(socket, &key, &original);
+        }
+    }
+    let current = sync_tmux(socket, ["list-keys", "-T", "root"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    for key in plan.keys() {
+        if !saved.contains_key(key) {
+            let old = current
+                .lines()
+                .find(|line| {
+                    line.split_whitespace().skip_while(|s| *s != "-T").nth(2) == Some(key.as_str())
+                })
+                .map(|line| format!("{line}\n"))
+                .unwrap_or_default();
+            saved.insert(key.clone(), old);
+        }
+    }
+    // Persist before any mutation so cleanup can recover after a partial install.
+    let serialized = serde_json::to_string(&saved).expect("serialize binding map");
+    if !binding_command(socket, &["set-option", "-g", RESTORE_OPTION, &serialized]) {
+        return;
+    }
+    binding_command(socket, &["bind-key", "-T", QUOTE_TABLE, "Any", "send-keys"]);
+    for (key, command) in plan {
+        let mut args = vec!["bind-key", "-T", "root", key.as_str()];
+        args.extend(command.iter().map(String::as_str));
+        binding_command(socket, &args);
+    }
+    let hint = format!(
+        "{} / {} cycle · {} send next",
+        keys.label(Action::PreviousTab),
+        keys.label(Action::NextTab),
+        keys.label(Action::SendNextKey)
+    );
+    binding_command(socket, &["set-option", "-g", HINT_OPTION, &hint]);
+}
+
+const QUOTE_TABLE: &str = "bosun-send-next";
+const RESTORE_OPTION: &str = "@bosun_input_restore";
+pub const HINT_OPTION: &str = "@bosun_input_hint";
+
+fn binding_command(socket: Option<&str>, args: &[&str]) -> bool {
+    match sync_tmux(socket, args.iter().copied()).output() {
+        Ok(o) if o.status.success() => true,
+        Ok(o) => {
+            tracing::warn!(
+                "tmux input binding: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            false
+        }
+        Err(e) => {
+            tracing::warn!("tmux input binding: {e}");
+            false
         }
     }
 }
 
-/// Remove the S-Left / S-Right cycle bindings. Called on clean actor
-/// shutdown.
+fn saved_bindings(socket: Option<&str>) -> std::collections::BTreeMap<String, String> {
+    sync_tmux(socket, ["show-options", "-gqv", RESTORE_OPTION])
+        .output()
+        .ok()
+        .and_then(|o| serde_json::from_slice(&o.stdout).ok())
+        .unwrap_or_default()
+}
+
+/// Restore the root table, including tmux's original Shift+arrow bindings,
+/// and remove our one-shot table. Used on normal shutdown and by the panic hook.
 pub fn clear_session_cycle_bound(socket: Option<&str>) {
-    for key in ["S-Left", "S-Right"] {
-        let out = sync_tmux(socket, ["unbind-key", "-n", key]).output();
-        if let Ok(o) = out {
-            if !o.status.success() {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                tracing::warn!("unbind-key {}: {}", key, stderr.trim());
+    for (key, original) in saved_bindings(socket) {
+        restore_binding(socket, &key, &original);
+    }
+    binding_command(socket, &["unbind-key", "-a", "-T", QUOTE_TABLE]);
+    binding_command(socket, &["set-option", "-gu", RESTORE_OPTION]);
+    binding_command(socket, &["set-option", "-gu", HINT_OPTION]);
+}
+
+fn restore_binding(socket: Option<&str>, key: &str, original: &str) {
+    use std::io::Write;
+    use std::process::Stdio;
+    binding_command(socket, &["unbind-key", "-T", "root", key]);
+    if original.is_empty() {
+        return;
+    }
+    // list-keys emits tmux source syntax; feed it directly to tmux,
+    // without interpreting the user's original command in a shell.
+    match sync_tmux(socket, ["source-file", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take() {
+                if let Err(e) = stdin.write_all(original.as_bytes()) {
+                    tracing::warn!("restoring tmux {key}: {e}");
+                }
+            }
+            match child.wait_with_output() {
+                Ok(o) if o.status.success() => {}
+                Ok(o) => tracing::warn!(
+                    "restoring tmux {key}: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                ),
+                Err(e) => tracing::warn!("restoring tmux {key}: {e}"),
             }
         }
+        Err(e) => tracing::warn!("restoring tmux {key}: {e}"),
     }
 }
 

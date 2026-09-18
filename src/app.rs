@@ -235,6 +235,8 @@ pub struct AppState {
     /// of keeping it as an `exited` row. Off by default; see
     /// `Config::remove_dead_sessions`.
     pub remove_dead_sessions: bool,
+    /// Footer indicator while the next key will bypass Bosun shortcuts.
+    pub send_next_key_pending: bool,
     /// Internal names this run has seen alive at least once. Auto-
     /// removal is limited to these: a row that was already dead when
     /// bosun started (the tmux server went away with the machine, say)
@@ -2259,6 +2261,8 @@ pub struct App {
     /// embed's PTY writer instead of bosun's reducer. Ctrl-Q is
     /// intercepted to exit focus.
     embed_focused: bool,
+    keybindings: crate::keybindings::KeyBindings,
+    key_router: crate::keybindings::KeyRouter,
     /// Set when a modal was opened from focused mode (today: the
     /// add-tab modal triggered by `Ctrl+T` or clicking `+` while
     /// the embed has focus). Causes the run loop to auto-detach
@@ -2373,6 +2377,8 @@ impl App {
             embed: None,
             embed_enabled: config.embed_enabled,
             embed_focused: false,
+            keybindings: config.keybindings,
+            key_router: crate::keybindings::KeyRouter::default(),
             embed_switch: None,
             last_embed_spawn: None,
             frame_interval: match config.max_fps {
@@ -2512,6 +2518,8 @@ impl App {
                 {
                     if let Some(strip) = self.tab_strip_rect() {
                         if point_in_rect(strip, m.column, m.row) {
+                            self.key_router.pending = false;
+                            self.state.send_next_key_pending = false;
                             let mut out = Vec::new();
                             self.state
                                 .handle_tab_strip_click(strip, m.column, m.row, &mut out);
@@ -2521,6 +2529,17 @@ impl App {
                             continue;
                         }
                     }
+                }
+            }
+
+            if matches!(&msg, AppMsg::Mouse(m) if matches!(m.kind, crossterm::event::MouseEventKind::Down(_)))
+                || matches!(&msg, AppMsg::Paste(_))
+            {
+                let was_pending = self.key_router.pending;
+                self.key_router.pending = false;
+                self.state.send_next_key_pending = false;
+                if was_pending {
+                    self.draw_frame(terminal)?;
                 }
             }
 
@@ -2570,40 +2589,50 @@ impl App {
                     // own clear-screen runs too. Without the intercept
                     // Ctrl+L cleared only the shell while bosun's
                     // chrome stayed in its post-Cmd+R broken state.
-                    if matches!(k.code, KeyCode::Char('l'))
+                    if !self.key_router.pending
+                        && matches!(k.code, KeyCode::Char('l'))
                         && k.modifiers.contains(KeyModifiers::CONTROL)
                     {
                         self.state.force_redraw = true;
                     }
-                    // In-focus navigation chords:
-                    //   * Shift+Left  / Shift+Right → cycle the
-                    //     active *tab* within the current container,
-                    //     respawning the embed on the new active tab.
-                    //   * Shift+Up    / Shift+Down  → cycle the
-                    //     focused *session* in sidebar order (the
-                    //     pre-tabs cross-container navigation; moved
-                    //     here so left/right is free for tabs).
-                    // bosun intercepts the chord before the embed
-                    // write so the inner app never sees it.
-                    //
-                    // Matching is `.contains(SHIFT)`, not an exact
-                    // modifier compare, on purpose: it also accepts
-                    // Ctrl+Shift+arrow as an equivalent. That matters
-                    // because iTerm2 strips the Shift bit from the
-                    // *vertical* arrows (Shift+Up/Down arrive bare)
-                    // but preserves it on Ctrl+Shift+Up/Down — so
-                    // iTerm2 users cycle sessions with Ctrl+Shift+
-                    // Up/Down while terminals that deliver a clean
-                    // Shift+Up/Down (Ghostty, kitty, WezTerm) keep the
-                    // simpler chord. Both map to the same action.
-                    let is_shift_left = matches!(k.code, KeyCode::Left)
-                        && k.modifiers.contains(KeyModifiers::SHIFT);
-                    let is_shift_right = matches!(k.code, KeyCode::Right)
-                        && k.modifiers.contains(KeyModifiers::SHIFT);
-                    let is_shift_up =
-                        matches!(k.code, KeyCode::Up) && k.modifiers.contains(KeyModifiers::SHIFT);
-                    let is_shift_down = matches!(k.code, KeyCode::Down)
-                        && k.modifiers.contains(KeyModifiers::SHIFT);
+                    use crate::keybindings::{Action, Route};
+                    let route = self.key_router.route(&self.keybindings, *k);
+                    self.state.send_next_key_pending = self.key_router.pending;
+                    match route {
+                        Route::Ignore => continue,
+                        Route::Arm => {
+                            self.draw_frame(terminal)?;
+                            continue;
+                        }
+                        Route::Quoted => {
+                            let ctx = crate::ui::key_encode::EncodeContext {
+                                application_cursor: self
+                                    .embed
+                                    .as_ref()
+                                    .is_some_and(|e| e.application_cursor()),
+                            };
+                            if let Some(bytes) = crate::ui::key_encode::encode_literal(*k, ctx) {
+                                if let Some(prefix) = self.keybindings.get(Action::SendNextKey) {
+                                    let mut quoted =
+                                        crate::ui::key_encode::encode_literal(prefix.event, ctx)
+                                            .unwrap_or_default();
+                                    quoted.extend_from_slice(&bytes);
+                                    if let Some(embed) = self.embed.as_mut() {
+                                        if let Err(e) = embed.write(&quoted) {
+                                            self.state.warning = Some(format!("send key: {e}"));
+                                        }
+                                    }
+                                }
+                            }
+                            self.draw_frame(terminal)?;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    let is_previous_tab = route == Route::Action(Action::PreviousTab);
+                    let is_next_tab = route == Route::Action(Action::NextTab);
+                    let is_previous_session = route == Route::Action(Action::PreviousSession);
+                    let is_next_session = route == Route::Action(Action::NextSession);
                     if is_ctrl_q {
                         self.exit_focus().await;
                     } else if is_ctrl_b {
@@ -2633,12 +2662,12 @@ impl App {
                         let _ = terminal.clear();
                         self.draw_frame(terminal)?;
                         continue;
-                    } else if is_shift_left || is_shift_right {
+                    } else if is_previous_tab || is_next_tab {
                         // Tab cycle within the current container.
                         let prev = self.state.selected_session_name();
                         let mut out_cmds: Vec<Command> = Vec::new();
                         self.state
-                            .cycle_active_tab(if is_shift_right { 1 } else { -1 }, &mut out_cmds);
+                            .cycle_active_tab(if is_next_tab { 1 } else { -1 }, &mut out_cmds);
                         for cmd in out_cmds {
                             let _ = self.cmd_tx.send(cmd);
                         }
@@ -2657,11 +2686,11 @@ impl App {
                                 }
                             }
                         }
-                    } else if is_shift_up || is_shift_down {
+                    } else if is_previous_session || is_next_session {
                         // Session cycle in sidebar order (moved off
                         // Shift+Left/Right so tabs own that chord).
                         let cur = self.state.selected_session_name();
-                        let target = if is_shift_down {
+                        let target = if is_next_session {
                             self.state.cycle_next(cur.as_deref())
                         } else {
                             self.state.cycle_prev(cur.as_deref())
@@ -3149,7 +3178,9 @@ impl App {
                         self.state.modals.push(Box::new(QuickJumpModal::new(rows)));
                     }
                     ModalRequest::Help => {
-                        self.state.modals.push(Box::new(HelpModal::new()));
+                        self.state
+                            .modals
+                            .push(Box::new(HelpModal::with_keybindings(&self.keybindings)));
                     }
                     ModalRequest::AddTab {
                         container_id,
@@ -3845,6 +3876,8 @@ impl App {
             return;
         }
         self.embed_focused = false;
+        self.key_router.pending = false;
+        self.state.send_next_key_pending = false;
         let Some(session) = self.state.selected_session().map(|v| v.name().to_string()) else {
             // Session disappeared while focused — drop the embed
             // entirely; sync_embed will recreate it on the next
@@ -3937,6 +3970,8 @@ impl App {
             self.evt_tx.clone(),
         )?;
         self.embed = Some(embed);
+        self.key_router.pending = false;
+        self.state.send_next_key_pending = false;
         self.last_embed_spawn = Some(std::time::Instant::now());
         Ok(())
     }

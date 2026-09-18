@@ -233,6 +233,8 @@ pub struct Config {
     /// Drop a session's sidebar row when its tmux session ends, rather
     /// than keeping it as an `exited` row that `R` can restart.
     pub remove_dead_sessions: bool,
+    /// Exact shortcuts inside a focused session, loaded from [keybindings].
+    pub keybindings: crate::keybindings::KeyBindings,
     /// Per-agent binary overrides from the `[agents]` table in
     /// `config.toml`, e.g. `opencode = "~/bin/opencode-wrapper"`.
     /// The value replaces the agent's binary in the launch command
@@ -267,6 +269,7 @@ impl Default for Config {
             worktree_location: WorktreeLocation::default(),
             default_agent: DEFAULT_AGENT.to_string(),
             remove_dead_sessions: DEFAULT_REMOVE_DEAD_SESSIONS,
+            keybindings: crate::keybindings::KeyBindings::default(),
             agent_binaries: std::collections::HashMap::new(),
         }
     }
@@ -297,6 +300,8 @@ pub const DEFAULT_SHOW_GROUP_IN_TITLE: bool = false;
 /// disk: read → update one field → write.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct ConfigFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keybindings: Option<crate::keybindings::BindingsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session_prefix: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -512,6 +517,14 @@ impl Config {
                 .unwrap_or(DEFAULT_REMOVE_DEAD_SESSIONS),
         };
 
+        let keybindings = file
+            .keybindings
+            .unwrap_or_default()
+            .resolve()
+            .unwrap_or_else(|e| {
+                tracing::warn!("invalid [keybindings]: {e}; using default shortcuts");
+                crate::keybindings::KeyBindings::default()
+            });
         let agent_binaries = file.agents.unwrap_or_default();
 
         Self {
@@ -533,6 +546,7 @@ impl Config {
             worktree_location,
             default_agent,
             remove_dead_sessions,
+            keybindings,
             agent_binaries,
         }
     }
@@ -921,6 +935,25 @@ fn detect_self_session() -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn keybindings_survive_unrelated_config_edits() {
+        let mut config: ConfigFile =
+            toml::from_str("[keybindings]\nnext_tab = 'Ctrl+Shift+Right'\nprevious_tab = 'none'")
+                .unwrap();
+        config.theme = Some("opencode".into());
+        let serialized = toml::to_string(&config).unwrap();
+        let reloaded: ConfigFile = toml::from_str(&serialized).unwrap();
+        let keys = reloaded.keybindings.unwrap().resolve().unwrap();
+        assert_eq!(
+            keys.label(crate::keybindings::Action::PreviousTab),
+            "disabled"
+        );
+        assert_eq!(
+            keys.label(crate::keybindings::Action::NextTab),
+            "Ctrl+Shift+Right"
+        );
+    }
+
     fn cfg(prefix: &str) -> Config {
         Config {
             session_prefix: prefix.to_string(),
@@ -941,6 +974,7 @@ mod tests {
             worktree_location: WorktreeLocation::default(),
             default_agent: DEFAULT_AGENT.to_string(),
             remove_dead_sessions: DEFAULT_REMOVE_DEAD_SESSIONS,
+            keybindings: crate::keybindings::KeyBindings::default(),
             agent_binaries: std::collections::HashMap::new(),
         }
     }
@@ -989,6 +1023,7 @@ mod tests {
             worktree_location: WorktreeLocation::default(),
             default_agent: DEFAULT_AGENT.to_string(),
             remove_dead_sessions: DEFAULT_REMOVE_DEAD_SESSIONS,
+            keybindings: crate::keybindings::KeyBindings::default(),
             agent_binaries: std::collections::HashMap::new(),
         };
         assert!(!c.manages("bosun-mine-abc"));

@@ -4,6 +4,7 @@ pub mod commands;
 pub mod config;
 pub mod error;
 pub mod events;
+pub mod keybindings;
 pub mod sidebar;
 pub mod store;
 pub mod terminal_query;

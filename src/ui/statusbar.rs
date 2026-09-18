@@ -21,7 +21,12 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
             Style::default().fg(theme.text_muted).bg(bg),
         ),
     ];
-    left_spans.push(if let Some(w) = &state.warning {
+    left_spans.push(if state.send_next_key_pending {
+        Span::styled(
+            "Send next key to app…",
+            Style::default().fg(theme.accent).bg(bg),
+        )
+    } else if let Some(w) = &state.warning {
         Span::styled(w.clone(), Style::default().fg(theme.status_waiting).bg(bg))
     } else if let Some(p) = &state.pending_create {
         // A create has no sidebar row yet (issue #7), so its in-progress

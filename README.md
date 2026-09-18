@@ -283,9 +283,29 @@ place. A dirty (uncommitted) worktree is never removed.
 | Key | Action |
 |-----|--------|
 | `Ctrl+Q` | Detach back to bosun (same chord in classic full-screen attach and single-window focus) |
+| `Ctrl+V`, then a key | Send that key to the application once; press Ctrl+V twice to send Ctrl+V |
 | `Shift+→` / `Shift+←` | Cycle next / previous tab within the current container |
 | `Shift+↓` / `Shift+↑` | Cycle next / previous live session in sidebar order. Sidebar selection follows automatically. |
 | Click sidebar row | Exit focus and jump to that row |
+
+### Shortcut conflicts with an application
+
+Press **Ctrl+V, then the conflicting key** to send that key directly to the application once. For example, Ctrl+V followed by Shift+Right navigates a Codex question without switching Bosun tabs. Ctrl+V twice sends a literal Ctrl+V. The footer shows “Send next key to app…” while waiting. In embedded sessions, clicking, pasting, or leaving the session cancels the pending shortcut. This also works in full-screen tmux attachments.
+
+To free the arrows permanently, add this to `config.toml` and restart Bosun:
+
+```toml
+[keybindings]
+previous_tab = "Ctrl+Shift+Left"
+next_tab = "Ctrl+Shift+Right"
+previous_session = "Ctrl+Shift+Up"
+next_session = "Ctrl+Shift+Down"
+send_next_key = "Ctrl+v"
+```
+
+Set an entry to `"none"` (or `""`) to disable it. Omitted entries keep their defaults: Shift+Left/Right for tabs, Shift+Up/Down for sessions, and Ctrl+V for send-next-key. Shortcut modifiers match exactly; Ctrl+Shift+arrows are no longer implicit aliases for Shift+arrows. The example above is also useful when a terminal strips Shift from the vertical arrows.
+
+Supported keys are arrows, F1–F12, and letters with Ctrl and/or Alt, using `Ctrl+`, `Alt+` (or `Option+`), and `Shift+` modifiers. Shift with letters is rejected because ordinary terminals cannot reliably distinguish those chords. Ctrl+Q, Ctrl+B, and Ctrl+L (including Alt variants) are reserved. Ctrl+H/I/J/M are rejected because terminals report them as Backspace, Tab, or Enter. Invalid or duplicate bindings produce a log warning and fall back to the default mapping. These settings are file-only and survive changes made in the settings panel. The `?` help screen shows the active mapping, including disabled shortcuts. In full-screen attachments, navigation shortcuts retain tmux's recent-session cycling behavior.
 
 ### Preview pane (mouse)
 

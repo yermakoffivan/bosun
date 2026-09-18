@@ -4,6 +4,17 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.14] — 2026-09-16
+
+### Added
+
+- **Send the next key directly to an application with Ctrl+V.** Ctrl+V followed by Shift+Right reaches Codex's question navigation without changing Bosun tabs. Press Ctrl+V twice to send Ctrl+V itself. Works in embedded sessions and full-screen tmux attachments, with a waiting indicator and `?` help.
+- **Remap or disable session navigation in `[keybindings]`.** Configure previous/next tab, previous/next session, and send-next-key in `config.toml`; `"none"` disables a shortcut. Help displays the configured keys, and tmux bindings are restored when Bosun exits.
+
+### Changed
+
+- **Focused navigation matches modifiers exactly.** Ctrl+Shift+arrows are no longer implicit aliases; configure them explicitly to use that combination while allowing Shift+arrows through to the application.
+
 ## [2.1.13] — 2026-09-13
 
 ### Changed

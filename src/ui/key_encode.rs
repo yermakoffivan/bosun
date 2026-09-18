@@ -51,6 +51,16 @@ pub struct EncodeContext {
 /// forward — currently key-release events on terminals that report
 /// them, and Null / unmapped function keys.
 pub fn encode(key: KeyEvent, ctx: EncodeContext) -> Option<Vec<u8>> {
+    encode_inner(key, ctx, true)
+}
+
+/// Preserve the actual key when quoting it, including Alt+arrows that the
+/// normal input path translates to shell word-movement commands.
+pub fn encode_literal(key: KeyEvent, ctx: EncodeContext) -> Option<Vec<u8>> {
+    encode_inner(key, ctx, false)
+}
+
+fn encode_inner(key: KeyEvent, ctx: EncodeContext, word_movement: bool) -> Option<Vec<u8>> {
     // Only forward presses. Some terminals (kitty, foot, recent
     // alacritty with kitty keyboard) also emit Release events;
     // forwarding those would double every keystroke from the
@@ -98,8 +108,8 @@ pub fn encode(key: KeyEvent, ctx: EncodeContext) -> Option<Vec<u8>> {
         // would otherwise produce is not recognized as word-motion by
         // those apps, so the cursor wouldn't move at all. Mirrors the
         // Alt+Backspace → `\x1b\x7f` (backward-kill-word) choice above.
-        KeyCode::Left if alt && !ctrl && !shift => Some(b"\x1bb".to_vec()),
-        KeyCode::Right if alt && !ctrl && !shift => Some(b"\x1bf".to_vec()),
+        KeyCode::Left if word_movement && alt && !ctrl && !shift => Some(b"\x1bb".to_vec()),
+        KeyCode::Right if word_movement && alt && !ctrl && !shift => Some(b"\x1bf".to_vec()),
         KeyCode::Left => Some(arrow_seq(b'D', shift, ctrl, alt, ctx.application_cursor)),
         KeyCode::Right => Some(arrow_seq(b'C', shift, ctrl, alt, ctx.application_cursor)),
         KeyCode::Up => Some(arrow_seq(b'A', shift, ctrl, alt, ctx.application_cursor)),
@@ -301,6 +311,16 @@ mod tests {
     /// context themselves.
     fn encode(key: KeyEvent) -> Option<Vec<u8>> {
         super::encode(key, EncodeContext::default())
+    }
+
+    #[test]
+    fn quoted_alt_arrow_preserves_arrow_instead_of_word_motion() {
+        let key = KeyEvent::new(KeyCode::Right, KeyModifiers::ALT);
+        assert_eq!(encode(key), Some(b"\x1bf".to_vec()));
+        assert_eq!(
+            super::encode_literal(key, EncodeContext::default()),
+            Some(b"\x1b[1;3C".to_vec())
+        );
     }
 
     #[test]
