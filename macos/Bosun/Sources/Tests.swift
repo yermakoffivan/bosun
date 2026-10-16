@@ -358,13 +358,14 @@ final class FocusTest: TestKit {
         await showRow(api)
         r.check("start: the active terminal is first responder", firstResponderIsActiveTerminal)
 
-        // --only a,b runs just those sections (rows, panes, newpanes, clientmoves, sheet, empty, tiledrag, sidebardrag, shortcuts).
+        // --only a,b runs just those sections (rows, panes, newpanes, clientmoves, done, sheet, empty, tiledrag, sidebardrag, shortcuts).
         if let only = argValue("--only") {
             let parts = Set(only.split(separator: ",").map(String.init))
             if parts.contains("rows") { await rows(f) }
             if parts.contains("panes") { await panes(f) }
             if parts.contains("newpanes") { await newPanes(f) }
             if parts.contains("clientmoves") { await clientMoves(f) }
+            if parts.contains("done") { await doneState(f) }
             await layoutSections(parts)
             await finish()
             return
@@ -697,6 +698,9 @@ final class FocusTest: TestKit {
         app.daemon.command(.setTheme(name: original, persist: false))
         await waitUntil(3) { app.daemon.state.theme.name == original }
 
+        // 16b. Done from the agent's Stop hook, on screen, until the user types into the pane.
+        await doneState(f)
+
         // 17. tmux moving a terminal's client (Bosun's TUI bindings typed inside it, or anything else).
         await clientMoves(f)
 
@@ -787,6 +791,111 @@ final class FocusTest: TestKit {
     }
 
     private func liveCount(_ c: Container) -> Int { c.tabs.filter { app.isAlive($0.session) }.count }
+
+    // MARK: Done from the agent's hook
+
+    /// Run `bosun hook claude <event>` the way Claude Code runs it inside `session`'s pane: `TMUX` and
+    /// `TMUX_PANE` name the pane, and the event's JSON is on stdin.
+    func claudeHook(_ session: String, _ event: String, _ json: String) async -> Bool {
+        guard let bin = Paths.bosunBinary() else { return false }
+        let where_ = tmuxOut(["display", "-p", "-t", "=\(session):", "#{socket_path},#{pid},0 #{pane_id}"])
+            .trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+        guard where_.count == 2 else { return false }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: bin)
+        p.arguments = ["hook", "claude", event]
+        var env = ProcessInfo.processInfo.environment
+        env["TMUX"] = String(where_[0])
+        env["TMUX_PANE"] = String(where_[1])
+        env["BOSUN_HOOK_LOG"] = nil
+        // The hook runs `tmux` from PATH, as it does inside a pane.
+        env["PATH"] = (Paths.tmux as NSString).deletingLastPathComponent + ":" + (env["PATH"] ?? "/usr/bin:/bin")
+        p.environment = env
+        let stdin = Pipe()
+        p.standardInput = stdin
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return false }
+        stdin.fileHandleForWriting.write(Data(json.utf8))
+        try? stdin.fileHandleForWriting.close()
+        await waitUntil(5) { !p.isRunning }
+        return !p.isRunning && p.terminationStatus == 0
+    }
+
+    /// The badge a session's sidebar item shows (its row's, or its tab's under a multi-tab row).
+    func sidebarBadge(_ session: String) -> AgentState? {
+        guard let item = app.sidebar.itemFor(session: session) else { return nil }
+        return sidebarBadge(item)
+    }
+
+    func sidebarBadge(_ item: SidebarItem) -> AgentState? {
+        let o = app.sidebar.outline
+        let row = o.row(forItem: item)
+        guard row >= 0 else { return nil }
+        return (o.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarCellView)?.badge.state
+    }
+
+    /// Whether a pane's header and its sidebar item both show done, in the theme's `status_done` colour.
+    func showsDone(_ s: String) -> Bool {
+        guard let h = ws.headerStatus(s) else { return false }
+        return h.state == .done && h.text == "done" && h.color == app.theme.done && sidebarBadge(s) == .done
+    }
+
+    func showsNotDone(_ s: String) -> Bool {
+        guard let h = ws.headerStatus(s) else { return false }
+        return h.state != .done && h.text != "done" && sidebarBadge(s) != .done
+    }
+
+    /// Claude's Stop hook marks a turn done while the pane is on screen; typing into the pane clears it, and so
+    /// does the next prompt; the next turn finishing shows it again. A multi-tab row's badge shows a tab's done.
+    func doneState(_ f: Fixture) async {
+        let s = f.api
+        await showRow(s)
+        r.check("done: the fixture's pane starts out not done", showsNotDone(s), "\(String(describing: ws.headerStatus(s)))")
+
+        let stopped = await claudeHook(s, "Stop", #"{"hook_event_name":"Stop","stop_hook_active":false}"#)
+        r.check("done: bosun hook claude Stop runs inside the pane", stopped)
+        let shown = await waitUntil(3) { showsDone(s) }
+        r.check("…the visible pane's header and its sidebar row show done, in status_done's colour", shown,
+                "header \(String(describing: ws.headerStatus(s))), row \(String(describing: sidebarBadge(s))), daemon \(String(describing: app.daemon.state.statuses[s]))")
+        r.check("…the daemon reports it as idle from the hook, with done_at", app.daemon.state.statuses[s].map { $0.state == .idle && $0.isHook && $0.doneAt != nil } == true)
+        await sleep(400)
+        r.check("…and it stays done while the pane is on screen", showsDone(s))
+        shot("14-done-header-and-row")
+
+        await type("thanks\n")
+        r.check("done: typing into the pane clears it", await waitUntil(2) { showsNotDone(s) },
+                "header \(String(describing: ws.headerStatus(s))), row \(String(describing: sidebarBadge(s)))")
+        r.check("…and the keys reached the program", await paneShows(s, "got: thanks"))
+
+        // The next prompt (running), then the turn finishing again.
+        _ = await claudeHook(s, "UserPromptSubmit", #"{"hook_event_name":"UserPromptSubmit","prompt":"again"}"#)
+        r.check("done: the next prompt shows running", await waitUntil(3) { ws.headerStatus(s)?.state == .running && sidebarBadge(s) == .running })
+        await sleep(20)
+        _ = await claudeHook(s, "Stop", #"{"hook_event_name":"Stop","stop_hook_active":false}"#)
+        r.check("…and the next Stop shows done again, after the earlier input", await waitUntil(3) { showsDone(s) })
+        await type("ok\n")
+        r.check("…until the next keys", await waitUntil(2) { showsNotDone(s) })
+
+        // A tab of a multi-tab row: the tab and the row's own badge show done.
+        if let webRow = rowID(f.web), let rowItem = app.sidebar.outline.item(atRow: (0..<app.sidebar.outline.numberOfRows).first {
+            (app.sidebar.outline.item(atRow: $0) as? SidebarItem)?.kind == .row(webRow) } ?? -1) as? SidebarItem {
+            await showRow(f.webTests)
+            ws.activate(f.webTests)
+            await waitUntil(1) { firstResponderIsActiveTerminal }
+            _ = await claudeHook(f.webTests, "Stop", #"{"hook_event_name":"Stop","stop_hook_active":false}"#)
+            let agg = await waitUntil(3) { showsDone(f.webTests) && sidebarBadge(rowItem) == .done }
+            r.check("done: a tab's done shows on its pane, its tab and the multi-tab row's badge", agg,
+                    "tab \(String(describing: sidebarBadge(f.webTests))), row \(String(describing: sidebarBadge(rowItem)))")
+            await sleep(300)
+            shot("15-done-in-a-multi-tab-row")
+            await type("seen\n")
+            r.check("…and typing into that pane clears all three", await waitUntil(2) { showsNotDone(f.webTests) && sidebarBadge(rowItem) != .done })
+            _ = await claudeHook(f.webTests, "SessionStart", #"{"hook_event_name":"SessionStart"}"#)
+        }
+        // Leave the fixture as it was: idle from its hook.
+        _ = await claudeHook(s, "SessionStart", #"{"hook_event_name":"SessionStart"}"#)
+    }
 
     // MARK: Pane navigation
 
