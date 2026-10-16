@@ -1,0 +1,835 @@
+import Foundation
+
+// Wire types for the `bosun serve` socket protocol, version 1 (docs/protocol.md).
+// Unknown fields are ignored by Codable; unknown message kinds decode to `.unknown`.
+
+public let protocolVersion: UInt32 = 1
+
+// MARK: - JSON value
+
+public enum JSONValue: Codable, Equatable, Sendable {
+    case null
+    case bool(Bool)
+    case number(Double)
+    case string(String)
+    case array([JSONValue])
+    case object([String: JSONValue])
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() { self = .null }
+        else if let b = try? c.decode(Bool.self) { self = .bool(b) }
+        else if let n = try? c.decode(Double.self) { self = .number(n) }
+        else if let s = try? c.decode(String.self) { self = .string(s) }
+        else if let a = try? c.decode([JSONValue].self) { self = .array(a) }
+        else { self = .object(try c.decode([String: JSONValue].self)) }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .null: try c.encodeNil()
+        case .bool(let b): try c.encode(b)
+        case .number(let n): try c.encode(n)
+        case .string(let s): try c.encode(s)
+        case .array(let a): try c.encode(a)
+        case .object(let o): try c.encode(o)
+        }
+    }
+
+    public var boolValue: Bool? { if case .bool(let b) = self { return b }; return nil }
+    public var stringValue: String? { if case .string(let s) = self { return s }; return nil }
+}
+
+// MARK: - Snapshot parts
+
+public struct ServerInfo: Codable, Equatable, Sendable {
+    public var version: String
+    public var protocolMajor: UInt32
+    public var tmuxSocket: String?
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case protocolMajor = "protocol"
+        case tmuxSocket = "tmux_socket"
+    }
+
+    public init(version: String, protocolMajor: UInt32, tmuxSocket: String?) {
+        self.version = version
+        self.protocolMajor = protocolMajor
+        self.tmuxSocket = tmuxSocket
+    }
+}
+
+public struct SessionInfo: Codable, Equatable, Sendable {
+    public var name: String
+    public var display: String
+    public var agent: String?
+    public var path: String?
+    public var windows: UInt32
+    public var attached: Bool
+    public var created: Int64?
+    public var containerID: String?
+    public var worktreePath: String?
+    public var branch: String?
+    public var paneTitle: String?
+    public var paneCommand: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name, display, agent, path, windows, attached, created, branch
+        case containerID = "container_id"
+        case worktreePath = "worktree_path"
+        case paneTitle = "pane_title"
+        case paneCommand = "pane_command"
+    }
+
+    public init(name: String, display: String, agent: String? = nil, path: String? = nil, windows: UInt32 = 1,
+                attached: Bool = false, created: Int64? = nil, containerID: String? = nil, worktreePath: String? = nil,
+                branch: String? = nil, paneTitle: String? = nil, paneCommand: String? = nil) {
+        self.name = name; self.display = display; self.agent = agent; self.path = path; self.windows = windows
+        self.attached = attached; self.created = created; self.containerID = containerID
+        self.worktreePath = worktreePath; self.branch = branch; self.paneTitle = paneTitle; self.paneCommand = paneCommand
+    }
+}
+
+public enum AgentState: String, Codable, Equatable, Sendable, CaseIterable {
+    case running, waiting, done, idle, error, unknown
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = AgentState(rawValue: raw) ?? .unknown
+    }
+}
+
+public struct StatusInfo: Codable, Equatable, Sendable {
+    public var state: AgentState
+    public var source: String
+    public var detail: String?
+
+    public init(state: AgentState, source: String = "detector", detail: String? = nil) {
+        self.state = state
+        self.source = source
+        self.detail = detail
+    }
+}
+
+public struct Tab: Codable, Equatable, Sendable {
+    public var session: String
+    public var display: String
+    public var alive: Bool
+
+    public init(session: String, display: String = "", alive: Bool = true) {
+        self.session = session
+        self.display = display
+        self.alive = alive
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        session = try c.decode(String.self, forKey: .session)
+        display = try c.decodeIfPresent(String.self, forKey: .display) ?? ""
+        alive = try c.decodeIfPresent(Bool.self, forKey: .alive) ?? false
+    }
+}
+
+public struct Container: Codable, Equatable, Sendable {
+    public var id: String
+    public var name: String
+    public var active: String
+    public var tabs: [Tab]
+
+    public init(id: String, name: String, active: String, tabs: [Tab]) {
+        self.id = id
+        self.name = name
+        self.active = active
+        self.tabs = tabs
+    }
+}
+
+public struct Section: Codable, Equatable, Sendable {
+    public var id: String
+    public var name: String
+    public var collapsed: Bool
+    public var bannerFont: String?
+    public var members: [Container]
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, collapsed, members
+        case bannerFont = "banner_font"
+    }
+
+    public init(id: String, name: String, collapsed: Bool = false, bannerFont: String? = nil, members: [Container] = []) {
+        self.id = id
+        self.name = name
+        self.collapsed = collapsed
+        self.bannerFont = bannerFont
+        self.members = members
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        collapsed = try c.decodeIfPresent(Bool.self, forKey: .collapsed) ?? false
+        bannerFont = try c.decodeIfPresent(String.self, forKey: .bannerFont)
+        members = try c.decodeIfPresent([Container].self, forKey: .members) ?? []
+    }
+}
+
+public struct Sidebar: Codable, Equatable, Sendable {
+    public var ungrouped: [Container]
+    public var sections: [Section]
+
+    public init(ungrouped: [Container] = [], sections: [Section] = []) {
+        self.ungrouped = ungrouped
+        self.sections = sections
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ungrouped = try c.decodeIfPresent([Container].self, forKey: .ungrouped) ?? []
+        sections = try c.decodeIfPresent([Section].self, forKey: .sections) ?? []
+    }
+}
+
+public enum SessionMode: String, Codable, Equatable, Sendable, CaseIterable {
+    case new, `continue`, resume
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = SessionMode(rawValue: raw) ?? .new
+    }
+
+    public var label: String {
+        switch self {
+        case .new: "New"
+        case .continue: "Continue"
+        case .resume: "Resume"
+        }
+    }
+}
+
+public struct ClaudeOptions: Codable, Equatable, Sendable {
+    public var sessionMode: SessionMode = .new
+    public var skipPermissions = false
+    public var remoteControl = false
+    enum CodingKeys: String, CodingKey {
+        case sessionMode = "session_mode", skipPermissions = "skip_permissions", remoteControl = "remote_control"
+    }
+    public init() {}
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessionMode = try c.decodeIfPresent(SessionMode.self, forKey: .sessionMode) ?? .new
+        skipPermissions = try c.decodeIfPresent(Bool.self, forKey: .skipPermissions) ?? false
+        remoteControl = try c.decodeIfPresent(Bool.self, forKey: .remoteControl) ?? false
+    }
+}
+
+public struct ModeYoloOptions: Codable, Equatable, Sendable {
+    public var sessionMode: SessionMode = .new
+    public var yolo = false
+    enum CodingKeys: String, CodingKey { case sessionMode = "session_mode", yolo }
+    public init() {}
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessionMode = try c.decodeIfPresent(SessionMode.self, forKey: .sessionMode) ?? .new
+        yolo = try c.decodeIfPresent(Bool.self, forKey: .yolo) ?? false
+    }
+}
+
+public struct OpencodeOptions: Codable, Equatable, Sendable {
+    public var sessionMode: SessionMode = .new
+    public var auto = false
+    enum CodingKeys: String, CodingKey { case sessionMode = "session_mode", auto }
+    public init() {}
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessionMode = try c.decodeIfPresent(SessionMode.self, forKey: .sessionMode) ?? .new
+        auto = try c.decodeIfPresent(Bool.self, forKey: .auto) ?? false
+    }
+}
+
+public struct SpecOptions: Codable, Equatable, Sendable {
+    public var claude = ClaudeOptions()
+    public var codex = ModeYoloOptions()
+    public var kimi = ModeYoloOptions()
+    public var opencode = OpencodeOptions()
+    public var qwen = ModeYoloOptions()
+    public init() {}
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        claude = try c.decodeIfPresent(ClaudeOptions.self, forKey: .claude) ?? ClaudeOptions()
+        codex = try c.decodeIfPresent(ModeYoloOptions.self, forKey: .codex) ?? ModeYoloOptions()
+        kimi = try c.decodeIfPresent(ModeYoloOptions.self, forKey: .kimi) ?? ModeYoloOptions()
+        opencode = try c.decodeIfPresent(OpencodeOptions.self, forKey: .opencode) ?? OpencodeOptions()
+        qwen = try c.decodeIfPresent(ModeYoloOptions.self, forKey: .qwen) ?? ModeYoloOptions()
+    }
+}
+
+public let agentNames = ["claude", "codex", "kimi", "opencode", "qwen", "terminal"]
+
+public struct Spec: Codable, Equatable, Sendable {
+    public var name: String
+    public var path: String
+    public var agent: String
+    public var args: String
+    public var options: SpecOptions
+    public var containerID: String?
+    public var resume: Bool
+    public var worktreeBranch: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name, path, agent, args, options, resume
+        case containerID = "container_id"
+        case worktreeBranch = "worktree_branch"
+    }
+
+    public init(name: String, path: String = "", agent: String = "claude", args: String = "", options: SpecOptions = SpecOptions(),
+                containerID: String? = nil, resume: Bool = false, worktreeBranch: String? = nil) {
+        self.name = name; self.path = path; self.agent = agent; self.args = args; self.options = options
+        self.containerID = containerID; self.resume = resume; self.worktreeBranch = worktreeBranch
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        path = try c.decodeIfPresent(String.self, forKey: .path) ?? ""
+        agent = try c.decode(String.self, forKey: .agent)
+        args = try c.decodeIfPresent(String.self, forKey: .args) ?? ""
+        options = try c.decodeIfPresent(SpecOptions.self, forKey: .options) ?? SpecOptions()
+        containerID = try c.decodeIfPresent(String.self, forKey: .containerID)
+        resume = try c.decodeIfPresent(Bool.self, forKey: .resume) ?? false
+        worktreeBranch = try c.decodeIfPresent(String.self, forKey: .worktreeBranch)
+    }
+}
+
+public struct Recent: Codable, Equatable, Sendable {
+    public var id: Int64
+    public var name: String
+    public var path: String
+    public var agent: String
+    public var args: String
+    public var options: SpecOptions
+    public var lastUsedAt: Int64
+    public var useCount: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, path, agent, args, options
+        case lastUsedAt = "last_used_at"
+        case useCount = "use_count"
+    }
+
+    public init(id: Int64, name: String, path: String, agent: String, args: String = "", options: SpecOptions = SpecOptions(),
+                lastUsedAt: Int64 = 0, useCount: Int64 = 1) {
+        self.id = id; self.name = name; self.path = path; self.agent = agent; self.args = args
+        self.options = options; self.lastUsedAt = lastUsedAt; self.useCount = useCount
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int64.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        path = try c.decodeIfPresent(String.self, forKey: .path) ?? ""
+        agent = try c.decode(String.self, forKey: .agent)
+        args = try c.decodeIfPresent(String.self, forKey: .args) ?? ""
+        options = try c.decodeIfPresent(SpecOptions.self, forKey: .options) ?? SpecOptions()
+        lastUsedAt = try c.decodeIfPresent(Int64.self, forKey: .lastUsedAt) ?? 0
+        useCount = try c.decodeIfPresent(Int64.self, forKey: .useCount) ?? 0
+    }
+
+    public var spec: Spec { Spec(name: name, path: path, agent: agent, args: args, options: options) }
+}
+
+public struct Setting: Codable, Equatable, Sendable {
+    public var key: String
+    public var value: JSONValue
+    public var choices: [String]?
+    public var pinnedBy: String?
+    public var readOnly: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case key, value, choices
+        case pinnedBy = "pinned_by"
+        case readOnly = "read_only"
+    }
+
+    public init(key: String, value: JSONValue, choices: [String]? = nil, pinnedBy: String? = nil, readOnly: Bool = false) {
+        self.key = key; self.value = value; self.choices = choices; self.pinnedBy = pinnedBy; self.readOnly = readOnly
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        key = try c.decode(String.self, forKey: .key)
+        value = try c.decodeIfPresent(JSONValue.self, forKey: .value) ?? .null
+        choices = try c.decodeIfPresent([String].self, forKey: .choices)
+        pinnedBy = try c.decodeIfPresent(String.self, forKey: .pinnedBy)
+        readOnly = try c.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
+    }
+}
+
+public struct ConfigView: Codable, Equatable, Sendable {
+    public var settings: [Setting]
+    public init(settings: [Setting] = []) { self.settings = settings }
+    public func value(_ key: String) -> JSONValue? { settings.first { $0.key == key }?.value }
+}
+
+public struct ThemePalette: Codable, Equatable, Sendable {
+    public var name: String
+    public var bg: String
+    public var panel: String
+    public var panelAlt: String
+    public var selectionBg: String
+    public var text: String
+    public var textMuted: String
+    public var accent: String
+    public var shadow: String
+    public var dimFg: String
+    public var statusRunning: String
+    public var statusWaiting: String
+    public var statusIdle: String
+    public var statusError: String
+    public var statusDone: String
+
+    enum CodingKeys: String, CodingKey {
+        case name, bg, panel, text, accent, shadow
+        case panelAlt = "panel_alt", selectionBg = "selection_bg", textMuted = "text_muted", dimFg = "dim_fg"
+        case statusRunning = "status_running", statusWaiting = "status_waiting", statusIdle = "status_idle"
+        case statusError = "status_error", statusDone = "status_done"
+    }
+
+    /// The opencode palette, used before any snapshot has arrived.
+    public static let fallback = ThemePalette(
+        name: "opencode", bg: "#0a0a0a", panel: "#141414", panelAlt: "#1e1e1e", selectionBg: "#2a2a2a",
+        text: "#eeeeee", textMuted: "#808080", accent: "#fab283", shadow: "#000000", dimFg: "#555555",
+        statusRunning: "#7fd88f", statusWaiting: "#f5a742", statusIdle: "#808080", statusError: "#e06c75",
+        statusDone: "#5c9cf5")
+
+    public init(name: String, bg: String, panel: String, panelAlt: String, selectionBg: String, text: String, textMuted: String,
+                accent: String, shadow: String, dimFg: String, statusRunning: String, statusWaiting: String,
+                statusIdle: String, statusError: String, statusDone: String) {
+        self.name = name; self.bg = bg; self.panel = panel; self.panelAlt = panelAlt; self.selectionBg = selectionBg
+        self.text = text; self.textMuted = textMuted; self.accent = accent; self.shadow = shadow; self.dimFg = dimFg
+        self.statusRunning = statusRunning; self.statusWaiting = statusWaiting; self.statusIdle = statusIdle
+        self.statusError = statusError; self.statusDone = statusDone
+    }
+}
+
+public struct ThemeEntry: Codable, Equatable, Sendable {
+    public var name: String
+    public var source: String
+    public init(name: String, source: String = "bundled") { self.name = name; self.source = source }
+}
+
+/// The TUI's `[keybindings]` table as the daemon sends it. A field that is absent keeps the default;
+/// an explicit `null` disables the binding.
+public struct KeyBindingsWire: Codable, Equatable, Sendable {
+    public enum Value: Equatable, Sendable {
+        case unset
+        case disabled
+        case chord(String)
+    }
+
+    public var previousTab: Value = .unset
+    public var nextTab: Value = .unset
+    public var previousSession: Value = .unset
+    public var nextSession: Value = .unset
+    public var sendNextKey: Value = .unset
+
+    enum CodingKeys: String, CodingKey {
+        case previousTab = "previous_tab", nextTab = "next_tab", previousSession = "previous_session"
+        case nextSession = "next_session", sendNextKey = "send_next_key"
+    }
+
+    public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func read(_ k: CodingKeys) throws -> Value {
+            guard c.contains(k) else { return .unset }
+            if try c.decodeNil(forKey: k) { return .disabled }
+            let s = try c.decode(String.self, forKey: k)
+            let t = s.trimmingCharacters(in: .whitespaces)
+            if t.isEmpty || t.lowercased() == "none" { return .disabled }
+            return .chord(s)
+        }
+        previousTab = try read(.previousTab)
+        nextTab = try read(.nextTab)
+        previousSession = try read(.previousSession)
+        nextSession = try read(.nextSession)
+        sendNextKey = try read(.sendNextKey)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        func write(_ v: Value, _ k: CodingKeys) throws {
+            switch v {
+            case .unset: break
+            case .disabled: try c.encodeNil(forKey: k)
+            case .chord(let s): try c.encode(s, forKey: k)
+            }
+        }
+        try write(previousTab, .previousTab)
+        try write(nextTab, .nextTab)
+        try write(previousSession, .previousSession)
+        try write(nextSession, .nextSession)
+        try write(sendNextKey, .sendNextKey)
+    }
+}
+
+public struct Snapshot: Codable, Equatable, Sendable {
+    public var seq: UInt64
+    public var server: ServerInfo
+    public var sessions: [SessionInfo]
+    public var statuses: [String: StatusInfo]
+    public var sidebar: Sidebar
+    public var recents: [Recent]
+    public var config: ConfigView
+    public var theme: ThemePalette
+    public var themes: [ThemeEntry]
+    public var keybindings: KeyBindingsWire?
+
+    public init(seq: UInt64, server: ServerInfo, sessions: [SessionInfo], statuses: [String: StatusInfo], sidebar: Sidebar,
+                recents: [Recent], config: ConfigView, theme: ThemePalette, themes: [ThemeEntry], keybindings: KeyBindingsWire?) {
+        self.seq = seq; self.server = server; self.sessions = sessions; self.statuses = statuses; self.sidebar = sidebar
+        self.recents = recents; self.config = config; self.theme = theme; self.themes = themes; self.keybindings = keybindings
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        seq = try c.decode(UInt64.self, forKey: .seq)
+        server = try c.decode(ServerInfo.self, forKey: .server)
+        sessions = try c.decodeIfPresent([SessionInfo].self, forKey: .sessions) ?? []
+        statuses = try c.decodeIfPresent([String: StatusInfo].self, forKey: .statuses) ?? [:]
+        sidebar = try c.decodeIfPresent(Sidebar.self, forKey: .sidebar) ?? Sidebar()
+        recents = try c.decodeIfPresent([Recent].self, forKey: .recents) ?? []
+        config = try c.decodeIfPresent(ConfigView.self, forKey: .config) ?? ConfigView()
+        theme = try c.decodeIfPresent(ThemePalette.self, forKey: .theme) ?? .fallback
+        themes = try c.decodeIfPresent([ThemeEntry].self, forKey: .themes) ?? []
+        keybindings = try c.decodeIfPresent(KeyBindingsWire.self, forKey: .keybindings)
+    }
+}
+
+public struct PendingLaunch: Codable, Equatable, Sendable {
+    public var session: String
+    public var resume: Bool?
+}
+
+public struct Ack: Codable, Equatable, Sendable {
+    public var id: UInt64
+    public var ok: Bool
+    public var error: String?
+    public var session: String?
+    public var spec: Spec?
+    public var pendingLaunch: PendingLaunch?
+    public var messages: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case id, ok, error, session, spec, messages
+        case pendingLaunch = "pending_launch"
+    }
+
+    public init(id: UInt64, ok: Bool, error: String? = nil, session: String? = nil, spec: Spec? = nil,
+                pendingLaunch: PendingLaunch? = nil, messages: [String] = []) {
+        self.id = id; self.ok = ok; self.error = error; self.session = session; self.spec = spec
+        self.pendingLaunch = pendingLaunch; self.messages = messages
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UInt64.self, forKey: .id)
+        ok = try c.decode(Bool.self, forKey: .ok)
+        error = try c.decodeIfPresent(String.self, forKey: .error)
+        session = try c.decodeIfPresent(String.self, forKey: .session)
+        spec = try c.decodeIfPresent(Spec.self, forKey: .spec)
+        pendingLaunch = try c.decodeIfPresent(PendingLaunch.self, forKey: .pendingLaunch)
+        messages = try c.decodeIfPresent([String].self, forKey: .messages) ?? []
+    }
+}
+
+// MARK: - Daemon → client
+
+public enum ServerMessage: Equatable, Sendable {
+    case snapshot(Snapshot)
+    case sessions(seq: UInt64, upsert: [SessionInfo], removed: [String])
+    case status(seq: UInt64, session: String, info: StatusInfo)
+    case sidebar(seq: UInt64, Sidebar)
+    case recents(seq: UInt64, [Recent])
+    case config(seq: UInt64, ConfigView)
+    case theme(seq: UInt64, ThemePalette)
+    case themes(seq: UInt64, [ThemeEntry])
+    case keybindings(seq: UInt64, KeyBindingsWire)
+    case notice(seq: UInt64, String)
+    case ack(Ack)
+    case error(code: String, message: String)
+    /// A kind this client doesn't know. Its `seq` still counts.
+    case unknown(kind: String, seq: UInt64?)
+
+    public var seq: UInt64? {
+        switch self {
+        case .snapshot(let s): s.seq
+        case .sessions(let q, _, _), .status(let q, _, _), .sidebar(let q, _), .recents(let q, _), .config(let q, _),
+             .theme(let q, _), .themes(let q, _), .keybindings(let q, _), .notice(let q, _): q
+        case .ack, .error: nil
+        case .unknown(_, let q): q
+        }
+    }
+
+    private struct Head: Decodable {
+        let t: String
+        let seq: UInt64?
+    }
+    private struct SessionsBody: Decodable {
+        let seq: UInt64
+        let upsert: [SessionInfo]?
+        let removed: [String]?
+    }
+    private struct StatusBody: Decodable {
+        let seq: UInt64
+        let session: String
+        let state: AgentState
+        let source: String?
+        let detail: String?
+    }
+    private struct Body<T: Decodable>: Decodable {
+        let seq: UInt64
+        let value: T
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: AnyKey.self)
+            seq = try c.decode(UInt64.self, forKey: AnyKey("seq"))
+            let key = decoder.userInfo[Body.fieldKey] as? String ?? ""
+            value = try c.decode(T.self, forKey: AnyKey(key))
+        }
+        static var fieldKey: CodingUserInfoKey { CodingUserInfoKey(rawValue: "bosun.field")! }
+    }
+    private struct ErrorBody: Decodable {
+        let code: String
+        let message: String
+    }
+
+    public static func decode(_ data: Data) throws -> ServerMessage {
+        let plain = JSONDecoder()
+        let head = try plain.decode(Head.self, from: data)
+        func field<T: Decodable>(_ type: T.Type, _ key: String) throws -> (UInt64, T) {
+            let d = JSONDecoder()
+            d.userInfo[Body<T>.fieldKey] = key
+            let b = try d.decode(Body<T>.self, from: data)
+            return (b.seq, b.value)
+        }
+        switch head.t {
+        case "snapshot":
+            return .snapshot(try plain.decode(Snapshot.self, from: data))
+        case "sessions":
+            let b = try plain.decode(SessionsBody.self, from: data)
+            return .sessions(seq: b.seq, upsert: b.upsert ?? [], removed: b.removed ?? [])
+        case "status":
+            let b = try plain.decode(StatusBody.self, from: data)
+            return .status(seq: b.seq, session: b.session, info: StatusInfo(state: b.state, source: b.source ?? "detector", detail: b.detail))
+        case "sidebar":
+            let (q, v) = try field(Sidebar.self, "sidebar")
+            return .sidebar(seq: q, v)
+        case "recents":
+            let (q, v) = try field([Recent].self, "recents")
+            return .recents(seq: q, v)
+        case "config":
+            let (q, v) = try field(ConfigView.self, "config")
+            return .config(seq: q, v)
+        case "theme":
+            let (q, v) = try field(ThemePalette.self, "theme")
+            return .theme(seq: q, v)
+        case "themes":
+            let (q, v) = try field([ThemeEntry].self, "themes")
+            return .themes(seq: q, v)
+        case "keybindings":
+            let (q, v) = try field(KeyBindingsWire.self, "keybindings")
+            return .keybindings(seq: q, v)
+        case "notice":
+            let (q, v) = try field(String.self, "message")
+            return .notice(seq: q, v)
+        case "ack":
+            return .ack(try plain.decode(Ack.self, from: data))
+        case "error":
+            let b = try plain.decode(ErrorBody.self, from: data)
+            return .error(code: b.code, message: b.message)
+        default:
+            return .unknown(kind: head.t, seq: head.seq)
+        }
+    }
+}
+
+struct AnyKey: CodingKey {
+    var stringValue: String
+    var intValue: Int? { nil }
+    init(_ s: String) { stringValue = s }
+    init?(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { nil }
+}
+
+// MARK: - Client → daemon
+
+public enum Command: Equatable, Sendable {
+    case create(spec: Spec, deferLaunch: Bool)
+    case kill(session: String)
+    case killContainer(sessions: [String])
+    case killRemoveWorktree(session: String, worktreePath: String, branch: String, merge: Bool)
+    case rename(session: String, display: String)
+    case restart(session: String, resume: Bool, deferLaunch: Bool)
+    case launchAgent(session: String, resume: Bool?)
+    case getSpec(session: String)
+    case modify(session: String, spec: Spec)
+    case deleteRecent(id: Int64)
+    case sidebarSave(Sidebar)
+    case insertSection(name: String)
+    case renameSection(section: String, name: String)
+    case setTheme(name: String, persist: Bool)
+    case applySetting(key: String, value: JSONValue)
+    case clientFlags(tty: String, ignoreSize: Bool)
+    case makeLatest(tty: String)
+
+    public var op: String {
+        switch self {
+        case .create: "create"
+        case .kill: "kill"
+        case .killContainer: "kill_container"
+        case .killRemoveWorktree: "kill_remove_worktree"
+        case .rename: "rename"
+        case .restart: "restart"
+        case .launchAgent: "launch_agent"
+        case .getSpec: "get_spec"
+        case .modify: "modify"
+        case .deleteRecent: "delete_recent"
+        case .sidebarSave: "sidebar_save"
+        case .insertSection: "insert_section"
+        case .renameSection: "rename_section"
+        case .setTheme: "set_theme"
+        case .applySetting: "apply_setting"
+        case .clientFlags: "client_flags"
+        case .makeLatest: "make_latest"
+        }
+    }
+}
+
+/// Saved form of a sidebar for `sidebar_save`: tabs carry only `session`.
+private struct SaveSidebar: Encodable {
+    struct T: Encodable { let session: String }
+    struct C: Encodable { let id: String; let name: String; let active: String; let tabs: [T] }
+    struct S: Encodable {
+        let id: String; let name: String; let collapsed: Bool; let banner_font: String?; let members: [C]
+    }
+    let ungrouped: [C]
+    let sections: [S]
+
+    init(_ s: Sidebar) {
+        func c(_ x: Container) -> C { C(id: x.id, name: x.name, active: x.active, tabs: x.tabs.map { T(session: $0.session) }) }
+        ungrouped = s.ungrouped.map(c)
+        sections = s.sections.map { S(id: $0.id, name: $0.name, collapsed: $0.collapsed, banner_font: $0.bannerFont, members: $0.members.map(c)) }
+    }
+}
+
+public enum ClientMessage: Sendable {
+    case hello(client: String)
+    case resync
+    case cmd(id: UInt64, Command)
+
+    public func encoded() throws -> Data {
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.sortedKeys]
+        return try enc.encode(Wire(self))
+    }
+
+    private struct Wire: Encodable {
+        let msg: ClientMessage
+        init(_ m: ClientMessage) { msg = m }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: AnyKey.self)
+            func put<T: Encodable>(_ k: String, _ v: T) throws { try c.encode(v, forKey: AnyKey(k)) }
+            switch msg {
+            case .hello(let client):
+                try put("t", "hello")
+                try put("protocol", protocolVersion)
+                try put("client", client)
+            case .resync:
+                try put("t", "resync")
+            case .cmd(let id, let cmd):
+                try put("t", "cmd")
+                try put("id", id)
+                try put("op", cmd.op)
+                switch cmd {
+                case .create(let spec, let deferLaunch):
+                    try put("spec", spec)
+                    try put("defer_launch", deferLaunch)
+                case .kill(let s):
+                    try put("session", s)
+                case .killContainer(let s):
+                    try put("sessions", s)
+                case .killRemoveWorktree(let s, let p, let b, let m):
+                    try put("session", s); try put("worktree_path", p); try put("branch", b); try put("merge", m)
+                case .rename(let s, let d):
+                    try put("session", s); try put("display", d)
+                case .restart(let s, let r, let d):
+                    try put("session", s); try put("resume", r); try put("defer_launch", d)
+                case .launchAgent(let s, let r):
+                    try put("session", s)
+                    if let r { try put("resume", r) } else { try c.encodeNil(forKey: AnyKey("resume")) }
+                case .getSpec(let s):
+                    try put("session", s)
+                case .modify(let s, let spec):
+                    try put("session", s); try put("spec", spec)
+                case .deleteRecent(let id):
+                    try put("recent", id)
+                case .sidebarSave(let sb):
+                    try put("sidebar", SaveSidebar(sb))
+                case .insertSection(let n):
+                    try put("name", n)
+                case .renameSection(let s, let n):
+                    try put("section", s); try put("name", n)
+                case .setTheme(let n, let p):
+                    try put("name", n); try put("persist", p)
+                case .applySetting(let k, let v):
+                    try put("key", k); try put("value", v)
+                case .clientFlags(let t, let i):
+                    try put("tty", t); try put("ignore_size", i)
+                case .makeLatest(let t):
+                    try put("tty", t)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Framing
+
+public enum FrameError: Error, Equatable {
+    case tooLarge(UInt32)
+}
+
+public enum Frame {
+    public static let maxLength: UInt32 = 16 * 1024 * 1024
+
+    public static func encode(_ body: Data) -> Data {
+        var out = Data(capacity: body.count + 4)
+        let n = UInt32(body.count).bigEndian
+        withUnsafeBytes(of: n) { out.append(contentsOf: $0) }
+        out.append(body)
+        return out
+    }
+}
+
+/// Accumulates bytes from a stream socket and yields whole frames.
+public struct FrameReader: Sendable {
+    private var buffer = Data()
+    public init() {}
+
+    public mutating func append(_ data: Data) { buffer.append(data) }
+
+    public mutating func next() throws -> Data? {
+        guard buffer.count >= 4 else { return nil }
+        let start = buffer.startIndex
+        let len = buffer[start..<start + 4].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+        if len > Frame.maxLength { throw FrameError.tooLarge(len) }
+        guard buffer.count >= 4 + Int(len) else { return nil }
+        let body = buffer.subdata(in: start + 4..<start + 4 + Int(len))
+        buffer.removeSubrange(start..<start + 4 + Int(len))
+        return body
+    }
+}
