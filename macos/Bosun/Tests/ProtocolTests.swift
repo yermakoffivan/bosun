@@ -8,7 +8,7 @@ final class ProtocolTests: XCTestCase {
 
     static let snapshotJSON = """
     {"t":"snapshot","seq":1,
-     "server":{"version":"2.1.16","protocol":1,"tmux_socket":"bosun"},
+     "server":{"version":"2.2.0","protocol":1,"tmux_socket":"bosun"},
      "sessions":[{"name":"bosun-api-1a2b3c4d","display":"api","agent":"claude","path":"/w/api",
                   "windows":1,"attached":true,"created":1792130862,
                   "container_id":"con-1","worktree_path":"/w/api/.worktrees/feat","branch":"feat",

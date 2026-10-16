@@ -1194,7 +1194,7 @@ mod tests {
         round_trip_server(ServerMsg::Snapshot(Box::new(Snapshot {
             seq: 1,
             server: ServerInfo {
-                version: "2.1.16".into(),
+                version: "2.2.0".into(),
                 protocol: PROTOCOL_VERSION,
                 tmux_socket: Some("bosun".into()),
             },

@@ -49,7 +49,7 @@ Every message from the daemon except `ack` and `error` carries a `seq`. The `sna
 `protocol` is the major version, currently `1`. The daemon refuses any other value with an `error` whose `code` is `protocol_mismatch` and whose `message` is meant for a person, then closes the connection:
 
 ```
-← {"t":"error","code":"protocol_mismatch","message":"bosun serve 2.1.16 speaks protocol 1 but this client speaks 2; update bosun or the app so both match"}
+← {"t":"error","code":"protocol_mismatch","message":"bosun serve 2.2.0 speaks protocol 1 but this client speaks 2; update bosun or the app so both match"}
 ```
 
 New message kinds, new commands and new optional fields do not change the major version. Clients ignore message kinds they don't know.
@@ -265,7 +265,7 @@ What the new-session form collects:
 
 ```json
 {"t":"snapshot","seq":1,
- "server":{"version":"2.1.16","protocol":1,"tmux_socket":"bosun"},
+ "server":{"version":"2.2.0","protocol":1,"tmux_socket":"bosun"},
  "sessions":[…],"statuses":{…},"sidebar":{…},"recents":[…],"config":{…},"theme":{…},"themes":[…],
  "keybindings":{…}}
 ```
