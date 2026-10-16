@@ -470,6 +470,13 @@ final class Workspace {
         activate(n)
     }
 
+    /// The visible terminal under a point in window coordinates.
+    func terminal(atWindowPoint p: NSPoint) -> TerminalView? {
+        visibleSessions.compactMap { pool.view(for: $0) }.first { v in
+            !v.isHidden && v.window != nil && v.bounds.contains(v.convert(p, from: nil))
+        }
+    }
+
     func tile(at point: NSPoint) -> TileID? {
         lastLayout.tiles.first { $0.value.contains(point) }?.key
     }

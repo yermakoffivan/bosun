@@ -172,6 +172,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     func enableTestKey() {
         assumeKeyForTests = true
+        // Coalescing would let the real pointer's moves swallow the ones a test posts.
+        NSEvent.isMouseCoalescingEnabled = false
         focus.setWindowKey(true)
         workspace.windowKeyChanged(true)
     }
@@ -220,10 +222,19 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             return out
         } as Any)
         monitors.append(NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { [weak self] e in
+            nonisolated(unsafe) let event = e
+            nonisolated(unsafe) var out: NSEvent? = e
             MainActor.assumeIsolated {
-                if let self, e.window === self.window { self.workspace.pointerMoved(e) }
+                // The test modes drive the pointer themselves; the real one (someone using the Mac
+                // while a test runs) would move focus between panes behind the test's back.
+                if testMode && !TestKit.posted(event) { out = nil; return }
+                guard let self, event.window === self.window else { return }
+                self.workspace.pointerMoved(event)
+                // A posted mouse-moved never passes through the window server's tracking areas, so
+                // the test modes hand it to the terminal under the pointer, as a tracking area would.
+                if testMode { self.workspace.terminal(atWindowPoint: event.locationInWindow)?.mouseMoved(with: event) }
             }
-            return e
+            return out
         } as Any)
         monitors.append(NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] e in
             MainActor.assumeIsolated { self?.clickedSomewhere(e) }

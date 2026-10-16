@@ -165,9 +165,19 @@ class TestKit {
         await sleep(60)
     }
 
-    func mouse(_ type: NSEvent.EventType, _ p: NSPoint, clicks: Int = 1) -> NSEvent? {
-        NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: now, windowNumber: w.windowNumber,
-                           context: nil, eventNumber: 0, clickCount: clicks, pressure: type == .leftMouseDown || type == .rightMouseDown ? 1 : 0)
+    /// Timestamps of the mouse events the tests posted. In the test modes, mouse-moved events that
+    /// aren't among them (the real pointer) are dropped. (AppKit replaces a posted event's number.)
+    private static var postedTimes: Set<Int64> = []
+    /// To the microsecond: AppKit hands the event back with its timestamp's low bits changed.
+    private static func micros(_ t: TimeInterval) -> Int64 { Int64((t * 1_000_000).rounded()) }
+    static func posted(_ e: NSEvent) -> Bool { postedTimes.contains(micros(e.timestamp)) }
+
+    func mouse(_ type: NSEvent.EventType, _ p: NSPoint, clicks: Int = 1, mods: NSEvent.ModifierFlags = []) -> NSEvent? {
+        let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: mods, timestamp: now, windowNumber: w.windowNumber,
+                                   context: nil, eventNumber: 0, clickCount: clicks,
+                                   pressure: type == .leftMouseDown || type == .rightMouseDown ? 1 : 0)
+        if let e { TestKit.postedTimes.insert(TestKit.micros(e.timestamp)) }
+        return e
     }
 
     /// A click at a point in window coordinates.
