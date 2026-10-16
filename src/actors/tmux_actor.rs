@@ -1952,10 +1952,22 @@ async fn refresh_all(
         // instead of paying another `tmux` exec. See
         // `CAPTURE_REUSE_AFTER` for why "quiet" needs a couple of
         // seconds of slack.
+        //
+        // tmux doesn't move `session_activity` for output in a session no
+        // client is attached to, so "quiet" can be wrong. A hook report
+        // newer than the capture means the agent did something since:
+        // take a fresh one, or the screen cross-checks in
+        // `agent_hooks::resolve` would judge the new report against the
+        // old screen (a finished turn read as still working).
         let cached = state
             .captures
             .get(&s.name)
-            .filter(|c| c.still_valid(s.last_activity, s.pane_width, now));
+            .filter(|c| c.still_valid(s.last_activity, s.pane_width, now))
+            .filter(|c| {
+                !s.hook
+                    .as_ref()
+                    .is_some_and(|h| epoch_ms(c.taken_at) < h.at_ms)
+            });
         let snap = match cached {
             Some(c) => c.snapshot(),
             None => {
