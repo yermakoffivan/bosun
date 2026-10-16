@@ -305,10 +305,11 @@ One entry per live tmux session that Bosun manages, in tmux's order:
 
 ```json
 {"bosun-api-1a2b3c4d":{"state":"waiting","source":"hook","detail":"permission: Bash"},
+ "bosun-web-9c0d1e2f":{"state":"idle","source":"hook","done_at":1760000123456},
  "bosun-docs-5e6f7a8b":{"state":"idle","source":"detector"}}
 ```
 
-The agent state per session. `state` is `running`, `waiting` (blocked on you: a permission or question prompt), `done` (finished a turn), `idle`, `error` or `unknown`. `source` is `hook` when the agent reported the state itself through the hooks Bosun installs at launch (see the README's "Agent status from hooks"), or `detector` when Bosun worked it out from the pane title and contents. `detail` comes only with hook states and says what the state is about, e.g. `permission: Bash`, `question` or `plan approval` while waiting. A session that's removed from `sessions` is removed from here too.
+The agent state per session. `state` is `running`, `waiting` (blocked on you: a permission or question prompt), `done` (finished a turn), `idle`, `error` or `unknown`. `source` is `hook` when the agent reported the state itself through the hooks Bosun installs at launch (see the README's "Agent status from hooks"), or `detector` when Bosun worked it out from the pane title and contents. `detail` comes only with hook states and says what the state is about, e.g. `permission: Bash`, `question` or `plan approval` while waiting. `done_at` comes only with hook states, when the agent's own report is that it finished its turn (Claude Code's `Stop` hook): it's when it said so, in Unix milliseconds. `state` is `idle` then, as below. A newer turn finishing gives a newer `done_at`, and any other hook report (the user sent a prompt, a permission prompt opened) drops it. A client that wants to show "finished, your turn" compares it with the last time the user typed into that session. A session that's removed from `sessions` is removed from here too.
 
 This is the state Bosun detects for the session itself. The TUI also shows an idle row as done when it ran and changed since you last looked at it; that depends on what each viewer has seen, so the daemon leaves it to the client.
 
@@ -388,7 +389,7 @@ Each delta replaces one part of the snapshot.
 ```
 
 - `sessions`: `upsert` holds full rows that are new or changed, `removed` the names of sessions that are gone (their statuses go with them). Either may be absent. Row order follows tmux's; a client that cares about order uses the sidebar.
-- `status`: one session's state, source or detail changed. The fields are the same as one entry in the snapshot's `statuses`. A state an agent reports through its hook goes out within about 250 ms: the daemon re-reads every session's hook state, pane title and command four times a second over its control-mode connection. States the detectors work out from the pane's contents follow the once-a-second refresh, as in the TUI. (If the control-mode connection is down, hook states fall back to the once-a-second refresh too.)
+- `status`: one session's state, source, detail or `done_at` changed. The fields are the same as one entry in the snapshot's `statuses`. A state an agent reports through its hook goes out within about 250 ms: the daemon re-reads every session's hook state, pane title and command four times a second over its control-mode connection. States the detectors work out from the pane's contents follow the once-a-second refresh, as in the TUI. (If the control-mode connection is down, hook states fall back to the once-a-second refresh too.)
 - The others replace that part of the snapshot whole. These are small and change rarely (on a command, a reconcile, or an edit to `config.toml`). `keybindings` is sent when an edit to `config.toml` changes what the shortcuts resolve to.
 
 The daemon picks up changes to `config.toml` made elsewhere (the TUI's theme picker or settings panel, a text editor) within a second and sends the matching deltas, so a theme change in either the TUI or the app shows in both.
