@@ -9,18 +9,34 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
 const BIN: &str = env!("CARGO_BIN_EXE_bosun");
 
+/// How long any wait for the daemon, tmux or the TUI may take before
+/// the test fails. Generous: a loaded 2-core CI runner can take seconds
+/// for what takes milliseconds here, and every wait ends as soon as its
+/// condition holds.
+const WAIT: Duration = Duration::from_secs(30);
+
+/// A tmux socket name no other fixture uses. The tests in this file run
+/// in parallel threads of one process, so the pid alone doesn't tell
+/// them apart, and neither does the clock: macOS's `SystemTime` only
+/// moves in whole microseconds, and two fixtures created in the same
+/// microsecond used to share a tmux server (one test's teardown killed
+/// the other's sessions). The counter makes each name unique within the
+/// process; pid and time keep it unique across runs.
 fn unique_socket() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    format!("bosun-serve-it-{}-{}", std::process::id(), nanos)
+    format!("bosun-serve-it-{}-{}-{}", std::process::id(), n, nanos)
 }
 
 /// The daemon process, its tmux server and its HOME, torn down on drop.
@@ -79,8 +95,11 @@ impl Fixture {
 
     fn start(&mut self) -> PathBuf {
         let path = self.socket_path();
+        // The idle timer runs from startup until the first client
+        // connects, so leave room for a slow first connect. The daemon
+        // is killed on drop either way.
         self.child = Some(
-            self.command(&["serve", "--idle-timeout", "3"])
+            self.command(&["serve", "--idle-timeout", "30"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
@@ -116,13 +135,11 @@ struct Conn {
 
 impl Conn {
     fn connect(path: &PathBuf) -> Self {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + WAIT;
         loop {
             match UnixStream::connect(path) {
                 Ok(stream) => {
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(15)))
-                        .unwrap();
+                    stream.set_read_timeout(Some(WAIT)).unwrap();
                     return Self {
                         stream,
                         last_seq: None,
@@ -326,7 +343,7 @@ fn serve_hello_snapshot_create_delta_kill() {
     // removes its socket.
     drop(c);
     let mut child = fx.child.take().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + WAIT;
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             assert!(status.success(), "daemon exit: {status:?}");
@@ -469,11 +486,12 @@ fn serve_hook_state_reaches_clients_within_the_poll() {
 
     // Each report lands well inside the 1 s refresh: the 250 ms status
     // poll picks it up. Five in a row all under 600 ms would happen by
-    // chance about 8 % of the time on a 1 s cadence.
+    // chance about 8 % of the time on a 1 s cadence. Timed from the
+    // hook's exit (the pane options are written by then), so starting
+    // the hook process on a loaded machine doesn't count.
     let mut took = Vec::new();
     for i in 0..5u64 {
         let tool = format!("Tool{i}");
-        let start = Instant::now();
         let mut hook = Command::new(BIN)
             .args(["hook", "claude", "PermissionRequest"])
             .env("TMUX", &server)
@@ -490,6 +508,7 @@ fn serve_hook_state_reaches_clients_within_the_poll() {
             .write_all(json!({ "tool_name": tool }).to_string().as_bytes())
             .unwrap();
         assert!(hook.wait().unwrap().success());
+        let start = Instant::now();
         let detail = format!("permission: {tool}");
         c.until("hook status delta", |v| {
             v["t"] == "status"
@@ -656,7 +675,7 @@ fn serve_launch_types_only_the_command() {
         let out = fx.tmux(&["display", "-p", "-t", &name, format]);
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     };
-    wait_for("cat in the pane", Duration::from_secs(15), || {
+    wait_for("cat in the pane", WAIT, || {
         display("#{pane_current_command}") == "cat"
     });
     std::thread::sleep(Duration::from_millis(1500));
@@ -761,7 +780,7 @@ fn serve_reports_client_moves_and_hides_the_status_line_for_app_clients() {
         let out = fx.tmux(&["display", "-p", "-t", session, "#{status}"]);
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     };
-    wait_for("status lines on", Duration::from_secs(10), || {
+    wait_for("status lines on", WAIT, || {
         status(&a) == "on" && status(&b) == "on"
     });
 
@@ -778,9 +797,7 @@ fn serve_reports_client_moves_and_hides_the_status_line_for_app_clients() {
         .expect("app client");
     assert_eq!(row[2], "xterm-ghostty-bosun");
     assert_eq!(row[3], "", "TUI hints on an app client");
-    wait_for("A's status line off", Duration::from_secs(5), || {
-        status(&a) == "off"
-    });
+    wait_for("A's status line off", WAIT, || status(&a) == "off");
 
     // Something moves it to B (a jump key typed inside it does the same).
     fx.tmux(&["switch-client", "-c", &tty, "-t", &format!("={b}")]);
@@ -788,17 +805,13 @@ fn serve_reports_client_moves_and_hides_the_status_line_for_app_clients() {
     let moved = seen.last().unwrap();
     assert_eq!(moved["tty"], tty.as_str());
     assert_eq!(moved["session"], b.as_str());
-    wait_for(
-        "status lines follow the move",
-        Duration::from_secs(5),
-        || status(&a) == "on" && status(&b) == "off",
-    );
+    wait_for("status lines follow the move", WAIT, || {
+        status(&a) == "on" && status(&b) == "off"
+    });
 
     // Another kind of client on B brings the line back, with its hints.
     let other = TermClient::attach(&fx, &b, "xterm-256color", terminfo.path());
-    wait_for("B's status line back", Duration::from_secs(5), || {
-        status(&b) == "on"
-    });
+    wait_for("B's status line back", WAIT, || status(&b) == "on");
     let rows = clients();
     let hint = rows
         .iter()
@@ -810,9 +823,7 @@ fn serve_reports_client_moves_and_hides_the_status_line_for_app_clients() {
         "hints missing for a TUI client: {rows:?}"
     );
     drop(other);
-    wait_for("B's status line off again", Duration::from_secs(5), || {
-        status(&b) == "off"
-    });
+    wait_for("B's status line off again", WAIT, || status(&b) == "off");
 
     // A detach is reported too.
     fx.tmux(&["detach-client", "-t", &tty]);
@@ -820,11 +831,9 @@ fn serve_reports_client_moves_and_hides_the_status_line_for_app_clients() {
     c.until("client_detached", |v| {
         v["t"] == "client_detached" && v["tty"] == tty.as_str()
     });
-    wait_for(
-        "B's status line on with nobody attached",
-        Duration::from_secs(5),
-        || status(&b) == "on",
-    );
+    wait_for("B's status line on with nobody attached", WAIT, || {
+        status(&b) == "on"
+    });
     drop(app);
 }
 
@@ -856,7 +865,7 @@ fn row_of(sidebar: &Value, session: &str) -> Option<String> {
 
 /// A fresh snapshot's sidebar once it has a row for each of `sessions`.
 fn sidebar_with(c: &mut Conn, sessions: &[&str]) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + WAIT;
     loop {
         c.send(json!({"t": "resync"}));
         let seen = c.until("snapshot", |v| v["t"] == "snapshot");
@@ -1071,7 +1080,7 @@ fn tui_shows_rows_the_daemon_merged() {
             .collect::<Vec<_>>()
             .join(" ")
     };
-    wait_for("the TUI lists both rows", Duration::from_secs(15), || {
+    wait_for("the TUI lists both rows", WAIT, || {
         let s = screen();
         s.contains("alpha") && s.contains("beta")
     });
@@ -1084,7 +1093,7 @@ fn tui_shows_rows_the_daemon_merged() {
     );
     assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
     // One row with a two-tab badge, its tabs listed under it.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + WAIT;
     loop {
         let s = screen();
         if s.contains("(2)") && s.contains("alpha · beta") {

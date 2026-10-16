@@ -5,8 +5,11 @@
 
 use bosun::tmux::{TmuxClient, TokioTmuxClient};
 
-fn unique_socket() -> String {
-    format!("bosun-it-{}-{}", std::process::id(), rand_suffix())
+/// `tag` tells apart the tests of this file, which run in parallel in one
+/// process: the time alone doesn't (macOS's clock moves in whole
+/// microseconds).
+fn unique_socket(tag: &str) -> String {
+    format!("bosun-it-{}-{}-{}", tag, std::process::id(), rand_suffix())
 }
 
 fn rand_suffix() -> String {
@@ -33,7 +36,7 @@ fn sh_ignore(args: &[&str]) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn list_sessions_against_real_tmux() {
-    let sock = unique_socket();
+    let sock = unique_socket("list");
     // Set up.
     sh(&["-L", &sock, "new-session", "-d", "-s", "alpha"]);
     sh(&["-L", &sock, "new-session", "-d", "-s", "beta"]);
@@ -54,7 +57,7 @@ async fn list_sessions_against_real_tmux() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn empty_server_returns_empty_list_not_error() {
-    let sock = unique_socket();
+    let sock = unique_socket("empty");
     // Don't start any sessions. `list-sessions` against an empty server
     // exits non-zero; our client must coerce that to Ok(vec![]).
     let client = TokioTmuxClient::with_socket(sock);
