@@ -243,7 +243,9 @@ extension FocusTest {
 enum MenuPicture {
     static func write(_ menu: NSMenu, to url: URL) -> Bool {
         let font = NSFont.menuFont(ofSize: 13)
-        let rowH: CGFloat = 22, sepH: CGFloat = 11, width: CGFloat = 260, pad: CGFloat = 5
+        let rowH: CGFloat = 22, sepH: CGFloat = 11, pad: CGFloat = 5
+        let widest = menu.items.map { NSAttributedString(string: $0.title, attributes: [.font: font]).size().width }.max() ?? 0
+        let width = max(260, ceil(widest) + 60)
         let height = menu.items.reduce(pad * 2) { $0 + ($1.isSeparatorItem ? sepH : rowH) }
         let scale: CGFloat = 2
         guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(width * scale), pixelsHigh: Int(height * scale), bitsPerSample: 8,

@@ -191,9 +191,13 @@ final class AppSettings {
         set { d.set(newValue, forKey: "focusFollowsMouse"); changed() }
     }
 
+    /// Off by default. In the test modes it stays in memory (and starts off), like the notification flags.
     var matchTerminalTheme: Bool {
-        get { d.bool(forKey: "matchTerminalTheme") }
-        set { d.set(newValue, forKey: "matchTerminalTheme"); changed() }
+        get { testMode ? testFlags["matchTerminalTheme"] ?? false : d.bool(forKey: "matchTerminalTheme") }
+        set {
+            if testMode { testFlags["matchTerminalTheme"] = newValue } else { d.set(newValue, forKey: "matchTerminalTheme") }
+            changed()
+        }
     }
 
     /// Terminal views kept attached, visible ones included. 12 holds the shown row and two or three
