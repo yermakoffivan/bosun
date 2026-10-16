@@ -215,18 +215,30 @@ async fn create_session_sets_bosun_marker_and_extra_env() {
     );
 
     // And the shell itself sees it, not just tmux's session environment.
-    let _ = tmux(
-        &sock,
-        &[
-            "send-keys",
-            "-t",
-            "bosun-env-cafef00d",
-            "echo marker=$BOSUN",
-            "Enter",
-        ],
-    );
+    // The shell is the user's own, startup files and all, which can take
+    // seconds on a loaded machine, and some setups drop keys typed while
+    // they start: so allow 30 s, and type the line again every 5 s.
+    let start = std::time::Instant::now();
+    let mut typed: Option<std::time::Instant> = None;
     let mut seen = false;
-    for _ in 0..50 {
+    while start.elapsed() < std::time::Duration::from_secs(30) {
+        let due = match typed {
+            None => true,
+            Some(t) => t.elapsed() >= std::time::Duration::from_secs(5),
+        };
+        if due {
+            let _ = tmux(
+                &sock,
+                &[
+                    "send-keys",
+                    "-t",
+                    "bosun-env-cafef00d",
+                    "echo marker=$BOSUN",
+                    "Enter",
+                ],
+            );
+            typed = Some(std::time::Instant::now());
+        }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let cap = tmux(&sock, &["capture-pane", "-p", "-t", "bosun-env-cafef00d"]);
         if String::from_utf8_lossy(&cap.stdout).contains("marker=1") {
