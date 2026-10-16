@@ -11,6 +11,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Claude Code reports its own status.** Claude sessions now tell Bosun when they're working, waiting for you (and on what, e.g. `permission: Bash`, a question or plan approval), done or idle, through hooks Bosun passes with `--settings` at launch. Your own `~/.claude/settings.json` is never edited, and your own hooks keep running alongside. Existing sessions pick this up on their next restart. The old detectors stay as a cross-check, e.g. when you interrupt Claude with Esc. Turn it off with **agent status hooks** in the settings panel (`s`), `agent_hooks = false` in `config.toml`, or `BOSUN_AGENT_HOOKS=0`. Other agents keep the existing detection for now, because none of them offers a way to add hooks without changing your own config.
 - **`bosun serve`.** A background daemon that runs Bosun's session engine behind a Unix socket, for graphical clients such as the upcoming Mac app. The protocol is described in `docs/protocol.md`.
 
+- **Merge rows into tabs.** A row's tabs can now be regrouped without restarting anything: the Mac app can merge one row into another (its tabs become the other row's tabs) or move a tab out into a row of its own. The TUI shows the result straight away and keeps it across tmux restarts.
+
 ### Changed
 
 - **Faster tmux commands.** Bosun now sends its tmux commands over one long-lived control-mode connection instead of starting a `tmux` process for each one. Navigating starts about 80% fewer processes, and common commands take well under a millisecond instead of about 5 ms. Set `BOSUN_TMUX_CONTROL=0` to go back to the old behaviour.

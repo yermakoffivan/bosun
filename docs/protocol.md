@@ -182,6 +182,22 @@ Removes one row from the recents list, by its `id`.
 
 Replaces the sidebar model after a drag and drop reorder, a move between sections, a collapse toggle or a tab reorder. Send back the [sidebar](#sidebar) from the last snapshot or delta, changed; a row's `name` and, on tabs, everything but `session` are ignored. Ids must be unique, every row needs at least one tab, `active` must be one of its tabs, and a session may appear only once. Sections and rows keep their ids. The change is written to `config.toml` (where the TUI reads it), and section membership is remembered by display name as it is in the TUI, so a session that is restarted or recreated lands back in its section. Sessions the model leaves out are added back as ungrouped rows on the next refresh.
 
+#### `move_tab`
+
+```json
+{"t":"cmd","id":18,"op":"move_tab","session":"bosun-api-2-9f8e7d6c","container_id":"con-1","index":0}
+```
+
+Moves one tab into another row, at `index` among that row's tabs (appended when absent). With `"container_id": null` the tab moves out into a new row of its own, placed right after its old row. A row left with no tabs disappears, and the target row keeps its active tab. The session keeps running: only the grouping changes. The change is saved to `config.toml` and to each moved session's `@bosun_container_id`, so it survives a tmux server restart, and a TUI on the same config picks it up on its next reload. Moving a tab into the row it's already in is acked and changes nothing; an unknown session or row is an error.
+
+#### `merge_rows`
+
+```json
+{"t":"cmd","id":19,"op":"merge_rows","from":"con-2","into":"con-1"}
+```
+
+Moves every tab of row `from` to the end of row `into`, in order, as one sidebar change (one `sidebar` delta). Row `from` disappears.
+
 #### `insert_section`
 
 ```json

@@ -123,6 +123,21 @@ pub enum CmdOp {
     SidebarSave {
         sidebar: SidebarWire,
     },
+    /// Move one tab into another row (`container_id`, at `index` among
+    /// its tabs, appended when absent), or with `container_id: null`
+    /// out into a new row of its own right after the old one.
+    MoveTab {
+        session: String,
+        container_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
+    },
+    /// Move every tab of row `from` into row `into`, in order, as one
+    /// sidebar change.
+    MergeRows {
+        from: String,
+        into: String,
+    },
     InsertSection {
         name: String,
     },
@@ -1060,6 +1075,20 @@ mod tests {
             CmdOp::SidebarSave {
                 sidebar: SidebarWire::default(),
             },
+            CmdOp::MoveTab {
+                session: "s".into(),
+                container_id: Some("con-1".into()),
+                index: Some(0),
+            },
+            CmdOp::MoveTab {
+                session: "s".into(),
+                container_id: None,
+                index: None,
+            },
+            CmdOp::MergeRows {
+                from: "con-2".into(),
+                into: "con-1".into(),
+            },
             CmdOp::InsertSection {
                 name: "Work".into(),
             },
@@ -1115,6 +1144,50 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn move_tab_and_merge_rows_match_the_documented_wire_form() {
+        let m: ClientMsg = serde_json::from_str(
+            r#"{"t":"cmd","id":3,"op":"move_tab","session":"bosun-a","container_id":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            m,
+            ClientMsg::Cmd(CmdEnvelope {
+                id: 3,
+                op: CmdOp::MoveTab {
+                    session: "bosun-a".into(),
+                    container_id: None,
+                    index: None,
+                }
+            })
+        );
+        let m: ClientMsg = serde_json::from_str(
+            r#"{"t":"cmd","id":4,"op":"move_tab","session":"bosun-a","container_id":"con-1","index":2}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            m,
+            ClientMsg::Cmd(CmdEnvelope {
+                op: CmdOp::MoveTab { index: Some(2), container_id: Some(ref c), .. },
+                ..
+            }) if c == "con-1"
+        ));
+        let m: ClientMsg = serde_json::from_str(
+            r#"{"t":"cmd","id":5,"op":"merge_rows","from":"con-2","into":"con-1"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            m,
+            ClientMsg::Cmd(CmdEnvelope {
+                id: 5,
+                op: CmdOp::MergeRows {
+                    from: "con-2".into(),
+                    into: "con-1".into(),
+                }
+            })
+        );
     }
 
     #[test]

@@ -211,6 +211,11 @@ pub enum Command {
         internal: String,
         new_display: String,
     },
+    /// Point each session's `@bosun_container_id` at a sidebar row,
+    /// `(internal, container_id)`, after `bosun serve` moved tabs
+    /// between rows. The sidebar model is the daemon's to change; this
+    /// only keeps the tmux option in step so reconcile agrees with it.
+    SetContainerIds(Vec<(String, String)>),
     /// Kill and recreate a session using the metadata we persisted
     /// as `@bosun_*` tmux user options when it was first created.
     /// The new session gets a fresh internal name (new hex suffix)

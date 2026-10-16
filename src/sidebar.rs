@@ -175,6 +175,25 @@ pub struct SidebarModel {
     pub sections: Vec<Section>,
 }
 
+/// Why [`SidebarModel::move_tab`] or [`SidebarModel::merge_rows`]
+/// refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MoveError {
+    /// No row has this session as a tab.
+    UnknownSession(String),
+    /// No row has this container id.
+    UnknownContainer(String),
+}
+
+impl std::fmt::Display for MoveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MoveError::UnknownSession(s) => write!(f, "no sidebar row has the session {s}"),
+            MoveError::UnknownContainer(c) => write!(f, "no sidebar row with id {c}"),
+        }
+    }
+}
+
 /// One row in the rendered sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisibleKind {
@@ -674,6 +693,152 @@ impl SidebarModel {
         }
     }
 
+    /// Where the container `container_id` sits: its bucket (`None` for
+    /// ungrouped, `Some(si)` for `sections[si]`) and its index there.
+    fn container_slot(&self, container_id: &str) -> Option<(Option<usize>, usize)> {
+        if let Some(i) = self.ungrouped.iter().position(|c| c.id == container_id) {
+            return Some((None, i));
+        }
+        self.sections.iter().enumerate().find_map(|(si, s)| {
+            s.members
+                .iter()
+                .position(|c| c.id == container_id)
+                .map(|mi| (Some(si), mi))
+        })
+    }
+
+    /// The slot of the container holding the tab `internal`.
+    fn slot_of_tab(&self, internal: &str) -> Option<(Option<usize>, usize)> {
+        if let Some(i) = self
+            .ungrouped
+            .iter()
+            .position(|c| c.contains_internal(internal))
+        {
+            return Some((None, i));
+        }
+        self.sections.iter().enumerate().find_map(|(si, s)| {
+            s.members
+                .iter()
+                .position(|c| c.contains_internal(internal))
+                .map(|mi| (Some(si), mi))
+        })
+    }
+
+    fn bucket_mut(&mut self, bucket: Option<usize>) -> &mut Vec<Container> {
+        match bucket {
+            None => &mut self.ungrouped,
+            Some(si) => &mut self.sections[si].members,
+        }
+    }
+
+    fn container_at_mut(&mut self, (bucket, i): (Option<usize>, usize)) -> &mut Container {
+        &mut self.bucket_mut(bucket)[i]
+    }
+
+    /// Take the tab `internal` out of the container at `slot`. When it
+    /// was the active tab, the tab that takes its place becomes active
+    /// (the one after it, or the one before when it was last), the way
+    /// closing a tab works.
+    fn take_tab(&mut self, slot: (Option<usize>, usize), internal: &str) {
+        let c = self.container_at_mut(slot);
+        let Some(pos) = c.members.iter().position(|m| m == internal) else {
+            return;
+        };
+        c.members.remove(pos);
+        if c.active == internal {
+            let next = pos.min(c.members.len().saturating_sub(1));
+            c.active = c.members.get(next).cloned().unwrap_or_default();
+        }
+    }
+
+    /// Drop the container `container_id` if it has no tabs left.
+    fn drop_if_empty(&mut self, container_id: &str) {
+        if let Some((bucket, i)) = self.container_slot(container_id) {
+            let b = self.bucket_mut(bucket);
+            if b[i].members.is_empty() {
+                b.remove(i);
+            }
+        }
+    }
+
+    /// Move the tab `internal` out of its row.
+    ///
+    /// - `target: Some(id)` makes it a tab of that row, at `index`
+    ///   among its tabs (clamped; appended when `None`). The target's
+    ///   active tab stays as it was.
+    /// - `target: None` gives it a new row of its own, placed right
+    ///   after the row it came from (in the same section).
+    ///
+    /// A row left with no tabs is removed. Returns the id of the row
+    /// the tab is now in, or `None` when nothing changed: the target is
+    /// the row it's already in, or it's asked for a row of its own and
+    /// already is one.
+    pub fn move_tab(
+        &mut self,
+        internal: &str,
+        target: Option<&str>,
+        index: Option<usize>,
+    ) -> Result<Option<String>, MoveError> {
+        let from = self
+            .slot_of_tab(internal)
+            .ok_or_else(|| MoveError::UnknownSession(internal.to_string()))?;
+        let from_id = self.container_at_mut(from).id.clone();
+        match target {
+            Some(target_id) => {
+                let to = self
+                    .container_slot(target_id)
+                    .ok_or_else(|| MoveError::UnknownContainer(target_id.to_string()))?;
+                if to == from {
+                    return Ok(None);
+                }
+                self.take_tab(from, internal);
+                // Taking a tab never removes a container, so `to` is
+                // still valid here.
+                let t = self.container_at_mut(to);
+                let at = index.unwrap_or(t.members.len()).min(t.members.len());
+                t.members.insert(at, internal.to_string());
+                self.drop_if_empty(&from_id);
+                Ok(Some(target_id.to_string()))
+            }
+            None => {
+                if self.container_at_mut(from).members.len() == 1 {
+                    return Ok(None);
+                }
+                self.take_tab(from, internal);
+                let row = Container::single(internal.to_string(), internal.to_string());
+                let id = row.id.clone();
+                let (bucket, i) = from;
+                self.bucket_mut(bucket).insert(i + 1, row);
+                Ok(Some(id))
+            }
+        }
+    }
+
+    /// Move every tab of row `from` into row `into`, in order, after
+    /// its existing tabs, and remove `from`. `into`'s active tab stays
+    /// as it was. Returns the tabs that moved (empty when `from` and
+    /// `into` are the same row).
+    pub fn merge_rows(&mut self, from: &str, into: &str) -> Result<Vec<String>, MoveError> {
+        let src = self
+            .container_slot(from)
+            .ok_or_else(|| MoveError::UnknownContainer(from.to_string()))?;
+        let dst = self
+            .container_slot(into)
+            .ok_or_else(|| MoveError::UnknownContainer(into.to_string()))?;
+        if src == dst {
+            return Ok(Vec::new());
+        }
+        let moved = std::mem::take(&mut self.container_at_mut(src).members);
+        let t = self.container_at_mut(dst);
+        for m in &moved {
+            if !t.contains_internal(m) {
+                t.members.push(m.clone());
+            }
+        }
+        self.drop_if_empty(from);
+        Ok(moved)
+    }
+
     /// Append a new empty section at the end of the sections list.
     /// Returns the new section's id.
     pub fn insert_section_at_end(&mut self, name: String) -> String {
@@ -971,6 +1136,178 @@ members = ["bosun-gamma"]
             "expected table form, got:\n{}",
             re_emitted
         );
+    }
+
+    /// A row with several tabs, `tabs[active]` active.
+    fn row(tabs: &[&str], active: usize) -> Container {
+        let mut c = con(tabs[0]);
+        for t in &tabs[1..] {
+            c.members.push(t.to_string());
+        }
+        c.active = tabs[active].to_string();
+        c
+    }
+
+    fn tabs(c: &Container) -> Vec<&str> {
+        c.members.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn move_tab_into_another_row_keeps_the_targets_active_tab() {
+        let mut m = SidebarModel {
+            ungrouped: vec![row(&["a1", "a2"], 1), row(&["b1"], 0)],
+            sections: vec![],
+        };
+        let b = m.ungrouped[1].id.clone();
+        assert_eq!(m.move_tab("a2", Some(&b), None), Ok(Some(b.clone())));
+        assert_eq!(tabs(&m.ungrouped[0]), vec!["a1"]);
+        assert_eq!(m.ungrouped[0].active, "a1", "source picks a new active tab");
+        assert_eq!(tabs(&m.ungrouped[1]), vec!["b1", "a2"]);
+        assert_eq!(m.ungrouped[1].active, "b1", "target's active tab stays");
+    }
+
+    #[test]
+    fn move_tab_honours_and_clamps_the_index() {
+        let mut m = SidebarModel {
+            ungrouped: vec![row(&["a", "x", "y"], 0), row(&["b1", "b2"], 1)],
+            sections: vec![],
+        };
+        let b = m.ungrouped[1].id.clone();
+        m.move_tab("x", Some(&b), Some(0)).unwrap();
+        assert_eq!(tabs(&m.ungrouped[1]), vec!["x", "b1", "b2"]);
+        m.move_tab("y", Some(&b), Some(99)).unwrap();
+        assert_eq!(tabs(&m.ungrouped[1]), vec!["x", "b1", "b2", "y"]);
+        assert_eq!(m.ungrouped[1].active, "b2");
+    }
+
+    #[test]
+    fn move_tab_drops_a_row_left_empty_across_sections() {
+        let mut m = SidebarModel {
+            ungrouped: vec![con("solo")],
+            sections: vec![sec("g1", "Work", &["w1", "w2"])],
+        };
+        let w2 = m.sections[0].members[1].id.clone();
+        assert_eq!(m.move_tab("solo", Some(&w2), None), Ok(Some(w2.clone())));
+        assert!(m.ungrouped.is_empty(), "the emptied row is gone");
+        assert_eq!(m.sections[0].members.len(), 2);
+        assert_eq!(tabs(&m.sections[0].members[1]), vec!["w2", "solo"]);
+    }
+
+    #[test]
+    fn move_tab_to_its_own_row_lands_right_after_the_old_one() {
+        let mut m = SidebarModel {
+            ungrouped: vec![con("top")],
+            sections: vec![Section {
+                members: vec![con("w0"), row(&["w1", "t2", "t3"], 1), con("w9")],
+                ..sec("g1", "Work", &[])
+            }],
+        };
+        let new_id = m.move_tab("t2", None, None).unwrap().expect("moved");
+        let members = &m.sections[0].members;
+        assert_eq!(members.len(), 4);
+        assert_eq!(tabs(&members[1]), vec!["w1", "t3"]);
+        assert_eq!(members[1].active, "t3", "the next tab takes over");
+        assert_eq!(members[2].id, new_id);
+        assert_eq!(tabs(&members[2]), vec!["t2"]);
+        assert_eq!(members[2].active, "t2");
+        assert_eq!(tabs(&members[3]), vec!["w9"]);
+        assert_eq!(m.ungrouped.len(), 1);
+    }
+
+    #[test]
+    fn move_tab_no_ops_and_errors() {
+        let mut m = SidebarModel {
+            ungrouped: vec![row(&["a1", "a2"], 0), con("b")],
+            sections: vec![],
+        };
+        let before = m.clone();
+        let a = m.ungrouped[0].id.clone();
+        assert_eq!(m.move_tab("a2", Some(&a), Some(0)), Ok(None), "same row");
+        assert_eq!(m.move_tab("b", None, None), Ok(None), "already its own row");
+        assert_eq!(m, before);
+        assert_eq!(
+            m.move_tab("nope", Some(&a), None),
+            Err(MoveError::UnknownSession("nope".into()))
+        );
+        assert_eq!(
+            m.move_tab("a1", Some("con-missing"), None),
+            Err(MoveError::UnknownContainer("con-missing".into()))
+        );
+        assert_eq!(m, before, "errors change nothing");
+    }
+
+    #[test]
+    fn merge_rows_moves_every_tab_in_order_and_drops_the_source() {
+        let mut m = SidebarModel {
+            ungrouped: vec![row(&["k1", "k1b"], 1)],
+            sections: vec![Section {
+                members: vec![row(&["k2", "k2b"], 0)],
+                ..sec("g1", "Work", &[])
+            }],
+        };
+        let from = m.ungrouped[0].id.clone();
+        let into = m.sections[0].members[0].id.clone();
+        assert_eq!(
+            m.merge_rows(&from, &into),
+            Ok(vec!["k1".to_string(), "k1b".to_string()])
+        );
+        assert!(m.ungrouped.is_empty());
+        let target = &m.sections[0].members[0];
+        assert_eq!(tabs(target), vec!["k2", "k2b", "k1", "k1b"]);
+        assert_eq!(target.active, "k2");
+        assert!(m.find_container(&from).is_none());
+    }
+
+    #[test]
+    fn merge_rows_into_itself_or_unknown_rows() {
+        let mut m = SidebarModel {
+            ungrouped: vec![con("a"), con("b")],
+            sections: vec![],
+        };
+        let a = m.ungrouped[0].id.clone();
+        let before = m.clone();
+        assert_eq!(m.merge_rows(&a, &a), Ok(vec![]));
+        assert_eq!(
+            m.merge_rows("con-x", &a),
+            Err(MoveError::UnknownContainer("con-x".into()))
+        );
+        assert_eq!(
+            m.merge_rows(&a, "con-y"),
+            Err(MoveError::UnknownContainer("con-y".into()))
+        );
+        assert_eq!(m, before);
+    }
+
+    /// After a merge, a refresh that still sees the moved session's
+    /// old `@bosun_container_id` keeps it where the model put it: the
+    /// model wins for sessions it already holds.
+    #[test]
+    fn reconcile_keeps_a_merged_tab_where_the_model_put_it() {
+        let mut m = SidebarModel {
+            ungrouped: vec![con("a"), con("b")],
+            sections: vec![],
+        };
+        let a = m.ungrouped[0].id.clone();
+        let b = m.ungrouped[1].id.clone();
+        m.merge_rows(&b, &a).unwrap();
+        m.reconcile(&[("a".into(), None), ("b".into(), Some(b.clone()))]);
+        assert_eq!(m.ungrouped.len(), 1);
+        assert_eq!(tabs(&m.ungrouped[0]), vec!["a", "b"]);
+    }
+
+    /// A session the model doesn't hold (a lost or fresh config.toml)
+    /// joins the row its `@bosun_container_id` names, which is what
+    /// `move_tab` stamps on it.
+    #[test]
+    fn reconcile_rebuilds_a_merged_row_from_the_container_option() {
+        let mut m = SidebarModel::default();
+        m.reconcile(&[
+            ("a".into(), Some("con-merged".into())),
+            ("b".into(), Some("con-merged".into())),
+        ]);
+        assert_eq!(m.ungrouped.len(), 1);
+        assert_eq!(m.ungrouped[0].id, "con-merged");
+        assert_eq!(tabs(&m.ungrouped[0]), vec!["a", "b"]);
     }
 
     #[test]

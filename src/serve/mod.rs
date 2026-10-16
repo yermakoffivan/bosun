@@ -652,11 +652,14 @@ impl Daemon {
         }
     }
 
-    fn ack(&self, client: u64, ack: Ack) {
+    /// Send an ack, after the deltas of whatever the command changed:
+    /// the protocol promises deltas first.
+    fn ack(&mut self, client: u64, ack: Ack) {
+        self.publish();
         self.send_to(client, &ServerMsg::Ack(ack));
     }
 
-    fn ack_result(&self, client: u64, id: u64, r: std::result::Result<(), String>) {
+    fn ack_result(&mut self, client: u64, id: u64, r: std::result::Result<(), String>) {
         let ack = match r {
             Ok(()) => Ack {
                 id,
@@ -873,6 +876,27 @@ impl Daemon {
                     .map(|model| self.save_client_sidebar(model));
                 self.ack_result(client, id, r);
             }
+            CmdOp::MoveTab {
+                session,
+                container_id,
+                index,
+            } => {
+                let r = self
+                    .app
+                    .sidebar
+                    .move_tab(&session, container_id.as_deref(), index);
+                self.after_move(client, id, r.map(|row| row.map(|r| vec![r])));
+            }
+            CmdOp::MergeRows { from, into } => {
+                let r = self.app.sidebar.merge_rows(&from, &into).map(|moved| {
+                    if moved.is_empty() {
+                        None
+                    } else {
+                        Some(vec![into.clone()])
+                    }
+                });
+                self.after_move(client, id, r);
+            }
             CmdOp::InsertSection { name } => {
                 let r = check_text("name", &name, false).map(|()| {
                     let mut out = Vec::new();
@@ -1033,6 +1057,38 @@ impl Daemon {
         written.map_err(|e| format!("settings: failed to save: {e}"))
     }
 
+    /// Finish a `move_tab` or `merge_rows` that already changed the
+    /// model: save it, then point the `@bosun_container_id` of every
+    /// live tab of the rows that changed at its row, so a session the
+    /// model doesn't hold (a lost config.toml) is reconciled back into
+    /// the same row. `Ok(None)` is a no-op, acked straight away. The
+    /// sidebar delta goes out before the ack (see `ack`).
+    fn after_move(
+        &mut self,
+        client: u64,
+        id: u64,
+        r: std::result::Result<Option<Vec<String>>, crate::sidebar::MoveError>,
+    ) {
+        let rows = match r {
+            Err(e) => return self.ack_result(client, id, Err(e.to_string())),
+            Ok(None) => return self.ack_result(client, id, Ok(())),
+            Ok(Some(rows)) => rows,
+        };
+        self.save_sidebar_and_history();
+        // The actor skips exited tabs and options already right.
+        let stamps: Vec<(String, String)> = rows
+            .iter()
+            .filter_map(|row| self.app.sidebar.find_container(row))
+            .flat_map(|c| c.members.iter().map(|tab| (tab.clone(), c.id.clone())))
+            .collect();
+        self.forward(
+            client,
+            id,
+            InflightKind::Other,
+            vec![Command::SetContainerIds(stamps)],
+        );
+    }
+
     /// Adopt a sidebar a client sent. Section history follows, so a
     /// row moved out of a section isn't put back on the next refresh.
     fn save_client_sidebar(&mut self, mut model: SidebarModel) {
@@ -1065,6 +1121,13 @@ impl Daemon {
         }
         self.app.sidebar = model;
         self.app.selected = 0;
+        self.save_sidebar_and_history();
+    }
+
+    /// Write the sidebar after a change, with section history following
+    /// it so a row moved out of a section isn't put back on the next
+    /// refresh.
+    fn save_sidebar_and_history(&mut self) {
         let mut history_changed = false;
         for v in &self.app.sessions {
             let display = v.display().to_string();
@@ -1388,6 +1451,7 @@ mod tests {
             "kill: tmux command failed: x",
             "kill container: a: x",
             "rename: x",
+            "move tab: x",
             "restart: x",
             "restart read: x",
             "cannot restart: session predates metadata support",

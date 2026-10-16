@@ -720,3 +720,315 @@ fn serve_reports_client_moves_and_hides_the_status_line_for_app_clients() {
     );
     drop(app);
 }
+
+/// Every row of a wire sidebar, ungrouped first, as the client sees it.
+fn rows(sidebar: &Value) -> Vec<Value> {
+    let mut out: Vec<Value> = sidebar["ungrouped"].as_array().unwrap().clone();
+    for s in sidebar["sections"].as_array().unwrap() {
+        out.extend(s["members"].as_array().unwrap().iter().cloned());
+    }
+    out
+}
+
+fn row_tabs(row: &Value) -> Vec<String> {
+    row["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["session"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The id of the row holding `session` in the latest sidebar seen.
+fn row_of(sidebar: &Value, session: &str) -> Option<String> {
+    rows(sidebar)
+        .into_iter()
+        .find(|r| row_tabs(r).iter().any(|t| t == session))
+        .map(|r| r["id"].as_str().unwrap().to_string())
+}
+
+/// A fresh snapshot's sidebar once it has a row for each of `sessions`.
+fn sidebar_with(c: &mut Conn, sessions: &[&str]) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        c.send(json!({"t": "resync"}));
+        let seen = c.until("snapshot", |v| v["t"] == "snapshot");
+        let sidebar = seen.last().unwrap()["sidebar"].clone();
+        if sessions.iter().all(|s| row_of(&sidebar, s).is_some()) {
+            return sidebar;
+        }
+        assert!(Instant::now() < deadline, "rows never appeared: {sidebar}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Send a command and return everything up to and including its ack.
+fn command(c: &mut Conn, id: u64, cmd: Value) -> Vec<Value> {
+    let mut v = cmd;
+    v["t"] = json!("cmd");
+    v["id"] = json!(id);
+    c.send(v);
+    c.until("ack", |v| is_ack(v, id))
+}
+
+fn container_option(fx: &Fixture, session: &str) -> String {
+    let out = fx.tmux(&["show-options", "-qv", "-t", session, "@bosun_container_id"]);
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn serve_merge_rows_and_move_tab() {
+    let mut fx = fixture();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    assert_eq!(c.recv().expect("snapshot")["t"], "snapshot");
+    let alpha = create_terminal(&mut c, 1, "alpha", "");
+    let beta = create_terminal(&mut c, 2, "beta", "");
+    let sidebar = sidebar_with(&mut c, &[&alpha, &beta]);
+    let a_row = row_of(&sidebar, &alpha).unwrap();
+    let b_row = row_of(&sidebar, &beta).unwrap();
+    assert_ne!(a_row, b_row);
+
+    // merge_rows: one sidebar delta, sent before the ack, with one row
+    // holding both tabs and alpha still active.
+    let seen = command(
+        &mut c,
+        10,
+        json!({"op": "merge_rows", "from": b_row, "into": a_row}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    let deltas: Vec<&Value> = seen.iter().filter(|v| v["t"] == "sidebar").collect();
+    assert_eq!(deltas.len(), 1, "one sidebar delta: {seen:#?}");
+    let merged = deltas[0]["sidebar"].clone();
+    let all = rows(&merged);
+    assert_eq!(all.len(), 1, "{merged}");
+    assert_eq!(all[0]["id"], a_row.as_str());
+    assert_eq!(row_tabs(&all[0]), vec![alpha.clone(), beta.clone()]);
+    assert_eq!(all[0]["active"], alpha.as_str());
+    // The tmux option follows, for both tabs of the row.
+    assert_eq!(container_option(&fx, &beta), a_row);
+    assert_eq!(container_option(&fx, &alpha), a_row);
+    // Both sessions are still the same tmux sessions.
+    let ls = fx.tmux(&["list-sessions", "-F", "#{session_name}"]);
+    let ls = String::from_utf8_lossy(&ls.stdout).into_owned();
+    assert!(ls.lines().any(|l| l == alpha) && ls.lines().any(|l| l == beta));
+
+    // Into the row it's already in: acked, nothing changes.
+    let seen = command(
+        &mut c,
+        11,
+        json!({"op": "move_tab", "session": beta, "container_id": a_row}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true);
+    assert!(!seen.iter().any(|v| v["t"] == "sidebar"), "{seen:#?}");
+
+    // Unknown session or row: refused.
+    let seen = command(
+        &mut c,
+        12,
+        json!({"op": "move_tab", "session": "bosun-nope-0", "container_id": a_row}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], false);
+    let seen = command(
+        &mut c,
+        13,
+        json!({"op": "move_tab", "session": beta, "container_id": "con-nope"}),
+    );
+    let ack = seen.last().unwrap();
+    assert_eq!(ack["ok"], false);
+    assert!(ack["error"].as_str().unwrap().contains("con-nope"), "{ack}");
+    let seen = command(
+        &mut c,
+        14,
+        json!({"op": "merge_rows", "from": "con-nope", "into": a_row}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], false);
+
+    // The merge survives a daemon restart (config.toml).
+    drop(c);
+    let mut child = fx.child.take().unwrap();
+    // SIGTERM, the way a user stops the daemon.
+    // SAFETY: signalling a child we spawned and haven't reaped.
+    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    child.wait().unwrap();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    let snap = c.recv().expect("snapshot");
+    let all = rows(&snap["sidebar"]);
+    assert_eq!(all.len(), 1, "{}", snap["sidebar"]);
+    assert_eq!(all[0]["id"], a_row.as_str());
+    assert_eq!(row_tabs(&all[0]), vec![alpha.clone(), beta.clone()]);
+
+    // move_tab with null: its own row again, right after the old one,
+    // and the option points at the new row.
+    let seen = command(
+        &mut c,
+        20,
+        json!({"op": "move_tab", "session": beta, "container_id": null}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    let split = seen
+        .iter()
+        .rev()
+        .find(|v| v["t"] == "sidebar")
+        .unwrap_or_else(|| panic!("no sidebar delta: {seen:#?}"))["sidebar"]
+        .clone();
+    let all = rows(&split);
+    assert_eq!(all.len(), 2, "{split}");
+    assert_eq!(all[0]["id"], a_row.as_str());
+    assert_eq!(row_tabs(&all[0]), vec![alpha.clone()]);
+    assert_eq!(row_tabs(&all[1]), vec![beta.clone()]);
+    let new_row = all[1]["id"].as_str().unwrap().to_string();
+    assert_ne!(new_row, a_row);
+    assert_eq!(container_option(&fx, &beta), new_row);
+
+    // And back in, at the front.
+    let seen = command(
+        &mut c,
+        21,
+        json!({"op": "move_tab", "session": beta, "container_id": a_row, "index": 0}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    let back = seen
+        .iter()
+        .rev()
+        .find(|v| v["t"] == "sidebar")
+        .unwrap_or_else(|| panic!("no sidebar delta: {seen:#?}"))["sidebar"]
+        .clone();
+    let all = rows(&back);
+    assert_eq!(all.len(), 1, "{back}");
+    assert_eq!(row_tabs(&all[0]), vec![beta.clone(), alpha.clone()]);
+    assert_eq!(all[0]["active"], alpha.as_str());
+    assert_eq!(container_option(&fx, &beta), a_row);
+}
+
+/// The TUI, running beside the daemon on the same tmux server and the
+/// same `config.toml`, shows a row the daemon merged as one row with two
+/// tabs, and doesn't write its old layout back. The TUI runs in a pane
+/// of a second throwaway tmux server, narrow enough that it lists a
+/// row's tabs under it in the sidebar.
+#[test]
+fn tui_shows_rows_the_daemon_merged() {
+    let mut fx = fixture();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    assert_eq!(c.recv().expect("snapshot")["t"], "snapshot");
+    let alpha = create_terminal(&mut c, 1, "alpha", "");
+    let beta = create_terminal(&mut c, 2, "beta", "");
+    let sidebar = sidebar_with(&mut c, &[&alpha, &beta]);
+    let a_row = row_of(&sidebar, &alpha).unwrap();
+    let b_row = row_of(&sidebar, &beta).unwrap();
+
+    let host = Host(format!("{}-host", fx.sock));
+    let unset: String = [
+        "TMUX",
+        "TMUX_PANE",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "BOSUN_PREFIX",
+        "BOSUN_THEME",
+        "BOSUN_DEFAULT_AGENT",
+        "BOSUN_REMOVE_DEAD_SESSIONS",
+        "BOSUN_SHOW_GROUP_IN_TITLE",
+        "BOSUN_HIDE_SINGLE_TAB_STRIP",
+        "BOSUN_EMBED",
+        "BOSUN_TMUX_CONTROL",
+    ]
+    .iter()
+    .map(|v| format!("-u {v} "))
+    .collect();
+    let tui = format!(
+        "exec env {unset}HOME='{}' BOSUN_TMUX_SOCKET='{}' '{BIN}'",
+        fx.home.path().display(),
+        fx.sock
+    );
+    host.run(&[
+        "new-session",
+        "-d",
+        "-s",
+        "tui",
+        "-x",
+        "70",
+        "-y",
+        "30",
+        &tui,
+    ]);
+    // Runs of spaces collapsed: the active tab gets padding around it.
+    let screen = || {
+        host.run(&["capture-pane", "-p", "-t", "tui"])
+            .split(' ')
+            .filter(|w| !w.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    wait_for("the TUI lists both rows", Duration::from_secs(15), || {
+        let s = screen();
+        s.contains("alpha") && s.contains("beta")
+    });
+    assert!(!screen().contains("(2)"), "{}", screen());
+
+    let seen = command(
+        &mut c,
+        10,
+        json!({"op": "merge_rows", "from": b_row, "into": a_row}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    // One row with a two-tab badge, its tabs listed under it.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let s = screen();
+        if s.contains("(2)") && s.contains("alpha · beta") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no merged row in the TUI:\n{s}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let s = screen();
+    assert_eq!(
+        s.matches("beta").count(),
+        1,
+        "beta has no row of its own:\n{s}"
+    );
+
+    // The TUI doesn't write its old layout back over the merge.
+    std::thread::sleep(Duration::from_secs(3));
+    let config = std::fs::read_to_string(fx.config_path()).unwrap();
+    let file: toml::Value = toml::from_str(&config).unwrap();
+    let ungrouped = file["sidebar"]["ungrouped"].as_array().unwrap();
+    assert_eq!(ungrouped.len(), 1, "{config}");
+    assert_eq!(ungrouped[0]["id"].as_str(), Some(a_row.as_str()));
+    let members: Vec<&str> = ungrouped[0]["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m.as_str().unwrap())
+        .collect();
+    assert_eq!(members, vec![alpha.as_str(), beta.as_str()]);
+    let s = screen();
+    assert!(s.contains("alpha · beta"), "{s}");
+}
+
+/// A second throwaway tmux server to run the TUI in. Killed on drop.
+struct Host(String);
+
+impl Host {
+    fn run(&self, args: &[&str]) -> String {
+        let out = Command::new("tmux")
+            .arg("-L")
+            .arg(&self.0)
+            .args(args)
+            .env_remove("TMUX")
+            .output()
+            .expect("tmux");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        self.run(&["kill-server"]);
+    }
+}

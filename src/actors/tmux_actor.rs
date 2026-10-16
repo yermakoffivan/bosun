@@ -704,6 +704,45 @@ pub fn spawn(
                         }
                     }
                 }
+                Command::SetContainerIds(pairs) => {
+                    // Only live sessions whose option differs: a row
+                    // can hold exited tabs, and the caller's session
+                    // list may be older than tmux's.
+                    match client.list_sessions().await {
+                        Ok(live) => {
+                            for (internal, container_id) in &pairs {
+                                let Some(s) = live.iter().find(|s| &s.name == internal) else {
+                                    continue;
+                                };
+                                if s.container_id.as_deref() == Some(container_id.as_str()) {
+                                    continue;
+                                }
+                                if let Err(e) =
+                                    client.set_container_id(internal, container_id).await
+                                {
+                                    let _ = evt_tx.send(AppMsg::Warn(format!("move tab: {}", e)));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = evt_tx.send(AppMsg::Warn(format!("move tab: {}", e)));
+                        }
+                    }
+                    // Refresh so `sessions[].container_id` follows.
+                    let _ = do_refresh(
+                        &*client,
+                        &config,
+                        &registry,
+                        &mut refresh_state,
+                        focused.as_deref(),
+                        socket.as_deref(),
+                        &mut last_bar_state,
+                        &mut globals,
+                        &evt_tx,
+                        None,
+                    )
+                    .await;
+                }
                 Command::RenameSession {
                     internal,
                     new_display,

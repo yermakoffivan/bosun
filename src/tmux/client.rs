@@ -111,6 +111,12 @@ pub trait TmuxClient: Send + Sync {
     /// change the internal tmux session name.
     async fn set_display_name(&self, session: &str, display: &str) -> Result<()>;
 
+    /// Point the `@bosun_container_id` user option at the sidebar row
+    /// `container_id`, after a tab moved between rows. Reconcile puts
+    /// a session the sidebar model doesn't hold into the row this
+    /// names.
+    async fn set_container_id(&self, session: &str, container_id: &str) -> Result<()>;
+
     /// Read bosun's persisted `@bosun_*` metadata off a session, or
     /// `Ok(None)` if the session has no agent set (pre-dates the
     /// feature or wasn't created by bosun). Used by restart to
@@ -698,6 +704,29 @@ impl TmuxClient for TokioTmuxClient {
         }
         Err(BosunError::Tmux(format!(
             "set @bosun_display on {}: {}",
+            session,
+            output.stderr.trim()
+        )))
+    }
+
+    async fn set_container_id(&self, session: &str, container_id: &str) -> Result<()> {
+        let output = self
+            .run(
+                &[
+                    "set-option",
+                    "-t",
+                    session,
+                    "@bosun_container_id",
+                    container_id,
+                ],
+                Retry::Safe,
+            )
+            .await?;
+        if output.success {
+            return Ok(());
+        }
+        Err(BosunError::Tmux(format!(
+            "set @bosun_container_id on {}: {}",
             session,
             output.stderr.trim()
         )))
