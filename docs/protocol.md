@@ -29,7 +29,7 @@ Every message, in both directions, is one frame: a 4-byte big-endian unsigned le
 
 ```
 → {"t":"hello","protocol":1,"client":"bosun-mac/0.1"}
-← {"t":"snapshot","seq":1,"server":{…},"sessions":[…],"statuses":{…},"sidebar":{…},"recents":[…],"config":{…},"theme":{…},"themes":[…],"keybindings":{…}}
+← {"t":"snapshot","seq":1,"server":{…},"sessions":[…],"statuses":{…},"sidebar":{…},"recents":[…],"config":{…},"theme":{…},"theme_light":{…},"theme_dark":{…},"themes":[…],"keybindings":{…}}
 ← {"t":"status","seq":2,"session":"bosun-api-1a2b3c4d","state":"running","source":"hook"}
 → {"t":"cmd","id":7,"op":"restart","session":"bosun-api-1a2b3c4d","resume":true}
 ← {"t":"notice","seq":3,"message":"restarted api"}
@@ -230,6 +230,15 @@ Switches the theme. `persist: false` is a live preview (while a picker is open) 
 
 Changes one settings-panel option and writes it to `config.toml`, the same as the TUI's settings panel. `key` is one of the `config.settings` keys; booleans take JSON booleans and choices take one of the listed `choices`. Pinned settings (an environment variable is set) and the read-only install settings are refused with the reason in `error`.
 
+`theme_light` and `theme_dark` also take `null` (or `""`), which unsets that side and removes the key from `config.toml`:
+
+```json
+{"t":"cmd","id":16,"op":"apply_setting","key":"theme_dark","value":"tokyonight"}
+{"t":"cmd","id":17,"op":"apply_setting","key":"theme_light","value":null}
+```
+
+Setting either never changes `theme`; see [Light and dark themes](#light-and-dark-themes).
+
 #### `client_flags`
 
 ```json
@@ -282,8 +291,8 @@ What the new-session form collects:
 ```json
 {"t":"snapshot","seq":1,
  "server":{"version":"2.2.0","protocol":1,"tmux_socket":"bosun"},
- "sessions":[…],"statuses":{…},"sidebar":{…},"recents":[…],"config":{…},"theme":{…},"themes":[…],
- "keybindings":{…}}
+ "sessions":[…],"statuses":{…},"sidebar":{…},"recents":[…],"config":{…},"theme":{…},
+ "theme_light":{…},"theme_dark":{…},"themes":[…],"keybindings":{…}}
 ```
 
 The whole state. `server.tmux_socket` is the `-L` socket name terminal views attach with (`tmux -L <socket> attach -t =<session>`); it's absent when Bosun uses tmux's default socket.
@@ -345,7 +354,7 @@ Specs used before, most recent first (up to 200). `last_used_at` is Unix millise
   {"key":"tmux_socket","value":"bosun","read_only":true}]}
 ```
 
-The settings panel as data. Keys: `theme`, `banner_font`, `default_agent`, `worktree_location` (`subdir` or `sibling`), `single_window`, `show_group_in_title`, `hide_single_tab_strip`, `remove_dead_sessions`, `embed_enabled`, plus the read-only install settings `session_prefix` and `tmux_socket` (null for tmux's default socket). `choices` is present for choice settings. `pinned_by` names the environment variable that pins a setting; environment variables beat `config.toml`, so a pinned setting is read-only, as it is in the TUI.
+The settings panel as data. Keys: `theme`, `theme_light` and `theme_dark` (a theme name, or `null` when unset), `banner_font`, `default_agent`, `worktree_location` (`subdir` or `sibling`), `single_window`, `show_group_in_title`, `hide_single_tab_strip`, `remove_dead_sessions`, `embed_enabled`, plus the read-only install settings `session_prefix` and `tmux_socket` (null for tmux's default socket). `choices` is present for choice settings. `pinned_by` names the environment variable that pins a setting; environment variables beat `config.toml`, so a pinned setting is read-only, as it is in the TUI.
 
 #### Theme
 
@@ -356,6 +365,19 @@ The settings panel as data. Keys: `theme`, `banner_font`, `default_agent`, `work
 ```
 
 Every color slot of the active theme as `#rrggbb`: backgrounds (`bg` the deepest, then `panel`, `panel_alt`, `selection_bg` for the selected row), text (`text`, `text_muted`), `accent`, `shadow`, `dim_fg` (text dimmed behind a modal) and one color per status. `status_done` is already resolved: themes that don't set it use `accent`, as the TUI does.
+
+#### Light and dark themes
+
+```json
+"theme_light":{"name":"github-light","bg":"#ffffff",…},
+"theme_dark":{"name":"tokyonight","bg":"#1a1b26",…}
+```
+
+An optional pair of themes for a client that follows the system's light and dark appearance (Bosun for Mac): `theme_light` and `theme_dark` in `config.toml`. Each is a whole palette in the same form as `theme`, sent only when that side is set to a theme that exists; an absent side means "use `theme`". A client uses `theme_light` while the system is in light appearance and `theme_dark` in dark, and falls back to `theme` for a side that isn't set, so with neither set it behaves exactly as before.
+
+`theme` itself keeps its meaning: it's the TUI's theme (the TUI can't tell the system appearance, so it ignores the pair) and what a client shows when the pair isn't set. `set_theme` changes only `theme`, and setting the pair with `apply_setting` never changes `theme`. A client that lets the user pick the pair sends `apply_setting` with `theme_light` or `theme_dark`.
+
+The palettes come with the snapshot rather than on request, so a client can switch the moment the appearance changes, before the daemon answers anything and from a cached snapshot.
 
 #### Themes
 
@@ -385,11 +407,13 @@ Each delta replaces one part of the snapshot.
 {"t":"config","seq":7,"config":{…whole config…}}
 {"t":"theme","seq":8,"theme":{…whole palette…}}
 {"t":"themes","seq":9,"themes":[…whole list…]}
-{"t":"keybindings","seq":10,"keybindings":{…whole object…}}
+{"t":"theme_pair","seq":10,"theme_light":{…whole palette…},"theme_dark":{…whole palette…}}
+{"t":"keybindings","seq":11,"keybindings":{…whole object…}}
 ```
 
 - `sessions`: `upsert` holds full rows that are new or changed, `removed` the names of sessions that are gone (their statuses go with them). Either may be absent. Row order follows tmux's; a client that cares about order uses the sidebar.
 - `status`: one session's state, source, detail or `done_at` changed. The fields are the same as one entry in the snapshot's `statuses`. A state an agent reports through its hook goes out within about 250 ms: the daemon re-reads every session's hook state, pane title and command four times a second over its control-mode connection. States the detectors work out from the pane's contents follow the once-a-second refresh, as in the TUI. (If the control-mode connection is down, hook states fall back to the once-a-second refresh too.)
+- `theme_pair`: the Light/Dark pair changed. It replaces both `theme_light` and `theme_dark`; a side that's absent (or `null`) is now unset.
 - The others replace that part of the snapshot whole. These are small and change rarely (on a command, a reconcile, or an edit to `config.toml`). `keybindings` is sent when an edit to `config.toml` changes what the shortcuts resolve to.
 
 The daemon picks up changes to `config.toml` made elsewhere (the TUI's theme picker or settings panel, a text editor) within a second and sends the matching deltas, so a theme change in either the TUI or the app shows in both.
@@ -397,7 +421,7 @@ The daemon picks up changes to `config.toml` made elsewhere (the TUI's theme pic
 ### `notice`
 
 ```json
-{"t":"notice","seq":11,"message":"created bosun-api-1a2b3c4d"}
+{"t":"notice","seq":12,"message":"created bosun-api-1a2b3c4d"}
 ```
 
 A message for a person, the same text the TUI shows in its status bar: confirmations and errors from Bosun's own work. Show it as a toast or ignore it. Messages caused by a command are also listed in that command's `ack`.
@@ -405,8 +429,8 @@ A message for a person, the same text the TUI shows in its status bar: confirmat
 ### `client_session` and `client_detached`
 
 ```json
-{"t":"client_session","seq":12,"tty":"/dev/ttys026","session":"bosun-api-1a2b3c4d"}
-{"t":"client_detached","seq":13,"tty":"/dev/ttys026"}
+{"t":"client_session","seq":13,"tty":"/dev/ttys026","session":"bosun-api-1a2b3c4d"}
+{"t":"client_detached","seq":14,"tty":"/dev/ttys026"}
 ```
 
 A tmux client attached to Bosun's tmux server changed session or went away. `tty` is the client's terminal, the same value `client_flags` takes (`#{client_tty}`, which libghostty reports with `ghostty_surface_tty_name()`); `session` is the tmux session name it's on now. They come from tmux control mode's `%client-session-changed` and `%client-detached`, for every terminal client on the server (control-mode clients are left out), so a client ignores ttys that aren't its own.

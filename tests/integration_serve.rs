@@ -444,6 +444,113 @@ fn serve_keybindings_follow_config_toml() {
     );
 }
 
+/// The Mac app's Light/Dark pair: palettes in the snapshot and in
+/// `theme_pair` deltas, set through `apply_setting` and by editing
+/// `config.toml`, and never touching `theme` (the TUI's).
+#[test]
+fn serve_theme_pair_palettes_and_settings() {
+    let mut fx = fixture();
+    let config = fx.config_path();
+    write_config(&config, "theme = 'nord'\ntheme_light = 'github-light'\n");
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    let snap = c.recv().expect("snapshot");
+    assert_eq!(snap["t"], "snapshot", "{snap}");
+    assert_eq!(snap["theme"]["name"], "nord");
+    assert_eq!(snap["theme_light"]["name"], "github-light");
+    assert!(snap["theme_light"]["bg"].as_str().unwrap().starts_with('#'));
+    assert!(snap.get("theme_dark").is_none(), "{snap}");
+    let setting = |config: &Value, key: &str| -> Value {
+        config["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["key"] == key)
+            .unwrap_or_else(|| panic!("no {key} in {config}"))
+            .clone()
+    };
+    let light = setting(&snap["config"], "theme_light");
+    assert_eq!(light["value"], "github-light");
+    assert_eq!(light["read_only"], false);
+    assert!(light["choices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t == "tokyonight"));
+    assert_eq!(setting(&snap["config"], "theme_dark")["value"], Value::Null);
+
+    // Set the dark side: a theme_pair delta with both palettes, a config
+    // delta, and `theme` untouched in the daemon and on disk.
+    let seen = command(
+        &mut c,
+        1,
+        json!({"op": "apply_setting", "key": "theme_dark", "value": "tokyonight"}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    let pair = seen
+        .iter()
+        .find(|v| v["t"] == "theme_pair")
+        .unwrap_or_else(|| panic!("no theme_pair delta: {seen:#?}"));
+    assert_eq!(pair["theme_light"]["name"], "github-light");
+    assert_eq!(pair["theme_dark"]["name"], "tokyonight");
+    let cfg = seen
+        .iter()
+        .find(|v| v["t"] == "config")
+        .expect("config delta");
+    assert_eq!(setting(&cfg["config"], "theme_dark")["value"], "tokyonight");
+    assert!(!seen.iter().any(|v| v["t"] == "theme"), "{seen:#?}");
+    let body = std::fs::read_to_string(&config).unwrap();
+    assert!(body.contains("theme = \"nord\""), "{body}");
+    assert!(body.contains("theme_dark = \"tokyonight\""), "{body}");
+
+    // Unset the light side with null.
+    let seen = command(
+        &mut c,
+        2,
+        json!({"op": "apply_setting", "key": "theme_light", "value": null}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    let pair = seen.iter().find(|v| v["t"] == "theme_pair").expect("delta");
+    assert!(pair.get("theme_light").is_none(), "{pair}");
+    assert_eq!(pair["theme_dark"]["name"], "tokyonight");
+    let body = std::fs::read_to_string(&config).unwrap();
+    assert!(!body.contains("theme_light"), "{body}");
+
+    // A name no theme has, or a non-string, is refused.
+    for (id, value) in [(3, json!("no-such-theme")), (4, json!(true))] {
+        let seen = command(
+            &mut c,
+            id,
+            json!({"op": "apply_setting", "key": "theme_light", "value": value}),
+        );
+        assert_eq!(seen.last().unwrap()["ok"], false, "{seen:#?}");
+    }
+
+    // Changing `theme` keeps the pair in config.toml.
+    let seen = command(
+        &mut c,
+        5,
+        json!({"op": "set_theme", "name": "dracula", "persist": true}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    assert!(!seen.iter().any(|v| v["t"] == "theme_pair"), "{seen:#?}");
+    let body = std::fs::read_to_string(&config).unwrap();
+    assert!(body.contains("theme = \"dracula\""), "{body}");
+    assert!(body.contains("theme_dark = \"tokyonight\""), "{body}");
+
+    // An edit made elsewhere arrives as a theme_pair delta.
+    write_config(
+        &config,
+        "theme = 'dracula'\ntheme_light = 'one-light'\ntheme_dark = 'tokyonight'\n",
+    );
+    let seen = c.until("theme_pair delta", |v| v["t"] == "theme_pair");
+    let pair = seen.last().unwrap();
+    assert_eq!(pair["theme_light"]["name"], "one-light");
+    assert_eq!(pair["theme_dark"]["name"], "tokyonight");
+    assert!(!seen.iter().any(|v| v["t"] == "theme"), "{seen:#?}");
+}
+
 #[test]
 fn serve_hook_state_reaches_clients_within_the_poll() {
     let mut fx = fixture();

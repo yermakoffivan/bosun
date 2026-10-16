@@ -221,6 +221,15 @@ pub enum ServerMsg {
         seq: u64,
         themes: Vec<ThemeEntry>,
     },
+    /// The palettes of the Light/Dark pair (`theme_light` and
+    /// `theme_dark` in `config.toml`), both at once. Absent is unset.
+    ThemePair {
+        seq: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        theme_light: Option<Box<ThemeWire>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        theme_dark: Option<Box<ThemeWire>>,
+    },
     Keybindings {
         seq: u64,
         keybindings: KeybindingsWire,
@@ -264,6 +273,13 @@ pub struct Snapshot {
     pub recents: Vec<RecentWire>,
     pub config: ConfigWire,
     pub theme: ThemeWire,
+    /// Palette for the macOS Light appearance, when `theme_light` is
+    /// set. Absent means "use `theme`".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_light: Option<ThemeWire>,
+    /// Palette for the macOS Dark appearance, when `theme_dark` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_dark: Option<ThemeWire>,
     pub themes: Vec<ThemeEntry>,
     #[serde(default)]
     pub keybindings: KeybindingsWire,
@@ -1296,6 +1312,8 @@ mod tests {
             recents: recents.clone(),
             config: config.clone(),
             theme: theme.clone(),
+            theme_light: None,
+            theme_dark: Some(theme.clone()),
             themes: themes.clone(),
             keybindings: KeybindingsWire::default(),
         })));
@@ -1323,6 +1341,16 @@ mod tests {
         round_trip_server(ServerMsg::Sidebar { seq: 4, sidebar });
         round_trip_server(ServerMsg::Recents { seq: 5, recents });
         round_trip_server(ServerMsg::Config { seq: 6, config });
+        round_trip_server(ServerMsg::ThemePair {
+            seq: 9,
+            theme_light: Some(Box::new(theme.clone())),
+            theme_dark: None,
+        });
+        round_trip_server(ServerMsg::ThemePair {
+            seq: 9,
+            theme_light: None,
+            theme_dark: None,
+        });
         round_trip_server(ServerMsg::Theme { seq: 7, theme });
         round_trip_server(ServerMsg::Themes { seq: 8, themes });
         round_trip_server(ServerMsg::Keybindings {
@@ -1525,6 +1553,35 @@ mod tests {
             sections: vec![],
         };
         assert!(empty.to_model().is_err());
+    }
+
+    #[test]
+    fn theme_pair_matches_the_documented_wire_form() {
+        let nord = ThemeWire::from(&crate::ui::Theme::builtin("nord").unwrap());
+        let msg = ServerMsg::ThemePair {
+            seq: 9,
+            theme_light: None,
+            theme_dark: Some(Box::new(nord)),
+        };
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["t"], "theme_pair");
+        assert_eq!(v["seq"], 9);
+        assert!(v.get("theme_light").is_none(), "unset is left out: {v}");
+        assert_eq!(v["theme_dark"]["name"], "nord");
+        assert_eq!(v["theme_dark"]["bg"], "#2e3440");
+        // `null` reads as unset too.
+        let back: ServerMsg = serde_json::from_str(
+            r#"{"t":"theme_pair","seq":3,"theme_light":null,"theme_dark":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            back,
+            ServerMsg::ThemePair {
+                seq: 3,
+                theme_light: None,
+                theme_dark: None
+            }
+        );
     }
 
     #[test]

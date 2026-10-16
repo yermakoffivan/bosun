@@ -234,8 +234,41 @@ struct Published {
     recents: Vec<RecentWire>,
     config: ConfigWire,
     theme: ThemeWire,
+    theme_light: Option<ThemeWire>,
+    theme_dark: Option<ThemeWire>,
     themes: Vec<ThemeEntry>,
     keybindings: KeybindingsWire,
+}
+
+/// The Mac app's Light/Dark pair (`theme_light` / `theme_dark` in
+/// `config.toml`): the names as configured, and their palettes. A side
+/// is unset ("same as `theme`") when its name is, or when no theme by
+/// that name exists. The pair never changes `theme`, which the TUI uses.
+#[derive(Debug, Clone, Default)]
+struct ThemePair {
+    light: Option<String>,
+    dark: Option<String>,
+    light_palette: Option<ThemeWire>,
+    dark_palette: Option<ThemeWire>,
+}
+
+impl ThemePair {
+    fn new(light: Option<String>, dark: Option<String>) -> Self {
+        let palette = |name: Option<&str>| {
+            let name = name?;
+            if !theme_entries().iter().any(|t| t.name == name) {
+                return None;
+            }
+            let theme = Theme::load(name, crate::config::user_themes_dir().as_deref());
+            Some(ThemeWire::from(&theme))
+        };
+        Self {
+            light_palette: palette(light.as_deref()),
+            dark_palette: palette(dark.as_deref()),
+            light,
+            dark,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,6 +308,7 @@ struct Daemon {
     client: Arc<TokioTmuxClient>,
     cmd_tx: mpsc::UnboundedSender<Command>,
     theme: Theme,
+    theme_pair: ThemePair,
     /// `[keybindings]` from `config.toml`, resolved the way the TUI
     /// resolves them (defaults when the table is invalid).
     keybindings: KeybindingsWire,
@@ -318,8 +352,10 @@ impl Daemon {
             ..Default::default()
         };
         let theme = Theme::load(&config.theme, crate::config::user_themes_dir().as_deref());
+        let theme_pair = ThemePair::new(config.theme_light.clone(), config.theme_dark.clone());
         Self {
             app,
+            theme_pair,
             keybindings: KeybindingsWire::from(&config.keybindings),
             embed_enabled: config.embed_enabled,
             agent_hooks: config.agent_hooks,
@@ -441,6 +477,8 @@ impl Daemon {
             recents: self.app.recents.iter().map(RecentWire::from).collect(),
             config: self.config_view(),
             theme: ThemeWire::from(&self.theme),
+            theme_light: self.theme_pair.light_palette.clone(),
+            theme_dark: self.theme_pair.dark_palette.clone(),
             themes: theme_entries(),
             keybindings: self.keybindings.clone(),
         }
@@ -459,8 +497,22 @@ impl Daemon {
             }
         };
         let themes: Vec<String> = theme_entries().into_iter().map(|t| t.name).collect();
+        let optional = |name: &Option<String>| match name {
+            Some(n) => serde_json::Value::from(n.clone()),
+            None => serde_json::Value::Null,
+        };
         let mut settings = vec![
-            row("theme", self.theme.name.clone().into(), Some(themes)),
+            row(
+                "theme",
+                self.theme.name.clone().into(),
+                Some(themes.clone()),
+            ),
+            row(
+                "theme_light",
+                optional(&self.theme_pair.light),
+                Some(themes.clone()),
+            ),
+            row("theme_dark", optional(&self.theme_pair.dark), Some(themes)),
             row(
                 "banner_font",
                 self.app.banner_font.clone().into(),
@@ -539,6 +591,8 @@ impl Daemon {
             recents: p.recents,
             config: p.config,
             theme: p.theme,
+            theme_light: p.theme_light,
+            theme_dark: p.theme_dark,
             themes: p.themes,
             keybindings: p.keybindings,
         }))
@@ -615,6 +669,14 @@ impl Daemon {
             let msg = ServerMsg::Theme {
                 seq: self.next_seq(),
                 theme: cur.theme.clone(),
+            };
+            self.broadcast(&msg);
+        }
+        if cur.theme_light != prev.theme_light || cur.theme_dark != prev.theme_dark {
+            let msg = ServerMsg::ThemePair {
+                seq: self.next_seq(),
+                theme_light: cur.theme_light.clone().map(Box::new),
+                theme_dark: cur.theme_dark.clone().map(Box::new),
             };
             self.broadcast(&msg);
         }
@@ -958,6 +1020,40 @@ impl Daemon {
         Ok(())
     }
 
+    /// `apply_setting` for `theme_light` / `theme_dark`: a theme name,
+    /// or `null` (or an empty string) to unset it. `theme` is left alone.
+    fn set_theme_pair_side(
+        &mut self,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> std::result::Result<(), String> {
+        let name = match value {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) if s.trim().is_empty() => None,
+            serde_json::Value::String(s) => {
+                if !theme_entries().iter().any(|t| t.name == *s) {
+                    return Err(format!("no theme named {s}"));
+                }
+                Some(s.clone())
+            }
+            _ => return Err(format!("{key} needs a theme name or null")),
+        };
+        let mut light = self.theme_pair.light.clone();
+        let mut dark = self.theme_pair.dark.clone();
+        let written = if key == "theme_light" {
+            light = name.clone();
+            crate::config::write_theme_light(name.as_deref())
+        } else {
+            dark = name.clone();
+            crate::config::write_theme_dark(name.as_deref())
+        };
+        self.theme_pair = ThemePair::new(light, dark);
+        // Our own write isn't an outside edit; don't reload it.
+        self.config_mtime = config_mtime();
+        self.file_config = Config::load();
+        written.map_err(|e| format!("settings: failed to save: {e}"))
+    }
+
     /// The settings panel's `apply_setting`, for the daemon's state.
     fn apply_setting(
         &mut self,
@@ -966,6 +1062,9 @@ impl Daemon {
     ) -> std::result::Result<(), String> {
         if let Some(var) = crate::config::env_pin(key) {
             return Err(format!("{key} is pinned by {var}"));
+        }
+        if key == "theme_light" || key == "theme_dark" {
+            return self.set_theme_pair_side(key, value);
         }
         let as_bool = || {
             value
@@ -1320,6 +1419,9 @@ impl Daemon {
         let old = std::mem::replace(&mut self.file_config, new.clone());
         if new.theme != old.theme {
             self.theme = Theme::load(&new.theme, crate::config::user_themes_dir().as_deref());
+        }
+        if new.theme_light != old.theme_light || new.theme_dark != old.theme_dark {
+            self.theme_pair = ThemePair::new(new.theme_light.clone(), new.theme_dark.clone());
         }
         if new.banner_font != old.banner_font {
             self.app.banner_font = new.banner_font.clone();
