@@ -39,6 +39,17 @@ enum Paths {
         return candidates.first { fm.isExecutableFile(atPath: $0) } ?? "tmux"
     }()
 
+    /// The terminal type the app's tmux clients attach with: Ghostty's `xterm-ghostty` entry under
+    /// a name of its own (the bundle's post-build step makes the copy). Matches `APP_CLIENT_TERM`
+    /// in the daemon's status_bar.rs.
+    static let appTerm = "xterm-ghostty-bosun"
+
+    /// The bundle's terminfo directory, when it has the `appTerm` entry (nil: attach as plain xterm-ghostty).
+    static let appTerminfo: String? = {
+        guard let dir = Bundle.main.resourceURL?.appendingPathComponent("terminfo").path else { return nil }
+        return fm.fileExists(atPath: "\(dir)/78/\(appTerm)") ? dir : nil
+    }()
+
     /// The daemon's default socket (protocol.md): Bosun's data directory on macOS.
     static var defaultSocket: String {
         "\(home)/Library/Application Support/dev.yetidevworks.bosun/bosun.sock"

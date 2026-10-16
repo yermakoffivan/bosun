@@ -63,6 +63,9 @@ targets:
           RES="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
           mkdir -p "$RES"
           rsync -a --delete "$SHARE/terminfo/" "$RES/terminfo/"
+          # The app's tmux clients attach as xterm-ghostty-bosun (the same entry under its own name),
+          # which is how tmux and Bosun tell them from other clients. See Paths.appTerm.
+          cp "$RES/terminfo/78/xterm-ghostty" "$RES/terminfo/78/xterm-ghostty-bosun"
           rsync -a --delete "$SHARE/ghostty/" "$RES/ghostty/"
   BosunCoreTests:
     type: bundle.unit-test

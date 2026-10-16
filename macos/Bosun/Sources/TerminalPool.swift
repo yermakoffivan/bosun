@@ -27,7 +27,13 @@ final class TerminalPool {
     func isWarm(_ session: String) -> Bool { views[session].map { !$0.exited } ?? false }
 
     func attachCommand(for session: String) -> String {
-        var parts = [ShellEscape.quote(Paths.tmux)]
+        var parts: [String] = []
+        // tmux knows the app's clients by this terminal type: it hides Bosun's TUI key hints and,
+        // when only the app shows a session, its status line (docs/protocol.md, "Terminal clients").
+        if let terminfo = Paths.appTerminfo {
+            parts += ["/usr/bin/env", "TERM=\(Paths.appTerm)", ShellEscape.quote("TERMINFO=\(terminfo)")]
+        }
+        parts.append(ShellEscape.quote(Paths.tmux))
         if let s = tmuxSocket { parts += ["-L", ShellEscape.quote(s)] }
         parts += ["attach", "-t", ShellEscape.quote("=\(session)")]
         return parts.joined(separator: " ")
