@@ -576,7 +576,7 @@ fn app_terminfo(dir: &std::path::Path) {
         .lines()
         .map(|l| {
             if l.starts_with("xterm-256color|") {
-                format!("xterm-ghostty-bosun|bosun app test terminal,")
+                "xterm-ghostty-bosun|bosun app test terminal,".to_string()
             } else {
                 l.to_string()
             }
