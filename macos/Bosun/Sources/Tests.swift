@@ -1203,118 +1203,121 @@ final class SelfTest: TestKit {
         var samples: [(String, Bool, Double, Double?)] = []
         ws.onShowMeasured = { samples.append(($0, $1, $2, $3)) }
 
-        // Warm switches between single-pane rows: 4 attached sessions, 100 swaps.
-        await showRow(all[0])
-        let warmSet = Array(all.prefix(4))
-        for s in warmSet { ws.show(s); await waitUntil(3) { ws.activeTerminal?.hasPaintedContent == true }; await sleep(100) }
-        samples.removeAll()
-        for i in 0..<100 {
-            ws.show(warmSet[(i + 1) % 4])
-            await waitUntil(1) { samples.count > i }
-            await sleep(30)
-        }
-        let warm = samples.filter(\.1).map(\.2)
-        r.say("")
-        stats("warm switch, one-pane rows -> first frame", warm, budget: 0.016)
-
-        // Warm row switches with three panes: the web row and a one-pane row, back and forth.
-        if let web = session("web"), let webRow = rowID(web) {
-            var swap: [Double] = [], frames: [Double] = []
-            var shown: (String, Bool, Double)?
-            ws.onRowShown = { shown = ($0, $1, $2) }
-            await showRow(web)
+        // --only idle skips straight to the idle measurement.
+        if argValue("--only") != "idle" {
+            // Warm switches between single-pane rows: 4 attached sessions, 100 swaps.
             await showRow(all[0])
-            await showRow(web)
-            for i in 0..<60 {
-                let toWeb = i % 2 == 1
-                samples.removeAll()
-                shown = nil
-                if toWeb { ws.selectRow(webRow) } else { ws.show(all[0]) }
-                let n = toWeb ? 3 : 1
-                await waitUntil(1) { samples.filter(\.1).count >= n }
-                if toWeb, let s = shown, s.1 {
-                    swap.append(s.2)
-                    let warmSamples = samples.filter(\.1)
-                    if warmSamples.count >= 3 { frames.append(warmSamples.map(\.2).max()!) }
-                }
-                await sleep(40)
+            let warmSet = Array(all.prefix(4))
+            for s in warmSet { ws.show(s); await waitUntil(3) { ws.activeTerminal?.hasPaintedContent == true }; await sleep(100) }
+            samples.removeAll()
+            for i in 0..<100 {
+                ws.show(warmSet[(i + 1) % 4])
+                await waitUntil(1) { samples.count > i }
+                await sleep(30)
             }
-            ws.onRowShown = nil
-            stats("warm row switch, 3 panes: main-thread swap", swap, budget: 0.008)
-            stats("warm row switch, 3 panes -> every pane's first frame", frames, budget: 0.016)
-        }
+            let warm = samples.filter(\.1).map(\.2)
+            r.say("")
+            stats("warm switch, one-pane rows -> first frame", warm, budget: 0.016)
 
-        // Cold attaches.
-        samples.removeAll()
-        for i in 0..<20 {
-            let s = all[4 + (i % max(1, all.count - 4))]
-            let other = all[i % 4]
-            ws.show(other)
-            await sleep(50)
-            ws.pool.drop(s)
-            await sleep(250)
-            let n = samples.count
-            ws.show(s)
-            await waitUntil(3) { samples.count > n && samples.last?.1 == false }
-            await sleep(100)
-        }
-        let cold = samples.filter { !$0.1 }
-        stats("cold attach -> first frame", cold.map(\.2))
-        stats("cold attach -> tmux painted (attach -> first frame with content)", cold.compactMap(\.3), budget: 0.080)
-
-        // Status change -> badge, through the daemon's 250 ms poll.
-        var badge: [Double] = []
-        let target = all.last { !ws.visibleSessions.contains($0) } ?? all[all.count - 1]
-        var applied: (String, AgentState, CFTimeInterval)?
-        app.sidebar.onBadgeApplied = { s, st in if s == target { applied = (s, st, CACurrentMediaTime()) } }
-        for i in 0..<20 {
-            let state = i % 2 == 0 ? "waiting" : "idle"
-            let want: AgentState = i % 2 == 0 ? .waiting : .idle
-            applied = nil
-            let t0 = CACurrentMediaTime()
-            let sock = tmuxSocket
-            let ms = "\(Int(Date().timeIntervalSince1970 * 1000))"
-            DispatchQueue.global().async {
-                TmuxCLI.run(socket: sock, ["set-option", "-p", "-t", "=\(target):", "@bosun_state", state, ";",
-                                            "set-option", "-p", "-t", "=\(target):", "@bosun_state_at", ms])
-            }
-            if await waitUntil(3, { applied?.1 == want }), let a = applied { badge.append(a.2 - t0) }
-            await sleep(120)
-        }
-        stats("status change (tmux option set) -> sidebar badge", badge, budget: 0.250)
-        app.sidebar.onBadgeApplied = nil
-
-        // Daemon round trip.
-        var rtt: [Double] = []
-        for _ in 0..<50 {
-            let t0 = CACurrentMediaTime()
-            _ = await app.daemon.request(.getSpec(session: all[0]))
-            rtt.append(CACurrentMediaTime() - t0)
-        }
-        stats("daemon round trip (get_spec -> ack)", rtt)
-
-        // Divider drag in the three-pane row: layout cost per step at 120 Hz.
-        var steps: [Double] = []
-        if let web = session("web") {
-            await showRow(web)
-            if let d = ws.area.subviews.compactMap({ $0 as? DividerView }).compactMap(\.divider).first(where: { $0.path.isEmpty }) {
-                ws.dividerDragBegan()
-                for i in 0...120 {
-                    let p = Double(i) / 120
-                    let t0 = CACurrentMediaTime()
-                    if d.axis == .horizontal {
-                        ws.dividerDragged(d, to: NSPoint(x: d.container.minX + d.container.width * (0.5 - 0.25 * sin(p * .pi)), y: d.container.midY))
-                    } else {
-                        ws.dividerDragged(d, to: NSPoint(x: d.container.midX, y: d.container.minY + d.container.height * (0.5 - 0.25 * sin(p * .pi))))
+            // Warm row switches with three panes: the web row and a one-pane row, back and forth.
+            if let web = session("web"), let webRow = rowID(web) {
+                var swap: [Double] = [], frames: [Double] = []
+                var shown: (String, Bool, Double)?
+                ws.onRowShown = { shown = ($0, $1, $2) }
+                await showRow(web)
+                await showRow(all[0])
+                await showRow(web)
+                for i in 0..<60 {
+                    let toWeb = i % 2 == 1
+                    samples.removeAll()
+                    shown = nil
+                    if toWeb { ws.selectRow(webRow) } else { ws.show(all[0]) }
+                    let n = toWeb ? 3 : 1
+                    await waitUntil(1) { samples.filter(\.1).count >= n }
+                    if toWeb, let s = shown, s.1 {
+                        swap.append(s.2)
+                        let warmSamples = samples.filter(\.1)
+                        if warmSamples.count >= 3 { frames.append(warmSamples.map(\.2).max()!) }
                     }
-                    ws.area.layoutSubtreeIfNeeded()
-                    steps.append(CACurrentMediaTime() - t0)
-                    await sleep(1000.0 / 120)
+                    await sleep(40)
                 }
-                ws.dividerDragEnded()
+                ws.onRowShown = nil
+                stats("warm row switch, 3 panes: main-thread swap", swap, budget: 0.008)
+                stats("warm row switch, 3 panes -> every pane's first frame", frames, budget: 0.016)
             }
+
+            // Cold attaches.
+            samples.removeAll()
+            for i in 0..<20 {
+                let s = all[4 + (i % max(1, all.count - 4))]
+                let other = all[i % 4]
+                ws.show(other)
+                await sleep(50)
+                ws.pool.drop(s)
+                await sleep(250)
+                let n = samples.count
+                ws.show(s)
+                await waitUntil(3) { samples.count > n && samples.last?.1 == false }
+                await sleep(100)
+            }
+            let cold = samples.filter { !$0.1 }
+            stats("cold attach -> first frame", cold.map(\.2))
+            stats("cold attach -> tmux painted (attach -> first frame with content)", cold.compactMap(\.3), budget: 0.080)
+
+            // Status change -> badge, through the daemon's 250 ms poll.
+            var badge: [Double] = []
+            let target = all.last { !ws.visibleSessions.contains($0) } ?? all[all.count - 1]
+            var applied: (String, AgentState, CFTimeInterval)?
+            app.sidebar.onBadgeApplied = { s, st in if s == target { applied = (s, st, CACurrentMediaTime()) } }
+            for i in 0..<20 {
+                let state = i % 2 == 0 ? "waiting" : "idle"
+                let want: AgentState = i % 2 == 0 ? .waiting : .idle
+                applied = nil
+                let t0 = CACurrentMediaTime()
+                let sock = tmuxSocket
+                let ms = "\(Int(Date().timeIntervalSince1970 * 1000))"
+                DispatchQueue.global().async {
+                    TmuxCLI.run(socket: sock, ["set-option", "-p", "-t", "=\(target):", "@bosun_state", state, ";",
+                                                "set-option", "-p", "-t", "=\(target):", "@bosun_state_at", ms])
+                }
+                if await waitUntil(3, { applied?.1 == want }), let a = applied { badge.append(a.2 - t0) }
+                await sleep(120)
+            }
+            stats("status change (tmux option set) -> sidebar badge", badge, budget: 0.250)
+            app.sidebar.onBadgeApplied = nil
+
+            // Daemon round trip.
+            var rtt: [Double] = []
+            for _ in 0..<50 {
+                let t0 = CACurrentMediaTime()
+                _ = await app.daemon.request(.getSpec(session: all[0]))
+                rtt.append(CACurrentMediaTime() - t0)
+            }
+            stats("daemon round trip (get_spec -> ack)", rtt)
+
+            // Divider drag in the three-pane row: layout cost per step at 120 Hz.
+            var steps: [Double] = []
+            if let web = session("web") {
+                await showRow(web)
+                if let d = ws.area.subviews.compactMap({ $0 as? DividerView }).compactMap(\.divider).first(where: { $0.path.isEmpty }) {
+                    ws.dividerDragBegan()
+                    for i in 0...120 {
+                        let p = Double(i) / 120
+                        let t0 = CACurrentMediaTime()
+                        if d.axis == .horizontal {
+                            ws.dividerDragged(d, to: NSPoint(x: d.container.minX + d.container.width * (0.5 - 0.25 * sin(p * .pi)), y: d.container.midY))
+                        } else {
+                            ws.dividerDragged(d, to: NSPoint(x: d.container.midX, y: d.container.minY + d.container.height * (0.5 - 0.25 * sin(p * .pi))))
+                        }
+                        ws.area.layoutSubtreeIfNeeded()
+                        steps.append(CACurrentMediaTime() - t0)
+                        await sleep(1000.0 / 120)
+                    }
+                    ws.dividerDragEnded()
+                }
+            }
+            stats("divider drag: layout per step", steps, budget: 0.0083)
         }
-        stats("divider drag: layout per step", steps, budget: 0.0083)
 
         // Idle CPU with four panes of quiet sessions (the web row plus a terminal tab), then with the
         // ticker's row (a line a second) shown and the four hidden.
@@ -1343,6 +1346,10 @@ final class SelfTest: TestKit {
             r.say("  frames drawn in that window: \(drew.joined(separator: ", ")); hidden views: \(hiddenFrames)")
         }
         await idle(" (quiet sessions)")
+        // The same with the window not key (another app in front): the active pane stops blinking too.
+        ws.windowKeyChanged(false)
+        await idle(" (quiet sessions, window not key)")
+        ws.windowKeyChanged(true)
         r.say(String(format: "memory footprint: %.0f MB with %d terminal views", physFootprintMB(), ws.pool.views.count))
         if let ticker {
             await showRow(ticker)
@@ -1353,6 +1360,7 @@ final class SelfTest: TestKit {
                          ws.pool.views.count, pct))
         }
         if let extra { await killTab(extra) }
+        if argValue("--only") == "idle" { r.save(); return }
 
         // Launch: separate processes, each reporting sidebar painted and first live terminal.
         r.say("")
