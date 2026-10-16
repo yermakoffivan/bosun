@@ -6,6 +6,7 @@ pub mod config;
 pub mod error;
 pub mod events;
 pub mod keybindings;
+pub mod serve;
 pub mod sidebar;
 pub mod store;
 mod terminal_host;

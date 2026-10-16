@@ -1,0 +1,1220 @@
+//! Wire types for the `bosun serve` socket protocol, version 1.
+//!
+//! Every message is one length-prefixed JSON frame (see
+//! [`super::frame`]). Each message is a JSON object with a `"t"` field
+//! naming its kind. The full description, with examples, lives in
+//! `docs/protocol.md`; keep the two in step.
+//!
+//! These types are deliberately separate from Bosun's domain types
+//! (`SessionView`, `SidebarModel`, `Theme`, …): the wire format is a
+//! contract with other programs, so a refactor inside Bosun must not
+//! change it by accident. The `From`/`TryFrom` conversions at the end
+//! are the only bridge.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::events::{
+    ClaudeOptions, ClaudeSessionMode, CodexOptions, KimiOptions, OpencodeOptions, QwenOptions,
+    SessionSpec, SpecOptions, WorktreeSpec,
+};
+use crate::sidebar::{Container, Section, SidebarModel};
+use crate::store::Recent;
+use crate::tmux::detector::Status;
+use crate::tmux::session::SessionView;
+
+/// Protocol major version. Bump only for changes an older client
+/// can't ignore; adding optional fields or new message kinds doesn't
+/// need a bump (clients must ignore what they don't know).
+pub const PROTOCOL_VERSION: u32 = 1;
+
+// ── client → daemon ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum ClientMsg {
+    /// First message on every connection.
+    Hello {
+        protocol: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client: Option<String>,
+    },
+    /// Ask for a fresh `snapshot` (after a `seq` gap, say).
+    Resync,
+    /// A command. The daemon answers with an `ack` carrying `id`.
+    Cmd(CmdEnvelope),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CmdEnvelope {
+    pub id: u64,
+    #[serde(flatten)]
+    pub op: CmdOp,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum CmdOp {
+    /// Create a session. The agent launches straight away unless
+    /// `defer_launch` is set, in which case the session starts as a
+    /// bare shell and the client sends `launch_agent` once its
+    /// terminal is attached (so the agent's startup color probe gets
+    /// an answer — see issue #2).
+    Create {
+        spec: SpecWire,
+        #[serde(default)]
+        defer_launch: bool,
+    },
+    Kill {
+        session: String,
+    },
+    /// Kill every tab of a container.
+    KillContainer {
+        sessions: Vec<String>,
+    },
+    /// Kill a worktree-backed session and remove its worktree; with
+    /// `merge`, merge the branch first and delete it afterwards.
+    KillRemoveWorktree {
+        session: String,
+        worktree_path: String,
+        branch: String,
+        #[serde(default)]
+        merge: bool,
+    },
+    Rename {
+        session: String,
+        display: String,
+    },
+    /// Stop the agent and relaunch it in place. `resume` relaunches
+    /// into the agent's resume invocation for this launch only.
+    /// `defer_launch` works as for `create`.
+    Restart {
+        session: String,
+        #[serde(default)]
+        resume: bool,
+        #[serde(default)]
+        defer_launch: bool,
+    },
+    /// Type the agent's launch command into a session sitting at a
+    /// bare shell. `resume: null` uses the session's stored mode.
+    LaunchAgent {
+        session: String,
+        #[serde(default)]
+        resume: Option<bool>,
+    },
+    /// Read a session's stored spec (to pre-fill a modify form). The
+    /// ack carries it in `spec`.
+    GetSpec {
+        session: String,
+    },
+    /// Store a new spec on a live session. Takes effect on the next
+    /// restart.
+    Modify {
+        session: String,
+        spec: SpecWire,
+    },
+    /// Remove a recents row (its `id` from the `recents` list).
+    DeleteRecent {
+        recent: i64,
+    },
+    /// Replace the sidebar model (after a reorder, a move between
+    /// sections, a collapse toggle…). Tabs only need `session`.
+    SidebarSave {
+        sidebar: SidebarWire,
+    },
+    InsertSection {
+        name: String,
+    },
+    RenameSection {
+        section: String,
+        name: String,
+    },
+    /// Switch theme. `persist: false` is a live preview that isn't
+    /// written to `config.toml`.
+    SetTheme {
+        name: String,
+        #[serde(default = "default_true")]
+        persist: bool,
+    },
+    /// Change one settings-panel option. `key` is a `config.settings`
+    /// key; pinned and read-only settings are refused.
+    ApplySetting {
+        key: String,
+        value: serde_json::Value,
+    },
+    /// Toggle tmux's `ignore-size` flag on the client attached through
+    /// `tty` (`refresh-client -t <tty> -f [!]ignore-size`).
+    ClientFlags {
+        tty: String,
+        ignore_size: bool,
+    },
+    /// Make the client on `tty` tmux's latest client, so the session
+    /// takes its size under `window-size latest`.
+    MakeLatest {
+        tty: String,
+    },
+}
+
+fn default_true() -> bool {
+    true
+}
+
+// ── daemon → client ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum ServerMsg {
+    Snapshot(Box<Snapshot>),
+    /// Rows added or changed (`upsert`, full rows) and rows gone
+    /// (`removed`, session names).
+    Sessions {
+        seq: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        upsert: Vec<SessionWire>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        removed: Vec<String>,
+    },
+    Status {
+        seq: u64,
+        session: String,
+        state: StatusWire,
+    },
+    Sidebar {
+        seq: u64,
+        sidebar: SidebarWire,
+    },
+    Recents {
+        seq: u64,
+        recents: Vec<RecentWire>,
+    },
+    Config {
+        seq: u64,
+        config: ConfigWire,
+    },
+    Theme {
+        seq: u64,
+        theme: ThemeWire,
+    },
+    Themes {
+        seq: u64,
+        themes: Vec<ThemeEntry>,
+    },
+    /// A human-readable message from Bosun (the TUI shows these in its
+    /// status bar): "created …", errors from background work, etc.
+    Notice {
+        seq: u64,
+        message: String,
+    },
+    Ack(Ack),
+    /// A protocol-level problem. `protocol_mismatch` and `no_hello`
+    /// close the connection.
+    Error {
+        code: String,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub seq: u64,
+    pub server: ServerInfo,
+    pub sessions: Vec<SessionWire>,
+    pub statuses: BTreeMap<String, StatusWire>,
+    pub sidebar: SidebarWire,
+    pub recents: Vec<RecentWire>,
+    pub config: ConfigWire,
+    pub theme: ThemeWire,
+    pub themes: Vec<ThemeEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerInfo {
+    pub version: String,
+    pub protocol: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_socket: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Ack {
+    pub id: u64,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// `create`: the internal name of the new session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// `get_spec`: the stored spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<SpecWire>,
+    /// `create`/`restart` with `defer_launch`: send `launch_agent`
+    /// with these values once the terminal is attached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_launch: Option<PendingLaunchWire>,
+    /// Every Bosun message produced while the command ran.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingLaunchWire {
+    pub session: String,
+    #[serde(default)]
+    pub resume: Option<bool>,
+}
+
+/// One live tmux session: what a sidebar row shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionWire {
+    /// Internal tmux name; the key for every command.
+    pub name: String,
+    pub display: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The path to show: the spec path, else the shell's cwd.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub windows: u32,
+    /// Whether any tmux client is attached.
+    pub attached: bool,
+    /// Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusWire {
+    Running,
+    Waiting,
+    Done,
+    Idle,
+    Error,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SidebarWire {
+    #[serde(default)]
+    pub ungrouped: Vec<ContainerWire>,
+    #[serde(default)]
+    pub sections: Vec<SectionWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SectionWire {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub collapsed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banner_font: Option<String>,
+    #[serde(default)]
+    pub members: Vec<ContainerWire>,
+}
+
+/// A sidebar row: one or more sessions shown as tabs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerWire {
+    pub id: String,
+    pub name: String,
+    /// Session name of the active tab.
+    pub active: String,
+    pub tabs: Vec<TabWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabWire {
+    pub session: String,
+    /// Display name; for an exited session, the best name Bosun can
+    /// recover from recents. Ignored on `sidebar_save`.
+    #[serde(default)]
+    pub display: String,
+    /// False for a row whose tmux session has ended (the TUI shows it
+    /// as "exited" so it can be restarted). Ignored on `sidebar_save`.
+    #[serde(default)]
+    pub alive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentWire {
+    pub id: i64,
+    pub name: String,
+    pub path: String,
+    pub agent: String,
+    pub args: String,
+    pub options: OptionsWire,
+    /// Unix milliseconds.
+    pub last_used_at: i64,
+    pub use_count: i64,
+}
+
+/// What the new-session form collects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecWire {
+    pub name: String,
+    #[serde(default)]
+    pub path: String,
+    pub agent: String,
+    #[serde(default)]
+    pub args: String,
+    #[serde(default)]
+    pub options: OptionsWire,
+    /// Join an existing container as a new tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
+    /// One-shot resume for this launch.
+    #[serde(default)]
+    pub resume: bool,
+    /// Create the session in a new git worktree on this branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionModeWire {
+    #[default]
+    New,
+    Continue,
+    Resume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OptionsWire {
+    pub claude: ClaudeWire,
+    pub codex: ModeYoloWire,
+    pub kimi: ModeYoloWire,
+    pub opencode: OpencodeWire,
+    pub qwen: ModeYoloWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClaudeWire {
+    pub session_mode: SessionModeWire,
+    pub skip_permissions: bool,
+    pub remote_control: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModeYoloWire {
+    pub session_mode: SessionModeWire,
+    pub yolo: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpencodeWire {
+    pub session_mode: SessionModeWire,
+    pub auto: bool,
+}
+
+/// The settings panel, as data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigWire {
+    pub settings: Vec<SettingWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SettingWire {
+    pub key: String,
+    pub value: serde_json::Value,
+    /// Allowed values for a choice setting; absent for booleans and
+    /// read-only rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choices: Option<Vec<String>>,
+    /// Environment variable pinning this setting, if one is set. A
+    /// pinned setting is read-only: env beats `config.toml`, so a
+    /// change would snap back on the next launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_by: Option<String>,
+    /// True for pinned settings and for install-level ones
+    /// (`session_prefix`, `tmux_socket`) that are only set by editing
+    /// `config.toml`.
+    pub read_only: bool,
+}
+
+/// The active theme: every `Theme` color slot as `#rrggbb`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThemeWire {
+    pub name: String,
+    pub bg: String,
+    pub panel: String,
+    pub panel_alt: String,
+    pub selection_bg: String,
+    pub text: String,
+    pub text_muted: String,
+    pub accent: String,
+    pub shadow: String,
+    pub dim_fg: String,
+    pub status_running: String,
+    pub status_waiting: String,
+    pub status_idle: String,
+    pub status_error: String,
+    /// Resolved: themes that don't set it fall back to `accent`, the
+    /// same as the TUI.
+    pub status_done: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThemeEntry {
+    pub name: String,
+    pub source: ThemeSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeSource {
+    Bundled,
+    /// A `.toml` in the user's themes directory (it wins over a
+    /// bundled theme of the same name).
+    User,
+}
+
+// ── conversions ────────────────────────────────────────────────────
+
+impl From<Status> for StatusWire {
+    fn from(s: Status) -> Self {
+        match s {
+            Status::Running => Self::Running,
+            Status::Waiting => Self::Waiting,
+            Status::Done => Self::Done,
+            Status::Idle => Self::Idle,
+            Status::Error => Self::Error,
+            Status::Unknown => Self::Unknown,
+        }
+    }
+}
+
+fn unix_secs(t: Option<std::time::SystemTime>) -> Option<i64> {
+    t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+}
+
+impl From<&SessionView> for SessionWire {
+    fn from(v: &SessionView) -> Self {
+        let s = &v.session;
+        Self {
+            name: s.name.clone(),
+            display: s.display().to_string(),
+            agent: s.agent.clone(),
+            path: s.best_path().map(str::to_string),
+            windows: s.windows,
+            attached: s.attached,
+            created: unix_secs(s.created),
+            container_id: s.container_id.clone(),
+            worktree_path: s.worktree_path.clone(),
+            branch: s.branch.clone(),
+            pane_title: s.pane_title.clone(),
+            pane_command: s.pane_command.clone(),
+        }
+    }
+}
+
+impl From<ClaudeSessionMode> for SessionModeWire {
+    fn from(m: ClaudeSessionMode) -> Self {
+        match m {
+            ClaudeSessionMode::New => Self::New,
+            ClaudeSessionMode::Continue => Self::Continue,
+            ClaudeSessionMode::Resume => Self::Resume,
+        }
+    }
+}
+
+impl From<SessionModeWire> for ClaudeSessionMode {
+    fn from(m: SessionModeWire) -> Self {
+        match m {
+            SessionModeWire::New => Self::New,
+            SessionModeWire::Continue => Self::Continue,
+            SessionModeWire::Resume => Self::Resume,
+        }
+    }
+}
+
+impl From<&SpecOptions> for OptionsWire {
+    fn from(o: &SpecOptions) -> Self {
+        Self {
+            claude: ClaudeWire {
+                session_mode: o.claude.session_mode.into(),
+                skip_permissions: o.claude.skip_permissions,
+                remote_control: o.claude.remote_control,
+            },
+            codex: ModeYoloWire {
+                session_mode: o.codex.session_mode.into(),
+                yolo: o.codex.yolo,
+            },
+            kimi: ModeYoloWire {
+                session_mode: o.kimi.session_mode.into(),
+                yolo: o.kimi.yolo,
+            },
+            opencode: OpencodeWire {
+                session_mode: o.opencode.session_mode.into(),
+                auto: o.opencode.auto,
+            },
+            qwen: ModeYoloWire {
+                session_mode: o.qwen.session_mode.into(),
+                yolo: o.qwen.yolo,
+            },
+        }
+    }
+}
+
+impl From<&OptionsWire> for SpecOptions {
+    fn from(o: &OptionsWire) -> Self {
+        Self {
+            claude: ClaudeOptions {
+                session_mode: o.claude.session_mode.into(),
+                skip_permissions: o.claude.skip_permissions,
+                remote_control: o.claude.remote_control,
+            },
+            codex: CodexOptions {
+                session_mode: o.codex.session_mode.into(),
+                yolo: o.codex.yolo,
+            },
+            kimi: KimiOptions {
+                session_mode: o.kimi.session_mode.into(),
+                yolo: o.kimi.yolo,
+            },
+            opencode: OpencodeOptions {
+                session_mode: o.opencode.session_mode.into(),
+                auto: o.opencode.auto,
+            },
+            qwen: QwenOptions {
+                session_mode: o.qwen.session_mode.into(),
+                yolo: o.qwen.yolo,
+            },
+        }
+    }
+}
+
+impl From<&SessionSpec> for SpecWire {
+    fn from(s: &SessionSpec) -> Self {
+        Self {
+            name: s.name.clone(),
+            path: s.path.clone(),
+            agent: s.agent.clone(),
+            args: s.args.clone(),
+            options: (&s.options).into(),
+            container_id: s.container_id.clone(),
+            resume: s.resume,
+            worktree_branch: s.worktree.as_ref().map(|w| w.branch.clone()),
+        }
+    }
+}
+
+/// Reject text that would break a tmux format line or a sidebar row:
+/// control characters (a newline in a display name splits the
+/// `list-sessions` line it rides on).
+pub fn check_text(field: &str, value: &str, allow_empty: bool) -> Result<(), String> {
+    if !allow_empty && value.trim().is_empty() {
+        return Err(format!("{field} must not be empty"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(format!("{field} must not contain control characters"));
+    }
+    Ok(())
+}
+
+impl SpecWire {
+    /// Validate and convert to the actor's spec.
+    pub fn to_spec(&self) -> Result<SessionSpec, String> {
+        check_text("spec.name", &self.name, false)?;
+        check_text("spec.path", &self.path, true)?;
+        check_text("spec.args", &self.args, true)?;
+        if !crate::config::AGENTS.contains(&self.agent.as_str()) {
+            return Err(format!(
+                "spec.agent must be one of {}",
+                crate::config::AGENTS.join(", ")
+            ));
+        }
+        if let Some(b) = &self.worktree_branch {
+            check_text("spec.worktree_branch", b, false)?;
+            if b.starts_with('-') || b.contains(char::is_whitespace) {
+                return Err("spec.worktree_branch is not a valid branch name".into());
+            }
+        }
+        if let Some(c) = &self.container_id {
+            check_text("spec.container_id", c, false)?;
+        }
+        Ok(SessionSpec {
+            name: self.name.clone(),
+            path: self.path.clone(),
+            agent: self.agent.clone(),
+            args: self.args.clone(),
+            options: (&self.options).into(),
+            container_id: self.container_id.clone(),
+            resume: self.resume,
+            worktree: self
+                .worktree_branch
+                .as_ref()
+                .map(|b| WorktreeSpec { branch: b.clone() }),
+        })
+    }
+}
+
+impl From<&Recent> for RecentWire {
+    fn from(r: &Recent) -> Self {
+        let spec = r.to_spec();
+        Self {
+            id: r.id,
+            name: r.name.clone(),
+            path: r.path.clone(),
+            agent: r.agent.clone(),
+            args: r.args.clone(),
+            options: (&spec.options).into(),
+            last_used_at: r.last_used_at,
+            use_count: r.use_count,
+        }
+    }
+}
+
+impl SidebarWire {
+    /// Build the wire sidebar. `display_for` names a tab (live display
+    /// name, or the recovered name of an exited session); `alive`
+    /// says whether its tmux session is still there.
+    pub fn from_model(
+        model: &SidebarModel,
+        display_for: impl Fn(&str) -> String,
+        alive: impl Fn(&str) -> bool,
+    ) -> Self {
+        let container = |c: &Container| ContainerWire {
+            id: c.id.clone(),
+            name: c.name.clone(),
+            active: c.active.clone(),
+            tabs: c
+                .members
+                .iter()
+                .map(|m| TabWire {
+                    session: m.clone(),
+                    display: display_for(m),
+                    alive: alive(m),
+                })
+                .collect(),
+        };
+        Self {
+            ungrouped: model.ungrouped.iter().map(container).collect(),
+            sections: model
+                .sections
+                .iter()
+                .map(|s| SectionWire {
+                    id: s.id.clone(),
+                    name: s.name.clone(),
+                    collapsed: s.collapsed,
+                    banner_font: s.banner_font.clone(),
+                    members: s.members.iter().map(container).collect(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Validate and convert a client's sidebar to the model. Ids must
+    /// be unique, every container needs at least one tab, its active
+    /// tab must be one of them, and a session may appear only once.
+    pub fn to_model(&self) -> Result<SidebarModel, String> {
+        let mut ids = std::collections::HashSet::new();
+        let mut sessions = std::collections::HashSet::new();
+        let mut container = |c: &ContainerWire| -> Result<Container, String> {
+            check_text("container.id", &c.id, false)?;
+            check_text("container.name", &c.name, true)?;
+            if !ids.insert(c.id.clone()) {
+                return Err(format!("duplicate id {}", c.id));
+            }
+            if c.tabs.is_empty() {
+                return Err(format!("container {} has no tabs", c.id));
+            }
+            let members: Vec<String> = c.tabs.iter().map(|t| t.session.clone()).collect();
+            for m in &members {
+                check_text("tab.session", m, false)?;
+                if !sessions.insert(m.clone()) {
+                    return Err(format!("session {m} appears more than once"));
+                }
+            }
+            if !members.contains(&c.active) {
+                return Err(format!(
+                    "container {} active tab is not one of its tabs",
+                    c.id
+                ));
+            }
+            Ok(Container {
+                id: c.id.clone(),
+                name: c.name.clone(),
+                members,
+                active: c.active.clone(),
+            })
+        };
+        let ungrouped = self
+            .ungrouped
+            .iter()
+            .map(&mut container)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut sections = Vec::new();
+        let mut section_ids = std::collections::HashSet::new();
+        for s in &self.sections {
+            check_text("section.id", &s.id, false)?;
+            check_text("section.name", &s.name, false)?;
+            if !section_ids.insert(s.id.clone()) {
+                return Err(format!("duplicate section id {}", s.id));
+            }
+            sections.push(Section {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                collapsed: s.collapsed,
+                banner_font: s.banner_font.clone(),
+                members: s
+                    .members
+                    .iter()
+                    .map(&mut container)
+                    .collect::<Result<Vec<_>, _>>()?,
+            });
+        }
+        Ok(SidebarModel {
+            ungrouped,
+            sections,
+        })
+    }
+}
+
+/// `#rrggbb` for a theme color. Theme files only hold hex colors, so
+/// this is almost always the `Rgb` arm; the named and indexed arms use
+/// xterm's default palette so nothing is ever left out.
+pub fn color_hex(c: ratatui::style::Color) -> String {
+    use ratatui::style::Color as C;
+    let (r, g, b) = match c {
+        C::Rgb(r, g, b) => (r, g, b),
+        C::Indexed(i) => xterm_256(i),
+        C::Black | C::Reset => (0, 0, 0),
+        C::Red => (0xcd, 0, 0),
+        C::Green => (0, 0xcd, 0),
+        C::Yellow => (0xcd, 0xcd, 0),
+        C::Blue => (0, 0, 0xee),
+        C::Magenta => (0xcd, 0, 0xcd),
+        C::Cyan => (0, 0xcd, 0xcd),
+        C::Gray => (0xe5, 0xe5, 0xe5),
+        C::DarkGray => (0x7f, 0x7f, 0x7f),
+        C::LightRed => (0xff, 0, 0),
+        C::LightGreen => (0, 0xff, 0),
+        C::LightYellow => (0xff, 0xff, 0),
+        C::LightBlue => (0x5c, 0x5c, 0xff),
+        C::LightMagenta => (0xff, 0, 0xff),
+        C::LightCyan => (0, 0xff, 0xff),
+        C::White => (0xff, 0xff, 0xff),
+    };
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+fn xterm_256(i: u8) -> (u8, u8, u8) {
+    const BASE: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (0xcd, 0, 0),
+        (0, 0xcd, 0),
+        (0xcd, 0xcd, 0),
+        (0, 0, 0xee),
+        (0xcd, 0, 0xcd),
+        (0, 0xcd, 0xcd),
+        (0xe5, 0xe5, 0xe5),
+        (0x7f, 0x7f, 0x7f),
+        (0xff, 0, 0),
+        (0, 0xff, 0),
+        (0xff, 0xff, 0),
+        (0x5c, 0x5c, 0xff),
+        (0xff, 0, 0xff),
+        (0, 0xff, 0xff),
+        (0xff, 0xff, 0xff),
+    ];
+    match i {
+        0..=15 => BASE[i as usize],
+        16..=231 => {
+            let i = i - 16;
+            let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+            (level(i / 36), level((i / 6) % 6), level(i % 6))
+        }
+        _ => {
+            let v = 8 + (i - 232) * 10;
+            (v, v, v)
+        }
+    }
+}
+
+impl From<&crate::ui::Theme> for ThemeWire {
+    fn from(t: &crate::ui::Theme) -> Self {
+        Self {
+            name: t.name.clone(),
+            bg: color_hex(t.bg),
+            panel: color_hex(t.panel),
+            panel_alt: color_hex(t.panel_alt),
+            selection_bg: color_hex(t.selection_bg),
+            text: color_hex(t.text),
+            text_muted: color_hex(t.text_muted),
+            accent: color_hex(t.accent),
+            shadow: color_hex(t.shadow),
+            dim_fg: color_hex(t.dim_fg),
+            status_running: color_hex(t.status_running),
+            status_waiting: color_hex(t.status_waiting),
+            status_idle: color_hex(t.status_idle),
+            status_error: color_hex(t.status_error),
+            status_done: color_hex(t.done_color()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round_trip_client(msg: ClientMsg) {
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: ClientMsg = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg, "via {json}");
+    }
+
+    fn round_trip_server(msg: ServerMsg) {
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: ServerMsg = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg, "via {json}");
+    }
+
+    fn spec() -> SpecWire {
+        SpecWire {
+            name: "api".into(),
+            path: "~/work/api".into(),
+            agent: "claude".into(),
+            args: "--model opus".into(),
+            options: OptionsWire {
+                claude: ClaudeWire {
+                    session_mode: SessionModeWire::Continue,
+                    skip_permissions: true,
+                    remote_control: false,
+                },
+                ..Default::default()
+            },
+            container_id: None,
+            resume: false,
+            worktree_branch: Some("feat-x".into()),
+        }
+    }
+
+    #[test]
+    fn hello_matches_the_documented_wire_form() {
+        let m: ClientMsg =
+            serde_json::from_str(r#"{"t":"hello","protocol":1,"client":"bosun-mac/0.1"}"#).unwrap();
+        assert_eq!(
+            m,
+            ClientMsg::Hello {
+                protocol: 1,
+                client: Some("bosun-mac/0.1".into())
+            }
+        );
+        round_trip_client(m);
+        round_trip_client(ClientMsg::Resync);
+    }
+
+    #[test]
+    fn every_command_round_trips() {
+        let ops = vec![
+            CmdOp::Create {
+                spec: spec(),
+                defer_launch: true,
+            },
+            CmdOp::Kill {
+                session: "bosun-a-1".into(),
+            },
+            CmdOp::KillContainer {
+                sessions: vec!["a".into(), "b".into()],
+            },
+            CmdOp::KillRemoveWorktree {
+                session: "s".into(),
+                worktree_path: "/r/.worktrees/x".into(),
+                branch: "x".into(),
+                merge: true,
+            },
+            CmdOp::Rename {
+                session: "s".into(),
+                display: "New".into(),
+            },
+            CmdOp::Restart {
+                session: "s".into(),
+                resume: true,
+                defer_launch: false,
+            },
+            CmdOp::LaunchAgent {
+                session: "s".into(),
+                resume: None,
+            },
+            CmdOp::GetSpec {
+                session: "s".into(),
+            },
+            CmdOp::Modify {
+                session: "s".into(),
+                spec: spec(),
+            },
+            CmdOp::DeleteRecent { recent: 9 },
+            CmdOp::SidebarSave {
+                sidebar: SidebarWire::default(),
+            },
+            CmdOp::InsertSection {
+                name: "Work".into(),
+            },
+            CmdOp::RenameSection {
+                section: "sec-1".into(),
+                name: "Play".into(),
+            },
+            CmdOp::SetTheme {
+                name: "nord".into(),
+                persist: false,
+            },
+            CmdOp::ApplySetting {
+                key: "remove_dead_sessions".into(),
+                value: serde_json::Value::Bool(true),
+            },
+            CmdOp::ClientFlags {
+                tty: "/dev/ttys004".into(),
+                ignore_size: true,
+            },
+            CmdOp::MakeLatest {
+                tty: "/dev/ttys004".into(),
+            },
+        ];
+        for (i, op) in ops.into_iter().enumerate() {
+            round_trip_client(ClientMsg::Cmd(CmdEnvelope { id: i as u64, op }));
+        }
+    }
+
+    #[test]
+    fn cmd_is_flat_on_the_wire() {
+        let m: ClientMsg = serde_json::from_str(
+            r#"{"t":"cmd","id":7,"op":"restart","session":"bosun-api","resume":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            m,
+            ClientMsg::Cmd(CmdEnvelope {
+                id: 7,
+                op: CmdOp::Restart {
+                    session: "bosun-api".into(),
+                    resume: true,
+                    defer_launch: false
+                }
+            })
+        );
+        // `persist` defaults to true when omitted.
+        let m: ClientMsg =
+            serde_json::from_str(r#"{"t":"cmd","id":1,"op":"set_theme","name":"nord"}"#).unwrap();
+        assert!(matches!(
+            m,
+            ClientMsg::Cmd(CmdEnvelope {
+                op: CmdOp::SetTheme { persist: true, .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn unknown_op_is_an_error_not_a_panic() {
+        assert!(serde_json::from_str::<ClientMsg>(r#"{"t":"cmd","id":1,"op":"nuke"}"#).is_err());
+        assert!(serde_json::from_str::<ClientMsg>(r#"{"t":"bogus"}"#).is_err());
+    }
+
+    #[test]
+    fn server_messages_round_trip() {
+        let session = SessionWire {
+            name: "bosun-api-1a2b3c4d".into(),
+            display: "api".into(),
+            agent: Some("claude".into()),
+            path: Some("/w/api".into()),
+            windows: 1,
+            attached: true,
+            created: Some(1_760_000_000),
+            container_id: Some("con-1".into()),
+            worktree_path: None,
+            branch: None,
+            pane_title: Some("✳ Fix bug".into()),
+            pane_command: Some("2_1_220".into()),
+        };
+        let theme = ThemeWire::from(&crate::ui::Theme::default_opencode());
+        let mut statuses = BTreeMap::new();
+        statuses.insert(session.name.clone(), StatusWire::Waiting);
+        let sidebar = SidebarWire {
+            ungrouped: vec![ContainerWire {
+                id: "con-1".into(),
+                name: "api".into(),
+                active: session.name.clone(),
+                tabs: vec![TabWire {
+                    session: session.name.clone(),
+                    display: "api".into(),
+                    alive: true,
+                }],
+            }],
+            sections: vec![SectionWire {
+                id: "sec-1".into(),
+                name: "Work".into(),
+                collapsed: true,
+                banner_font: None,
+                members: vec![],
+            }],
+        };
+        let config = ConfigWire {
+            settings: vec![SettingWire {
+                key: "theme".into(),
+                value: "opencode".into(),
+                choices: Some(vec!["opencode".into(), "nord".into()]),
+                pinned_by: Some("BOSUN_THEME".into()),
+                read_only: true,
+            }],
+        };
+        let recents = vec![RecentWire {
+            id: 3,
+            name: "api".into(),
+            path: "/w/api".into(),
+            agent: "claude".into(),
+            args: String::new(),
+            options: OptionsWire::default(),
+            last_used_at: 1_760_000_000_000,
+            use_count: 4,
+        }];
+        let themes = vec![ThemeEntry {
+            name: "opencode".into(),
+            source: ThemeSource::Bundled,
+        }];
+        round_trip_server(ServerMsg::Snapshot(Box::new(Snapshot {
+            seq: 1,
+            server: ServerInfo {
+                version: "2.1.16".into(),
+                protocol: PROTOCOL_VERSION,
+                tmux_socket: Some("bosun".into()),
+            },
+            sessions: vec![session.clone()],
+            statuses,
+            sidebar: sidebar.clone(),
+            recents: recents.clone(),
+            config: config.clone(),
+            theme: theme.clone(),
+            themes: themes.clone(),
+        })));
+        round_trip_server(ServerMsg::Sessions {
+            seq: 2,
+            upsert: vec![session],
+            removed: vec!["bosun-old".into()],
+        });
+        round_trip_server(ServerMsg::Status {
+            seq: 3,
+            session: "s".into(),
+            state: StatusWire::Running,
+        });
+        round_trip_server(ServerMsg::Sidebar { seq: 4, sidebar });
+        round_trip_server(ServerMsg::Recents { seq: 5, recents });
+        round_trip_server(ServerMsg::Config { seq: 6, config });
+        round_trip_server(ServerMsg::Theme { seq: 7, theme });
+        round_trip_server(ServerMsg::Themes { seq: 8, themes });
+        round_trip_server(ServerMsg::Notice {
+            seq: 9,
+            message: "created x".into(),
+        });
+        round_trip_server(ServerMsg::Ack(Ack {
+            id: 7,
+            ok: true,
+            session: Some("bosun-x".into()),
+            spec: Some(spec()),
+            pending_launch: Some(PendingLaunchWire {
+                session: "bosun-x".into(),
+                resume: Some(true),
+            }),
+            messages: vec!["created bosun-x".into()],
+            ..Default::default()
+        }));
+        round_trip_server(ServerMsg::Error {
+            code: "protocol_mismatch".into(),
+            message: "update bosun".into(),
+        });
+    }
+
+    #[test]
+    fn spec_validation() {
+        assert!(spec().to_spec().is_ok());
+        let mut bad = spec();
+        bad.name = "a\nb".into();
+        assert!(bad.to_spec().is_err());
+        let mut bad = spec();
+        bad.agent = "rm -rf".into();
+        assert!(bad.to_spec().is_err());
+        let mut bad = spec();
+        bad.worktree_branch = Some("--force".into());
+        assert!(bad.to_spec().is_err());
+        // Domain round trip keeps every field.
+        let s = spec().to_spec().unwrap();
+        assert_eq!(SpecWire::from(&s), spec());
+    }
+
+    #[test]
+    fn sidebar_round_trips_through_the_model() {
+        let mut model = SidebarModel::default();
+        model
+            .ungrouped
+            .push(Container::single("bosun-a-1".into(), "a".into()));
+        let mut sec = Section::new("Work");
+        sec.members
+            .push(Container::single("bosun-b-2".into(), "b".into()));
+        model.sections.push(sec);
+        let wire = SidebarWire::from_model(&model, |n| n.to_uppercase(), |n| n == "bosun-a-1");
+        assert_eq!(wire.ungrouped[0].tabs[0].display, "BOSUN-A-1");
+        assert!(!wire.sections[0].members[0].tabs[0].alive);
+        assert_eq!(wire.to_model().unwrap(), model);
+    }
+
+    #[test]
+    fn sidebar_validation_rejects_bad_models() {
+        let tab = |s: &str| TabWire {
+            session: s.into(),
+            display: String::new(),
+            alive: true,
+        };
+        let c = |id: &str, tabs: Vec<TabWire>, active: &str| ContainerWire {
+            id: id.into(),
+            name: "x".into(),
+            active: active.into(),
+            tabs,
+        };
+        let dup_session = SidebarWire {
+            ungrouped: vec![c("c1", vec![tab("s")], "s"), c("c2", vec![tab("s")], "s")],
+            sections: vec![],
+        };
+        assert!(dup_session.to_model().is_err());
+        let bad_active = SidebarWire {
+            ungrouped: vec![c("c1", vec![tab("s")], "t")],
+            sections: vec![],
+        };
+        assert!(bad_active.to_model().is_err());
+        let empty = SidebarWire {
+            ungrouped: vec![c("c1", vec![], "s")],
+            sections: vec![],
+        };
+        assert!(empty.to_model().is_err());
+    }
+
+    #[test]
+    fn theme_colors_are_hex() {
+        let w = ThemeWire::from(&crate::ui::Theme::default_opencode());
+        for c in [&w.bg, &w.accent, &w.status_done, &w.status_running] {
+            assert!(c.len() == 7 && c.starts_with('#'), "{c}");
+        }
+        assert_eq!(
+            color_hex(ratatui::style::Color::Rgb(0x7c, 0x5c, 0xff)),
+            "#7c5cff"
+        );
+        assert_eq!(color_hex(ratatui::style::Color::Indexed(196)), "#ff0000");
+        assert_eq!(color_hex(ratatui::style::Color::Indexed(232)), "#080808");
+    }
+}

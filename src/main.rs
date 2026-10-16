@@ -81,6 +81,9 @@ async fn run() -> Result<()> {
                 }
             };
         }
+        if first == "serve" {
+            return run_serve(args.collect()).await;
+        }
         if first == "help" || first == "--help" || first == "-h" {
             print_help();
             return Ok(());
@@ -158,6 +161,51 @@ async fn run() -> Result<()> {
     let run_result = app.run(&mut terminal).await;
     restore_terminal(&mut terminal, kbd_enhanced)?;
     run_result
+}
+
+/// `bosun serve [--idle-timeout <secs>]`: host the tmux actor behind a
+/// Unix socket for GUI clients. See `bosun::serve` and
+/// `docs/protocol.md`.
+async fn run_serve(args: Vec<String>) -> Result<()> {
+    let mut opts = bosun::serve::ServeOptions::default();
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--idle-timeout" => {
+                let secs = it.next().and_then(|v| v.parse::<u64>().ok());
+                match secs {
+                    Some(s) => opts.idle_timeout = std::time::Duration::from_secs(s),
+                    None => {
+                        eprintln!("bosun serve: --idle-timeout needs a number of seconds");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--print-socket" => {
+                match bosun::serve::socket_path() {
+                    Ok(p) => println!("{}", p.display()),
+                    Err(e) => {
+                        eprintln!("bosun serve: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                return Ok(());
+            }
+            other => {
+                eprintln!("bosun serve: unknown argument {other}");
+                std::process::exit(2);
+            }
+        }
+    }
+    ensure_tmux_installed();
+    init_tracing();
+    match bosun::serve::run(opts).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            eprintln!("bosun serve: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Set up the terminal and return it alongside whether the kitty
@@ -268,6 +316,8 @@ USAGE:
     bosun release-notes  Page the bundled CHANGELOG.md
     bosun editor [<cmd>] Print or set the editor launched by `E` in the TUI
                          (e.g. `bosun editor zed`, `bosun editor code`)
+    bosun serve          Run the background daemon GUI clients connect to
+                         (`--idle-timeout <secs>`, default 30; `--print-socket`)
     bosun hook <agent> <event>
                          Record an agent's state on its tmux pane (run by the
                          hooks bosun installs at launch; not for direct use)
@@ -275,7 +325,9 @@ USAGE:
     bosun --help         Print this message
 
 ENVIRONMENT:
-    BOSUN_LOG    Tracing filter (e.g. `info`, `bosun=debug`). Off by default.
+    BOSUN_LOG           Tracing filter (e.g. `info`, `bosun=debug`). Off by default.
+    BOSUN_TMUX_CONTROL  Set to 0 to run every tmux command as its own process
+                        instead of over a control-mode connection.
 
 See https://github.com/yetidevworks/bosun for full docs.",
         version = env!("CARGO_PKG_VERSION")
