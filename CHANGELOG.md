@@ -4,6 +4,13 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] — 2026-10-16
+
+### Added
+
+- **A light and a dark theme for Bosun for Mac.** Two new `config.toml` keys, `theme_light` and `theme_dark`, name the themes the Mac app shows while macOS is in Light and Dark mode, switching as the appearance changes. Either can be left out to use `theme`. The TUI can't tell the macOS appearance, so it keeps using `theme` as before, and it now keeps both keys when it saves `config.toml` instead of dropping them.
+- **`bosun serve` sends the light/dark pair.** `theme_light` and `theme_dark` are settings that `apply_setting` can change (`null` unsets one), and their palettes come in the snapshot and in a new `theme_pair` delta, so a client can switch the moment the appearance changes. Setting them never changes `theme`. See `docs/protocol.md`.
+
 ## [2.2.0] — 2026-10-16
 
 ### Added
