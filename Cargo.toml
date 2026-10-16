@@ -11,6 +11,7 @@ homepage = "https://github.com/yetidevworks/bosun"
 readme = "README.md"
 keywords = ["tmux", "tui", "ai", "claude", "terminal"]
 categories = ["command-line-utilities"]
+exclude = ["macos/"]
 
 [lib]
 name = "bosun"
