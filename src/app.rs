@@ -1140,6 +1140,7 @@ impl AppState {
                 status,
                 source,
                 detail,
+                done_at,
             } => {
                 // Sibling of `PreviewRefreshed` — push-style status
                 // update from the actor's fast tick. Updates the
@@ -1156,6 +1157,7 @@ impl AppState {
                     view.status = status;
                     view.status_source = source;
                     view.status_detail = detail;
+                    view.done_at = done_at;
                 }
                 if status == Status::Running {
                     if let Some(seen) = self.seen_content.get_mut(&name) {
@@ -4921,6 +4923,7 @@ mod tests {
             status: Status::Waiting,
             source: StatusSource::Hook,
             detail: Some("permission: Bash".into()),
+            done_at: None,
         });
         let a = s.session_by_name("a").unwrap();
         assert_eq!(a.status, Status::Waiting);
@@ -4932,6 +4935,7 @@ mod tests {
             status: Status::Idle,
             source: StatusSource::Detector,
             detail: None,
+            done_at: None,
         });
         let a = s.session_by_name("a").unwrap();
         assert_eq!(a.status_source, StatusSource::Detector);

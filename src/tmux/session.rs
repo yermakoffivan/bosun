@@ -117,6 +117,11 @@ pub struct SessionView {
     /// `permission: Bash` while waiting. Only set when the hook state was
     /// used (`status_source == Hook`).
     pub status_detail: Option<String>,
+    /// When the agent's hook reported `done` (epoch ms), if `status`
+    /// came from the hook and the hook's raw state is `done`. `status`
+    /// itself reads Idle then (see `settle_status`); `bosun serve` sends
+    /// this as `done_at`.
+    pub done_at: Option<u64>,
 }
 
 impl SessionView {
@@ -128,6 +133,7 @@ impl SessionView {
             content_hash: 0,
             status_source: crate::agent_hooks::StatusSource::Detector,
             status_detail: None,
+            done_at: None,
         }
     }
 

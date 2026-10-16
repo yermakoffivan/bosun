@@ -138,9 +138,10 @@ impl RefreshState {
     }
 }
 
-/// A published status: the state, where it came from, and the hook's
-/// detail.
-type Settled = (Status, StatusSource, Option<String>);
+/// A published status: the state, where it came from, the hook's
+/// detail, and when the hook reported `done` (epoch ms) if that is the
+/// hook state behind it (see [`hook_status`]).
+type Settled = (Status, StatusSource, Option<String>, Option<u64>);
 
 /// The parts of a `list-sessions` row that a hook-reported status
 /// depends on and that cost nothing to read: no capture needed.
@@ -1769,18 +1770,20 @@ async fn refresh_focused(
     let detected = registry.detect(&ctx);
     let smoother = refresh_state.smoothers.entry(s.name.clone()).or_default();
     let prompt = claude_prompt_on_screen(config, &s, &ctx);
-    let (smoothed, source, detail) = settle_status(config, &s, detected, prompt, now, smoother);
+    let (smoothed, source, detail, done_at) =
+        settle_status(config, &s, detected, prompt, now, smoother);
     let publish = if smoothed == Status::Unknown {
         Status::Idle
     } else {
         smoothed
     };
-    refresh_state.record(&s, (publish, source, detail.clone()));
+    refresh_state.record(&s, (publish, source, detail.clone(), done_at));
     let _ = evt_tx.send(AppMsg::StatusRefreshed {
         name: s.name.clone(),
         status: publish,
         source,
         detail,
+        done_at,
     });
     let _ = evt_tx.send(AppMsg::PreviewRefreshed {
         name: s.name,
@@ -1985,7 +1988,7 @@ async fn refresh_all(
         let detected = registry.detect(&ctx);
         let smoother = state.smoothers.entry(s.name.clone()).or_default();
         let prompt = claude_prompt_on_screen(config, &s, &ctx);
-        let (smoothed, status_source, status_detail) =
+        let (smoothed, status_source, status_detail, done_at) =
             settle_status(config, &s, detected, prompt, now, smoother);
 
         // Only hold onto the preview buffer for the focused session — the
@@ -2002,11 +2005,12 @@ async fn refresh_all(
         } else {
             smoothed
         };
-        state.record(&s, (publish, status_source, status_detail.clone()));
+        state.record(&s, (publish, status_source, status_detail.clone(), done_at));
         let mut view = SessionView::new(s, publish, preview);
         view.content_hash = content_hash;
         view.status_source = status_source;
         view.status_detail = status_detail;
+        view.done_at = done_at;
         out.push(view);
     }
 
@@ -2037,7 +2041,9 @@ fn claude_prompt_on_screen(
 /// A hook `done` is published as `Idle`, the same thing the detectors
 /// report for a finished turn, so `AppState::display_status` keeps
 /// owning the Done badge (promoted while unread, cleared on view). The
-/// raw report stays on `TmuxSession::hook` for the app's `ran` latch.
+/// raw report stays on `TmuxSession::hook` for the app's `ran` latch,
+/// and its time goes out with the status as `done_at` for clients that
+/// draw Done from the hook directly (`bosun serve`'s `done_at`).
 fn settle_status(
     config: &Config,
     s: &crate::tmux::TmuxSession,
@@ -2047,24 +2053,30 @@ fn settle_status(
     smoother: &mut Smoother,
 ) -> Settled {
     match hook_status(config, s, prompt_on_screen, now) {
-        Some((publish, detail)) => {
+        Some((publish, detail, done_at)) => {
             smoother.force(publish);
-            (publish, StatusSource::Hook, detail)
+            (publish, StatusSource::Hook, detail, done_at)
         }
-        None => (smoother.observe(detected), StatusSource::Detector, None),
+        None => (
+            smoother.observe(detected),
+            StatusSource::Detector,
+            None,
+            None,
+        ),
     }
 }
 
-/// The hook-reported status to publish for `s`, and its detail, when
-/// the hook wins over the detectors (see `agent_hooks::resolve`).
-/// `None` when the setting is off, there's no hook state, or the
-/// cross-checks reject it.
+/// The hook-reported status to publish for `s`, its detail, and when
+/// the hook reported `done` (epoch ms, only when that is the hook's raw
+/// state), when the hook wins over the detectors (see
+/// `agent_hooks::resolve`). `None` when the setting is off, there's no
+/// hook state, or the cross-checks reject it.
 fn hook_status(
     config: &Config,
     s: &crate::tmux::TmuxSession,
     prompt_on_screen: bool,
     now: SystemTime,
-) -> Option<(Status, Option<String>)> {
+) -> Option<(Status, Option<String>, Option<u64>)> {
     if !config.agent_hooks {
         return None;
     }
@@ -2089,7 +2101,8 @@ fn hook_status(
     } else {
         status
     };
-    Some((publish, hook.detail.clone()))
+    let done_at = (hook.status == Status::Done).then_some(hook.at_ms);
+    Some((publish, hook.detail.clone(), done_at))
 }
 
 /// One pass of the status poll (`Command::FastStatusPoll`): a single
@@ -2112,12 +2125,13 @@ async fn poll_statuses(
     };
     let now = SystemTime::now();
     for s in raw.iter().filter(|s| config.manages(&s.name)) {
-        if let Some((status, source, detail)) = poll_one(config, s, state, now) {
+        if let Some((status, source, detail, done_at)) = poll_one(config, s, state, now) {
             let _ = evt_tx.send(AppMsg::StatusRefreshed {
                 name: s.name.clone(),
                 status,
                 source,
                 detail,
+                done_at,
             });
         }
     }
@@ -2173,8 +2187,8 @@ fn poll_one(
             );
             claude_prompt_on_screen(config, s, &ctx)
         });
-    let (status, detail) = hook_status(config, s, prompt, now)?;
-    let settled = (status, StatusSource::Hook, detail);
+    let (status, detail, done_at) = hook_status(config, s, prompt, now)?;
+    let settled = (status, StatusSource::Hook, detail, done_at);
     if state.sent.get(&s.name) == Some(&settled) {
         return None;
     }
@@ -2579,23 +2593,20 @@ mod build_cmd_tests {
             (
                 Status::Waiting,
                 StatusSource::Hook,
-                Some("permission: Bash".into())
+                Some("permission: Bash".into()),
+                None
             )
         );
         // Hook says done: published as Idle (the app owns the Done badge),
-        // immediately, not after a streak.
-        let s = hook_session(
-            Some(hook_at(Status::Done, now, Duration::from_secs(1), None)),
-            "✳ task",
-            "2_1_301",
-            Duration::from_secs(1),
-            now,
-        );
+        // immediately, not after a streak, with the hook's time.
+        let done = hook_at(Status::Done, now, Duration::from_secs(1), None);
+        let done_at = done.at_ms;
+        let s = hook_session(Some(done), "✳ task", "2_1_301", Duration::from_secs(1), now);
         let mut sm = Smoother::new();
         sm.observe(Status::Running);
         assert_eq!(
             settle_status(&config, &s, Status::Running, false, now, &mut sm),
-            (Status::Idle, StatusSource::Hook, None)
+            (Status::Idle, StatusSource::Hook, None, Some(done_at))
         );
     }
 
@@ -2606,7 +2617,7 @@ mod build_cmd_tests {
         let mut sm = Smoother::new();
         sm.observe(status);
         state.smoothers.insert(s.name.clone(), sm);
-        state.record(s, (status, StatusSource::Detector, None));
+        state.record(s, (status, StatusSource::Detector, None, None));
         state
     }
 
@@ -2637,7 +2648,8 @@ mod build_cmd_tests {
             Some((
                 Status::Waiting,
                 StatusSource::Hook,
-                Some("permission: Bash".into())
+                Some("permission: Bash".into()),
+                None
             ))
         );
         // The smoother follows, as it does when the refresh sees a hook.
@@ -2648,17 +2660,67 @@ mod build_cmd_tests {
         retitled.pane_title = Some("✻ task".into());
         assert_eq!(poll_one(&config, &retitled, &mut state, now), None);
 
-        // A finished turn goes out as Idle with the hook as its source.
-        let done = hook_session(
-            Some(hook_at(Status::Done, now, Duration::ZERO, None)),
+        // A finished turn goes out as Idle with the hook as its source,
+        // and the hook's time as `done_at`.
+        let first = hook_at(Status::Done, now, Duration::from_secs(5), None);
+        let first_at = first.at_ms;
+        let done = hook_session(Some(first), "✳ task", "2_1_301", quiet, now);
+        assert_eq!(
+            poll_one(&config, &done, &mut state, now),
+            Some((Status::Idle, StatusSource::Hook, None, Some(first_at)))
+        );
+        assert_eq!(poll_one(&config, &done, &mut state, now), None);
+    }
+
+    #[test]
+    fn status_poll_sends_a_newer_done_even_when_the_state_is_the_same() {
+        let config = Config::default();
+        let now = SystemTime::now();
+        let quiet = Duration::from_secs(1);
+        let base = hook_session(None, "✳ task", "2_1_301", quiet, now);
+        let mut state = refreshed(&base, Status::Idle);
+
+        let first = hook_at(Status::Done, now, Duration::from_secs(30), None);
+        let first_at = first.at_ms;
+        let done1 = hook_session(Some(first), "✳ task", "2_1_301", quiet, now);
+        assert_eq!(
+            poll_one(&config, &done1, &mut state, now),
+            Some((Status::Idle, StatusSource::Hook, None, Some(first_at)))
+        );
+        // A second turn ran and finished between two polls: the state
+        // reads Idle/hook both times, but the new `done_at` still goes out.
+        let second = hook_at(Status::Done, now, Duration::ZERO, None);
+        let second_at = second.at_ms;
+        assert!(second_at > first_at);
+        let done2 = hook_session(Some(second), "✳ task", "2_1_301", quiet, now);
+        assert_eq!(
+            poll_one(&config, &done2, &mut state, now),
+            Some((Status::Idle, StatusSource::Hook, None, Some(second_at)))
+        );
+        // The next prompt clears it.
+        let running = hook_session(
+            Some(hook_at(Status::Running, now, Duration::ZERO, None)),
+            "⠙ task",
+            "2_1_301",
+            quiet,
+            now,
+        );
+        assert_eq!(
+            poll_one(&config, &running, &mut state, now),
+            Some((Status::Running, StatusSource::Hook, None, None))
+        );
+        // A hook `idle` (the agent's own idle notice, not a finished
+        // turn) has no `done_at`.
+        let idle = hook_session(
+            Some(hook_at(Status::Idle, now, Duration::ZERO, None)),
             "✳ task",
             "2_1_301",
             quiet,
             now,
         );
         assert_eq!(
-            poll_one(&config, &done, &mut state, now),
-            Some((Status::Idle, StatusSource::Hook, None))
+            poll_one(&config, &idle, &mut state, now),
+            Some((Status::Idle, StatusSource::Hook, None, None))
         );
     }
 
@@ -2721,7 +2783,7 @@ mod build_cmd_tests {
         let mut state = with_capture(Duration::from_secs(2));
         assert_eq!(
             poll_one(&config, &running, &mut state, now),
-            Some((Status::Running, StatusSource::Hook, None))
+            Some((Status::Running, StatusSource::Hook, None, None))
         );
         // A capture taken after the report still shows a prompt: the
         // detector's Waiting stands until the refresh says otherwise.
@@ -2751,7 +2813,7 @@ mod build_cmd_tests {
         );
         assert_eq!(
             settle_status(&config, &s, Status::Idle, false, now, &mut sm),
-            (Status::Idle, StatusSource::Detector, None)
+            (Status::Idle, StatusSource::Detector, None, None)
         );
         // Agent exited to the shell: hook ignored.
         let s = hook_session(
@@ -2807,7 +2869,7 @@ mod build_cmd_tests {
                 now,
                 &mut Smoother::new()
             ),
-            (Status::Waiting, StatusSource::Detector, None)
+            (Status::Waiting, StatusSource::Detector, None, None)
         );
         // Ordinary output: the generic detector's quiet-pane Waiting
         // must not knock the hook's Running out.
@@ -2846,7 +2908,7 @@ mod build_cmd_tests {
         );
         assert_eq!(
             settle_status(&config, &s, Status::Idle, false, now, &mut Smoother::new()),
-            (Status::Idle, StatusSource::Detector, None)
+            (Status::Idle, StatusSource::Detector, None, None)
         );
     }
 

@@ -197,6 +197,9 @@ pub enum ServerMsg {
         source: StatusSourceWire,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+        /// See [`StatusInfo::done_at`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        done_at: Option<u64>,
     },
     Sidebar {
         seq: u64,
@@ -373,6 +376,11 @@ pub struct StatusInfo {
     /// while waiting. Only sent with `source: hook`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// When the agent's hook reported that it finished its turn, Unix
+    /// milliseconds. Only sent with `source: hook` when the hook's own
+    /// state is `done`; `state` is `idle` then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -577,6 +585,7 @@ impl From<&crate::tmux::session::SessionView> for StatusInfo {
             state: v.status.into(),
             source: v.status_source.into(),
             detail: v.status_detail.clone(),
+            done_at: v.done_at,
         }
     }
 }
@@ -1220,6 +1229,16 @@ mod tests {
                 state: StatusWire::Waiting,
                 source: StatusSourceWire::Hook,
                 detail: Some("permission: Bash".into()),
+                done_at: None,
+            },
+        );
+        statuses.insert(
+            "bosun-web-9c0d1e2f".into(),
+            StatusInfo {
+                state: StatusWire::Idle,
+                source: StatusSourceWire::Hook,
+                detail: None,
+                done_at: Some(1_760_000_123_456),
             },
         );
         let sidebar = SidebarWire {
@@ -1291,6 +1310,15 @@ mod tests {
             state: StatusWire::Running,
             source: StatusSourceWire::Detector,
             detail: None,
+            done_at: None,
+        });
+        round_trip_server(ServerMsg::Status {
+            seq: 3,
+            session: "s".into(),
+            state: StatusWire::Idle,
+            source: StatusSourceWire::Hook,
+            detail: None,
+            done_at: Some(1_760_000_123_456),
         });
         round_trip_server(ServerMsg::Sidebar { seq: 4, sidebar });
         round_trip_server(ServerMsg::Recents { seq: 5, recents });
@@ -1335,6 +1363,72 @@ mod tests {
             code: "protocol_mismatch".into(),
             message: "update bosun".into(),
         });
+    }
+
+    #[test]
+    fn done_at_matches_the_documented_wire_form() {
+        use crate::agent_hooks::{HookState, StatusSource};
+        let msg = ServerMsg::Status {
+            seq: 4,
+            session: "bosun-web-9c0d1e2f".into(),
+            state: StatusWire::Idle,
+            source: StatusSourceWire::Hook,
+            detail: None,
+            done_at: Some(1_760_000_123_456),
+        };
+        assert_eq!(
+            serde_json::to_value(&msg).unwrap(),
+            serde_json::json!({
+                "t": "status", "seq": 4, "session": "bosun-web-9c0d1e2f",
+                "state": "idle", "source": "hook", "done_at": 1_760_000_123_456u64
+            })
+        );
+        // Absent, not null, when there is no done report.
+        let mut view = crate::tmux::session::SessionView::new(
+            crate::tmux::TmuxSession {
+                name: "bosun-web-9c0d1e2f".into(),
+                display_name: None,
+                windows: 1,
+                attached: false,
+                created: None,
+                last_activity: None,
+                current_path: None,
+                agent: Some("claude".into()),
+                spec_path: None,
+                container_id: None,
+                worktree_path: None,
+                branch: None,
+                pane_width: 80,
+                pane_title: None,
+                pane_command: None,
+                hook: None,
+            },
+            Status::Idle,
+            None,
+        );
+        let plain = serde_json::to_value(StatusInfo::from(&view)).unwrap();
+        assert_eq!(
+            plain,
+            serde_json::json!({"state": "idle", "source": "detector"})
+        );
+        // A hook-reported done carries the hook's time.
+        view.status_source = StatusSource::Hook;
+        view.session.hook = Some(HookState {
+            status: Status::Done,
+            at_ms: 1_760_000_123_456,
+            detail: None,
+        });
+        view.done_at = Some(1_760_000_123_456);
+        assert_eq!(
+            serde_json::to_value(StatusInfo::from(&view)).unwrap(),
+            serde_json::json!({"state": "idle", "source": "hook", "done_at": 1_760_000_123_456u64})
+        );
+        // Older clients' messages (no done_at) still parse.
+        let old: ServerMsg = serde_json::from_str(
+            r#"{"t":"status","seq":5,"session":"s","state":"idle","source":"hook"}"#,
+        )
+        .unwrap();
+        assert!(matches!(old, ServerMsg::Status { done_at: None, .. }));
     }
 
     #[test]

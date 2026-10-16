@@ -585,6 +585,7 @@ impl Daemon {
                     state: info.state,
                     source: info.source,
                     detail: info.detail.clone(),
+                    done_at: info.done_at,
                 };
                 self.broadcast(&msg);
             }

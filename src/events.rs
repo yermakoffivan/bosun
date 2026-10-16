@@ -404,6 +404,9 @@ pub enum AppMsg {
         source: crate::agent_hooks::StatusSource,
         /// The hook's note that goes with `status` (hook states only).
         detail: Option<String>,
+        /// When the hook reported `done` (epoch ms), when that is the
+        /// hook state behind `status`.
+        done_at: Option<u64>,
     },
     /// A chunk of bytes read from an embedded terminal's PTY (2.0+).
     /// `session` is the internal tmux session name the embed was
