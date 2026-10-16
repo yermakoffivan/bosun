@@ -22,9 +22,15 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     private var sendNextPending = false
     private var waitingSince: [String: Date] = [:]
     private var monitors: [Any] = []
-    private var themeMenu = NSMenu(title: "Theme")
+    private(set) var themeMenu = NSMenu(title: "Theme")
     private var themeBeforePreview: String?
-    private var appliedTerminalTheme: String?
+    /// The palette the terminals were last coloured with ("match terminal to Bosun theme"); nil is the user's Ghostty theme.
+    private(set) var appliedTerminalTheme: ThemePalette?
+    /// The macOS appearance the chrome follows when a Light/Dark pair is set (design 7a).
+    private(set) var appearance: ThemeChoice.Appearance = .dark
+    private var appearanceObservation: NSKeyValueObservation?
+    /// The Settings window's Light/Dark pickers.
+    let themePairModel = ThemePairModel()
     /// Launch measurements (seconds since process start).
     private(set) var sidebarPaintedAt: Double?
     private(set) var firstTerminalAt: Double?
@@ -67,6 +73,15 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             MainActor.assumeIsolated { self?.reviewSeen() }
         }
         loadInputs()
+
+        appearance = Self.systemAppearance()
+        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+            // KVO fires on the thread that changed it, which for NSApp's appearance is the main thread.
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.appearanceChanged() } }
+        }
+        themePairModel.onSet = { [weak self] key, name in
+            self?.daemon.command(.applySetting(key: key, value: name.map { .string($0) } ?? .null)) { [weak self] in self?.report($0) }
+        }
 
         // 1. First frame from the cached snapshot: no I/O beyond one small file.
         let cached = daemon.loadCache()
@@ -535,7 +550,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 for name in st.sessionOrder { formerNames[name] = displayName(name) }
                 structure = true
                 chrome = true
-            case .theme:
+            case .theme, .themePair:
                 applyTheme()
             case .keybindings:
                 nav = NavBindings(st.keybindings)
@@ -553,7 +568,9 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 }
             case .client(let tty, let session):
                 workspace.clientMoved(tty: tty, to: session)
-            case .recents, .config, .themes:
+            case .config, .themes:
+                themePairModel.update(from: st)
+            case .recents:
                 break
             }
         }
@@ -671,8 +688,23 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     // MARK: Theme
 
+    /// The system's light or dark appearance, as the app sees it (System Settings' Auto included).
+    /// `NSApp.appearance`, when set, wins; only the test mode sets it.
+    static func systemAppearance() -> ThemeChoice.Appearance {
+        NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .dark : .light
+    }
+
+    private func appearanceChanged() {
+        let now = Self.systemAppearance()
+        guard now != appearance else { return }
+        appearance = now
+        applyTheme()
+    }
+
+    /// The chrome's theme: `theme`, or the side of the Light/Dark pair for the current appearance.
     private func applyTheme() {
-        theme = AppTheme(daemon.state.theme)
+        theme = AppTheme(daemon.state.palette(for: appearance))
+        themePairModel.update(from: daemon.state)
         window.appearance = theme.appearance
         window.backgroundColor = theme.bg
         sidebar.applyTheme()
@@ -684,10 +716,10 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
 
     private func applyTerminalTheme() {
-        let want = AppSettings.shared.matchTerminalTheme ? daemon.state.theme.name : nil
+        let want = AppSettings.shared.matchTerminalTheme ? theme.palette : nil
         guard want != appliedTerminalTheme else { return }
         appliedTerminalTheme = want
-        GhosttyRuntime.shared.setTerminalTheme(want == nil ? nil : daemon.state.theme)
+        GhosttyRuntime.shared.setTerminalTheme(want)
         workspace.updateChromeState()
     }
 
@@ -1026,7 +1058,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     @objc func showSettings() {
         if settingsWindow == nil {
-            let w = NSWindow(contentViewController: NSHostingController(rootView: SettingsView()))
+            let w = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(themePair: themePairModel)))
             w.title = "Bosun Settings"
             w.styleMask = [.titled, .closable]
             w.isReleasedWhenClosed = false
@@ -1505,6 +1537,22 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         guard menu === themeMenu else { return }
         menu.removeAllItems()
         let current = daemon.state.theme.name
+        // With a Light/Dark pair set, the chrome follows the appearance, and this list sets only `theme`
+        // (the TUI's, and the side that's "Same as Theme"), so say which theme is showing and why.
+        if let note = daemon.state.themePair.note(theme: current) {
+            let n = NSMenuItem(title: note, action: nil, keyEquivalent: "")
+            n.isEnabled = false
+            menu.addItem(n)
+            let showing = NSMenuItem(title: "Showing \(theme.palette.name) (macOS is in \(appearance == .dark ? "Dark" : "Light") mode)",
+                                     action: nil, keyEquivalent: "")
+            showing.isEnabled = false
+            menu.addItem(showing)
+            menu.addItem(ClosureMenuItem(title: "Light and Dark Themes…") { [weak self] in self?.showSettings() })
+            menu.addItem(.separator())
+            let header = NSMenuItem(title: daemon.state.themePair.listHeader, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+        }
         var lastSource: String?
         for t in daemon.state.themes {
             if let l = lastSource, l != t.source { menu.addItem(.separator()) }

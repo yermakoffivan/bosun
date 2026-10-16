@@ -488,10 +488,10 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
     }
 }
 
-/// App preferences (focus follows mouse, terminal colours, pool size).
+/// App preferences (focus follows mouse, pool size, the Light/Dark themes and terminal colours, notifications).
 struct SettingsView: View {
+    @ObservedObject var themePair: ThemePairModel
     @AppStorage("focusFollowsMouse") private var focusFollowsMouse = true
-    @AppStorage("matchTerminalTheme") private var matchTerminalTheme = false
     @AppStorage("poolSize") private var poolSize = AppSettings.defaultPoolSize
     @AppStorage(AppSettings.Key.notifyWhenWaiting) private var notifyWhenWaiting = true
     @AppStorage(AppSettings.Key.notifyWhenDone) private var notifyWhenDone = true
@@ -502,12 +502,10 @@ struct SettingsView: View {
             Toggle("Focus follows the mouse between panes", isOn: $focusFollowsMouse)
             Text("With two or more panes, moving the pointer into a pane makes it active. Off: click to activate.")
                 .font(.caption).foregroundStyle(.secondary)
-            Toggle("Match terminal colours to the Bosun theme", isOn: $matchTerminalTheme)
-            Text("Off: terminals keep your Ghostty theme. Your Ghostty config file is never changed.")
-                .font(.caption).foregroundStyle(.secondary)
             Stepper("Warm terminals kept attached: \(poolSize)", value: $poolSize, in: AppSettings.poolSizeRange)
             Text("One per pane, including the ones on screen, so recently shown rows switch back in one frame. About 14 MB each.")
                 .font(.caption).foregroundStyle(.secondary)
+            ThemePairSection(model: themePair)
             Section("Notifications") {
                 Toggle("Notify when an agent is waiting for you", isOn: $notifyWhenWaiting)
                 Toggle("Notify when an agent finishes its turn", isOn: $notifyWhenDone)
