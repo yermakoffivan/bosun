@@ -63,6 +63,32 @@ impl Fixture {
         PathBuf::from(String::from_utf8(out.stdout).unwrap().trim())
     }
 
+    /// `config.toml` under the fixture's HOME. On macOS Bosun's config
+    /// and data directories are the same (`~/Library/Application
+    /// Support/dev.yetidevworks.bosun`); elsewhere it's `~/.config/bosun`
+    /// (the fixture clears `XDG_CONFIG_HOME`).
+    fn config_path(&self) -> PathBuf {
+        let dir = if cfg!(target_os = "macos") {
+            self.socket_path().parent().unwrap().to_path_buf()
+        } else {
+            self.home.path().join(".config").join("bosun")
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("config.toml")
+    }
+
+    fn start(&mut self) -> PathBuf {
+        let path = self.socket_path();
+        self.child = Some(
+            self.command(&["serve", "--idle-timeout", "3"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn bosun serve"),
+        );
+        path
+    }
+
     fn tmux(&self, args: &[&str]) -> std::process::Output {
         Command::new("tmux")
             .arg("-L")
@@ -310,4 +336,177 @@ fn serve_hello_snapshot_create_delta_kill() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(!path.exists(), "socket left behind");
+}
+
+fn fixture() -> Fixture {
+    let home = tempfile::Builder::new()
+        .prefix("bsv")
+        .tempdir_in("/tmp")
+        .unwrap();
+    Fixture {
+        home,
+        sock: unique_socket(),
+        child: None,
+    }
+}
+
+/// Write `config.toml` so its mtime moves even on a filesystem with
+/// coarse timestamps; the daemon notices a changed mtime.
+fn write_config(path: &PathBuf, contents: &str) {
+    let before = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    loop {
+        std::fs::write(path, contents).unwrap();
+        let after = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        if after != before {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn serve_keybindings_follow_config_toml() {
+    let mut fx = fixture();
+    let config = fx.config_path();
+    write_config(
+        &config,
+        "[keybindings]\nnext_tab = 'ctrl+shift+right'\nprevious_tab = 'none'\n",
+    );
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    let snap = c.recv().expect("snapshot");
+    assert_eq!(snap["t"], "snapshot", "{snap}");
+    assert_eq!(
+        snap["keybindings"],
+        json!({
+            "previous_tab": null, "next_tab": "Ctrl+Shift+Right",
+            "previous_session": "Shift+Up", "next_session": "Shift+Down",
+            "send_next_key": "Ctrl+v"
+        })
+    );
+
+    // An edit made elsewhere arrives as a `keybindings` delta.
+    write_config(&config, "[keybindings]\nnext_session = 'Alt+n'\n");
+    let seen = c.until("keybindings delta", |v| v["t"] == "keybindings");
+    assert_eq!(
+        seen.last().unwrap()["keybindings"],
+        json!({
+            "previous_tab": "Shift+Left", "next_tab": "Shift+Right",
+            "previous_session": "Shift+Up", "next_session": "Alt+n",
+            "send_next_key": "Ctrl+v"
+        })
+    );
+
+    // An invalid table falls back to the defaults, as the TUI does.
+    write_config(&config, "[keybindings]\nnext_tab = 'Ctrl+q'\n");
+    let seen = c.until("keybindings delta", |v| v["t"] == "keybindings");
+    assert_eq!(
+        seen.last().unwrap()["keybindings"],
+        json!({
+            "previous_tab": "Shift+Left", "next_tab": "Shift+Right",
+            "previous_session": "Shift+Up", "next_session": "Shift+Down",
+            "send_next_key": "Ctrl+v"
+        })
+    );
+
+    // A config edit that leaves the shortcuts alone sends no delta: the
+    // next one to arrive is for the edit after it.
+    write_config(&config, "theme = 'nord'\n");
+    let seen = c.until("theme delta", |v| v["t"] == "theme");
+    assert!(!seen.iter().any(|v| v["t"] == "keybindings"), "{seen:#?}");
+    write_config(
+        &config,
+        "theme = 'nord'\n[keybindings]\nnext_tab = 'Alt+Right'\n",
+    );
+    let seen = c.until("keybindings delta", |v| v["t"] == "keybindings");
+    assert_eq!(
+        seen.last().unwrap()["keybindings"]["next_tab"],
+        "Alt+Right",
+        "{seen:#?}"
+    );
+}
+
+#[test]
+fn serve_hook_state_reaches_clients_within_the_poll() {
+    let mut fx = fixture();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    assert_eq!(c.recv().expect("snapshot")["t"], "snapshot");
+
+    // A session whose foreground process isn't a shell, the way an
+    // agent's is (hook state is ignored at a bare shell). The process is
+    // started with send-keys rather than `launch_agent`: the actor spends
+    // about 2 s after a launch refreshing on its own schedule, and the
+    // poll waits for that, which isn't what this test measures.
+    c.send(json!({
+        "t": "cmd", "id": 1, "op": "create", "defer_launch": true,
+        "spec": {"name": "hooked", "path": "/tmp", "agent": "terminal"}
+    }));
+    let seen = c.until("create ack", |v| is_ack(v, 1));
+    let ack = seen.last().unwrap();
+    assert_eq!(ack["ok"], true, "{ack}");
+    let name = ack["session"].as_str().unwrap().to_string();
+    fx.tmux(&["send-keys", "-t", &name, "exec sleep 600", "Enter"]);
+    let running_sleep = |v: &Value| {
+        v["t"] == "sessions"
+            && v["upsert"].as_array().is_some_and(|u| {
+                u.iter()
+                    .any(|s| s["name"] == name.as_str() && s["pane_command"] == "sleep")
+            })
+    };
+    if !seen.iter().any(running_sleep) {
+        c.until("sleep in the pane", running_sleep);
+    }
+
+    let display = |format: &str| {
+        let out = fx.tmux(&["display", "-p", "-t", &name, format]);
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let pane = display("#{pane_id}");
+    let server = display("#{socket_path},#{pid},0");
+
+    // Each report lands well inside the 1 s refresh: the 250 ms status
+    // poll picks it up. Five in a row all under 600 ms would happen by
+    // chance about 8 % of the time on a 1 s cadence.
+    let mut took = Vec::new();
+    for i in 0..5u64 {
+        let tool = format!("Tool{i}");
+        let start = Instant::now();
+        let mut hook = Command::new(BIN)
+            .args(["hook", "claude", "PermissionRequest"])
+            .env("TMUX", &server)
+            .env("TMUX_PANE", &pane)
+            .env_remove("BOSUN_HOOK_LOG")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn bosun hook");
+        hook.stdin
+            .take()
+            .unwrap()
+            .write_all(json!({ "tool_name": tool }).to_string().as_bytes())
+            .unwrap();
+        assert!(hook.wait().unwrap().success());
+        let detail = format!("permission: {tool}");
+        c.until("hook status delta", |v| {
+            v["t"] == "status"
+                && v["session"] == name.as_str()
+                && v["state"] == "waiting"
+                && v["source"] == "hook"
+                && v["detail"] == detail.as_str()
+        });
+        took.push(start.elapsed());
+        // Land the next report at a different point in the poll cycle.
+        std::thread::sleep(Duration::from_millis(150 + 70 * i));
+    }
+    assert!(
+        took.iter().all(|t| *t < Duration::from_millis(600)),
+        "hook → delta took {took:?}"
+    );
+
+    c.send(json!({"t": "cmd", "id": 2, "op": "kill", "session": name}));
+    c.until("kill ack", |v| is_ack(v, 2));
 }
