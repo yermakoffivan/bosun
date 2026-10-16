@@ -211,6 +211,21 @@ class TestKit {
         return nil
     }
 
+    /// The point of a row's own line in the sidebar (not one of its tabs), in window coordinates.
+    func sidebarRowPoint(_ id: String) -> NSPoint? {
+        let o = app.sidebar.outline
+        for row in 0..<o.numberOfRows {
+            guard let it = o.item(atRow: row) as? SidebarItem, it.kind == .row(id) else { continue }
+            var p = NSPoint(x: o.rect(ofRow: row).minX + 70, y: o.rect(ofRow: row).midY)
+            if let cell = o.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarCellView {
+                let f = cell.nameField.frame
+                p = o.convert(NSPoint(x: f.minX + 8, y: f.midY), from: cell)
+            }
+            return o.convert(p, to: nil)
+        }
+        return nil
+    }
+
     func tileCenter(_ t: TileID) -> NSPoint? {
         guard let r = ws.tileRects[t] else { return nil }
         return ws.area.convert(NSPoint(x: r.midX, y: r.midY + 20), to: nil)
@@ -221,11 +236,50 @@ class TestKit {
         return w.firstResponder === t
     }
 
-    func showOnly(_ session: String) async {
-        for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
+    /// The row (container id) holding a session.
+    func rowID(_ s: String) -> String? { app.daemon.state.sidebar.container(holding: s)?.id }
+
+    /// The daemon's tabs of a row, by session.
+    func tabs(_ rowID: String) -> [String] { app.daemon.state.sidebar.container(id: rowID)?.tabs.map(\.session) ?? [] }
+
+    @discardableResult
+    func waitPanesPainted(_ timeout: Double = 3) async -> Bool {
+        await waitUntil(timeout) { ws.layout.panes.allSatisfy { ws.terminal(in: $0)?.hasPaintedContent == true } }
+    }
+
+    /// Show `session`'s row with that pane active, and wait until its panes have painted.
+    func showRow(_ session: String) async {
         ws.show(session)
         await waitUntil(3) { ws.activeTerminal?.hasPaintedContent == true }
+        await waitPanesPainted()
         await sleep(150)
+    }
+
+    /// Whether the pane has a line that is exactly `text` (a shell's output, not the command that printed it).
+    func paneHasLine(_ s: String, _ text: String, timeout: Double = 4) async -> Bool {
+        await waitUntil(timeout) { pane(s).split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces) == text } }
+    }
+
+    /// Kill a tab the test made (through the daemon, as another client would), then take its ended
+    /// tab out of the row so later sections see the fixture's tabs only.
+    func killTab(_ s: String) async {
+        _ = await app.daemon.request(.kill(session: s))
+        await waitUntil(4) { !app.isAlive(s) }
+        let row = rowID(s)
+        var sb = app.daemon.state.sidebar
+        if sb.removeTab(session: s) {
+            let ack = await app.daemon.request(.sidebarSave(sb))
+            if !ack.ok { r.say("      couldn't take \(app.displayName(s))'s tab out of its row: \(ack.error ?? "?")") }
+        }
+        if let row, !(await waitUntil(3) { !tabs(row).contains(s) }) {
+            r.say("      \(app.displayName(s))'s ended tab is still in its row: \(tabs(row).map(app.displayName))")
+        }
+    }
+
+    /// Wait until the daemon reports a shell as the pane's foreground command.
+    @discardableResult
+    func waitShell(_ s: String, timeout: Double = 8) async -> Bool {
+        await waitUntil(timeout) { ShellCommand.isShell(app.daemon.state.sessions[s]?.paneCommand) }
     }
 }
 
@@ -272,6 +326,11 @@ final class FocusTest: TestKit {
 
     private var menuObserver: Any?
 
+    /// The fixture's sessions, by display name.
+    struct Fixture {
+        var api, docs, parser, web, webTests, webShell, review1, review2: String
+    }
+
     func run() async {
         r.say("# Bosun focus test  \(Date())")
         app.enableTestKey()
@@ -288,19 +347,24 @@ final class FocusTest: TestKit {
         }
         app.focus.followsMouse = true
         guard let api = session("api"), let docs = session("docs"), let parser = session("parser"), let web = session("web"),
-              let webTests = session("web tests"), let review1 = session("review-1"), let review2 = session("review-2") else {
-            r.check("fixture sessions present", false)
+              let webTests = session("web tests"), let webShell = session("web shell"),
+              let review1 = session("review-1"), let review2 = session("review-2"),
+              rowID(web) != nil, rowID(webTests) == rowID(web), rowID(webShell) == rowID(web) else {
+            r.check("fixture sessions present, with web, web tests and web shell as the three tabs of one row (./dev.sh up)", false)
             r.save()
             return
         }
-        // Theme for screenshots: whatever the daemon has (opencode by default).
-        await showOnly(api)
+        let f = Fixture(api: api, docs: docs, parser: parser, web: web, webTests: webTests, webShell: webShell, review1: review1, review2: review2)
+        await showRow(api)
         r.check("start: the active terminal is first responder", firstResponderIsActiveTerminal)
 
-        // --only a,b runs just those sections (clientmoves, sheet, empty, tiledrag, sidebardrag, shortcuts).
+        // --only a,b runs just those sections (rows, panes, newpanes, clientmoves, sheet, empty, tiledrag, sidebardrag, shortcuts).
         if let only = argValue("--only") {
             let parts = Set(only.split(separator: ",").map(String.init))
-            if parts.contains("clientmoves") { await clientMoves(api: api, docs: docs, review1: review1) }
+            if parts.contains("rows") { await rows(f) }
+            if parts.contains("panes") { await panes(f) }
+            if parts.contains("newpanes") { await newPanes(f) }
+            if parts.contains("clientmoves") { await clientMoves(f) }
             await layoutSections(parts)
             await finish()
             return
@@ -308,7 +372,7 @@ final class FocusTest: TestKit {
 
         // 0. Nothing typed into a session that the user didn't type: launching the fixture's agents
         // used to leave a Ctrl-L behind, echoed as `^L` at the fake agent's prompt.
-        let strays = [api, docs, parser, review1, review2].filter { pane($0).contains("^L") }
+        let strays = [api, docs, parser, review1, review2, webTests].filter { pane($0).contains("^L") }
         r.check("no stray ^L in the fixture's panes after launch", strays.isEmpty, strays.map(app.displayName).joined(separator: ", "))
 
         // 0b. tmux's status line: the app's clients attach as their own terminal type, get none of the
@@ -327,12 +391,12 @@ final class FocusTest: TestKit {
         }
         r.check("…so the pane uses every row of the terminal", paneRows,
                 "pane \(tmuxOut(["display", "-p", "-t", "=\(api):", "#{pane_height}"]).trimmingCharacters(in: .whitespacesAndNewlines)) rows, terminal \(ws.activeTerminal?.gridSize.rows ?? 0)")
-        shot("01-single-tile")
+        shot("01-single-pane-row")
 
         // 1. Click a sidebar row, then type.
         if let p = sidebarPoint(docs) { await click(p) }
         await waitUntil(2) { ws.activeSession == docs && ws.activeTerminal?.hasPaintedContent == true }
-        r.check("sidebar click shows the session in the active tile", ws.activeSession == docs)
+        r.check("sidebar click shows the row", ws.activeSession == docs && ws.currentRow == rowID(docs))
         r.check("sidebar click leaves the keyboard in the terminal", firstResponderIsActiveTerminal,
                 "firstResponder=\(String(describing: w.firstResponder.map { Swift.type(of: $0) }))")
         await type("after-click\n")
@@ -362,7 +426,7 @@ final class FocusTest: TestKit {
         r.check("clicking the selected row's name starts a rename", app.focus.exception == .rename)
         r.check("the rename field has the keyboard", w.firstResponder is NSText)
         await type("Docs Two")
-        shot("03-rename-in-progress")
+        shot("02-rename-in-progress")
         await type("\n")
         await waitUntil(3) { app.daemon.state.sessions[docs]?.display == "Docs Two" }
         r.check("Return commits the rename through the daemon", app.daemon.state.sessions[docs]?.display == "Docs Two")
@@ -379,92 +443,71 @@ final class FocusTest: TestKit {
         r.check("after Esc the keyboard is back in the terminal", firstResponderIsActiveTerminal)
         app.daemon.command(.rename(session: docs, display: "docs"))
 
-        // 5. Splits: Cmd+D, Cmd+Shift+D, Cmd+Option+Left, Cmd+Shift+D gives a 2x2 grid.
-        await showOnly(api)
-        await cmd("d")
-        r.check("Cmd+D splits right", ws.layout.count == 2)
-        await cmd("d", [.shift])
-        r.check("Cmd+Shift+D splits down", ws.layout.count == 3)
-        let before = ws.activeTile
-        await arrow(123, [.command, .option])
-        r.check("Cmd+Option+Left moves to the tile on the left", ws.activeTile != before && ws.activeSession == api)
-        await cmd("d", [.shift])
-        r.check("2x2 grid", ws.layout.count == 4)
-        await waitUntil(3) { ws.layout.tiles.allSatisfy { ws.terminal(in: $0)?.hasPaintedContent == true } }
-        let sessionsShown = Set(ws.layout.tiles.compactMap { ws.layout.session(in: $0) })
-        r.check("each new tile shows a different session", sessionsShown.count == 4, "\(sessionsShown.count) distinct")
-        r.check("after splitting the keyboard is in the new active tile", firstResponderIsActiveTerminal)
-        // A cold attach paints with the session's status line, which goes a few ms later.
-        await sleep(300)
-        shot("02-grid-2x2-ring")
+        // 5–7. Rows are workspaces: switching, pane navigation, new and closed panes.
+        await rows(f)
+        await panes(f)
+        await newPanes(f)
 
-        // 6. Focus follows the mouse: move into each tile, type, check that pane.
+        // 8. Focus follows the mouse in the three-pane row: move into each pane, type, check that pane.
+        await showRow(web)
         var hoverOK = true
-        for (i, t) in ws.layout.tiles.enumerated() {
-            guard let c = tileCenter(t), let s = ws.layout.session(in: t) else { continue }
+        for (i, t) in ws.layout.panes.enumerated() {
+            guard let c = tileCenter(t) else { continue }
             await move(NSPoint(x: c.x - 3, y: c.y))
             await move(c)
             let ok = ws.activeTile == t && firstResponderIsActiveTerminal
-            await type("hover\(i)\n")
-            // The ticker fixture doesn't read input; it only needs to become active.
-            let landed = app.displayName(s) == "ticker" ? true : await paneShows(s, "got: hover\(i)")
-            if !ok || !landed { hoverOK = false; r.say("      tile \(t) (\(app.displayName(s))): active=\(ok) landed=\(landed)") }
+            let landed: Bool
+            if t == webShell {
+                await type("echo hover\(i)-ok\n")
+                landed = await paneHasLine(t, "hover\(i)-ok")
+            } else {
+                await type("hover\(i)\n")
+                landed = await paneShows(t, "got: hover\(i)")
+            }
+            if !ok || !landed { hoverOK = false; r.say("      pane \(app.displayName(t)): active=\(ok) landed=\(landed)") }
         }
-        r.check("the active ring follows the pointer and typing goes to the hovered tile", hoverOK)
-        // Same point again (a tile moving under a still pointer) must not activate anything.
+        r.check("the active ring follows the pointer and typing goes to the hovered pane", hoverOK)
+        // Same point again (a pane moving under a still pointer) must not activate anything.
         let held = ws.activeTile
-        if let other = ws.layout.tiles.first(where: { $0 != held }), let c = tileCenter(other) {
+        if let other = ws.layout.panes.first(where: { $0 != held }), let c = tileCenter(other) {
             app.focus.setWindowKey(true)
             await move(c)
             await move(c)
             ws.activate(held)
             await move(c)
-            r.check("a pointer that didn't move doesn't activate a tile", ws.activeTile == held)
+            r.check("a pointer that didn't move doesn't activate a pane", ws.activeTile == held)
         }
         // Setting off: hover does nothing, a click activates and is consumed.
         app.focus.followsMouse = false
-        let target = ws.layout.tiles.first { $0 != ws.activeTile && app.displayName(ws.layout.session(in: $0) ?? "") != "ticker" }!
-        if let c = tileCenter(target) {
+        if let target = ws.layout.panes.first(where: { $0 != ws.activeTile && $0 != webShell }), let c = tileCenter(target) {
             await move(NSPoint(x: c.x + 5, y: c.y))
             r.check("with focus-follows-mouse off, hover doesn't activate", ws.activeTile != target)
-            let ts = ws.layout.session(in: target)!
-            let beforeClick = ws.terminal(in: target)?.contentsCount ?? 0
             await click(c)
-            r.check("a click activates an inactive tile", ws.activeTile == target && firstResponderIsActiveTerminal)
-            _ = beforeClick
+            r.check("a click activates an inactive pane", ws.activeTile == target && firstResponderIsActiveTerminal)
             await type("clicked\n")
-            r.check("typing after a tile click reaches that tile", await paneShows(ts, "got: clicked"))
+            r.check("typing after a pane click reaches that pane", await paneShows(target, "got: clicked"))
         }
         app.focus.followsMouse = true
 
-        // 7. A sidebar click for a session already in another tile activates that tile.
-        let elsewhere = ws.layout.tiles.first { $0 != ws.activeTile }!
-        let elsewhereSession = ws.layout.session(in: elsewhere)!
-        if let p = sidebarPoint(elsewhereSession) { await click(p) }
-        r.check("sidebar click on a session in another tile activates that tile", ws.activeTile == elsewhere)
-        r.check("…and the session stays in one tile", ws.layout.sessions.values.filter { $0 == elsewhereSession }.count == 1)
-
-        // 8. Drops.
+        // 9. Drops.
         let file = NSTemporaryDirectory() + "bosun drop (test).png"
         FileManager.default.createFile(atPath: file, contents: Data([0x89, 0x50, 0x4e, 0x47]))
         let escaped = ShellEscape.escape(file)
         let pb = NSPasteboard(name: NSPasteboard.Name("dev.yetidevworks.bosun.test-drag"))
         pb.clearContents()
         pb.writeObjects([URL(fileURLWithPath: file) as NSURL])
-        let dropTile = ws.layout.tiles.first { $0 != ws.activeTile && app.displayName(ws.layout.session(in: $0) ?? "") != "ticker" }!
-        let dropSession = ws.layout.session(in: dropTile)!
-        if let c = tileCenter(dropTile) {
+        if let dropTile = ws.layout.panes.first(where: { $0 != ws.activeTile && $0 != webShell }), let c = tileCenter(dropTile) {
             let info = FakeDrag(location: c, pasteboard: pb, window: w)
             let op = ws.area.draggingEntered(info)
-            r.check("a file dragged over a tile is accepted (copy)", op == .copy)
+            r.check("a file dragged over a pane is accepted (copy)", op == .copy)
             _ = ws.area.performDragOperation(info)
             await sleep(150)
-            r.check("a drop activates the tile under the pointer", ws.activeTile == dropTile)
+            r.check("a drop activates the pane under the pointer", ws.activeTile == dropTile)
             await type("\n")
-            r.check("the dropped path is inserted, shell-escaped, into that tile", await paneShows(dropSession, "got: \(escaped)"))
+            r.check("the dropped path is inserted, shell-escaped, into that pane", await paneShows(dropTile, "got: \(escaped)"))
         }
         // Over a divider: refused.
-        if let d = ws.area.subviews.first(where: { $0 is DividerView }) {
+        if let d = ws.area.subviews.first(where: { $0 is DividerView && !$0.isHidden }) {
             let p = ws.area.convert(NSPoint(x: d.frame.midX, y: d.frame.midY), to: nil)
             r.check("a drop on a divider is refused", ws.area.draggingUpdated(FakeDrag(location: p, pasteboard: pb, window: w)) == [])
             ws.area.draggingExited(nil)
@@ -475,15 +518,14 @@ final class FocusTest: TestKit {
         let img = NSImage(size: NSSize(width: 4, height: 4))
         img.lockFocus(); NSColor.red.setFill(); NSRect(x: 0, y: 0, width: 4, height: 4).fill(); img.unlockFocus()
         imgPB.writeObjects([img])
-        if let t = ws.layout.tiles.first(where: { app.displayName(ws.layout.session(in: $0) ?? "") != "ticker" }), let c = tileCenter(t),
-           let s = ws.layout.session(in: t) {
+        if let t = ws.layout.panes.first(where: { $0 != webShell }), let c = tileCenter(t) {
             _ = ws.area.performDragOperation(FakeDrag(location: c, pasteboard: imgPB, window: w))
             await sleep(150)
             await type("\n")
-            let ok = await waitUntil(3) { pane(s).contains("got: ") && pane(s).contains("/drops/drop-") }
+            let ok = await waitUntil(3) { pane(t).contains("got: ") && pane(t).contains("/drops/drop-") }
             r.check("image data (not a file) is written to a temp file and its path inserted", ok)
         }
-        // Sidebar: a drop on a session row shows it in the active tile and inserts there; elsewhere refused.
+        // Sidebar: a drop on a session row shows that row and inserts there; elsewhere refused.
         let sb: SidebarController = app.sidebar
         if let rowItem = sb.itemFor(session: review1) {
             let o = sb.outline
@@ -491,10 +533,9 @@ final class FocusTest: TestKit {
             let info = FakeDrag(location: rowPoint, pasteboard: pb, window: w)
             let op = sb.outlineView(o, validateDrop: info, proposedItem: rowItem, proposedChildIndex: NSOutlineViewDropOnItemIndex)
             r.check("a file dragged over a sidebar session row is accepted", op == .copy)
-            let activeBefore = ws.activeTile
             _ = sb.outlineView(o, acceptDrop: info, item: rowItem, childIndex: NSOutlineViewDropOnItemIndex)
             await waitUntil(3) { ws.activeSession == review1 && ws.activeTerminal?.hasPaintedContent == true }
-            r.check("a drop on a sidebar row shows that session in the active tile", ws.activeSession == review1 && ws.activeTile == activeBefore)
+            r.check("a drop on a sidebar row shows that row", ws.activeSession == review1 && ws.currentRow == rowID(review1))
             await sleep(300)
             await type("\n")
             r.check("…and inserts the path there", await paneShows(review1, "got: \(escaped)"))
@@ -506,15 +547,18 @@ final class FocusTest: TestKit {
                     sb.outlineView(o, validateDrop: FakeDrag(location: secPoint, pasteboard: pb, window: w), proposedItem: secItem, proposedChildIndex: NSOutlineViewDropOnItemIndex) == [])
         }
 
-        // 9. Palette.
+        // 10. Palette: a match in another row replaces the whole main area.
+        await showRow(web)
+        let webViews = Set(ws.layout.panes)
         await cmd("k")
         r.check("Cmd+K opens the palette", app.paletteOpen && app.focus.exception == .palette)
         r.check("the palette field has the keyboard", w.firstResponder is NSText)
         await type("pars")
-        shot("04-palette")
+        shot("09-palette")
         await type("\n")
         await waitUntil(2) { ws.activeSession == parser }
-        r.check("Return in the palette shows the match", ws.activeSession == parser && !app.paletteOpen)
+        r.check("Return in the palette shows the match's row", ws.activeSession == parser && !app.paletteOpen && ws.layout.panes == [parser])
+        r.check("…and no pane of the previous row stays on screen", webViews.allSatisfy { ws.pool.view(for: $0)?.isHidden ?? true })
         await waitUntil(1) { firstResponderIsActiveTerminal }
         r.check("after the palette the keyboard is back in the terminal", firstResponderIsActiveTerminal)
         await waitUntil(2) { ws.activeTerminal?.hasPaintedContent == true }
@@ -526,33 +570,35 @@ final class FocusTest: TestKit {
         await cmd("k")
         if let p = tileCenter(ws.activeTile) { await click(NSPoint(x: p.x, y: 60)) }
         r.check("a click outside closes the palette", !app.paletteOpen && app.focus.exception == nil)
+        // A tab of a multi-pane row: its row, with that pane active.
+        await cmd("k")
+        await type("web tests")
+        await type("\n")
+        await waitUntil(2) { ws.activeSession == webTests }
+        r.check("Cmd+K to a tab shows its row with that pane active", ws.currentRow == rowID(web) && ws.activeSession == webTests && ws.layout.count == 3)
 
-        // 10. Navigation keys from [keybindings] (defaults: Shift+Up/Down sessions, Shift+Left/Right tabs, Ctrl+v send next).
-        for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
-        r.check("Cmd+W path: tiles close down to one", ws.layout.count == 1)
-        await showOnly(api)
-        let order = app.daemon.state.sidebar.cycleOrder(isAlive: app.isAlive)
+        // 11. Navigation keys from [keybindings] (defaults: Shift+Up/Down sessions, Shift+Left/Right tabs, Ctrl+v send next).
+        await showRow(api)
+        let liveRows = app.daemon.state.sidebar.allRows.filter { c in c.tabs.contains { app.isAlive($0.session) } }.map(\.id)
         await arrow(125, [.shift])
-        r.check("Shift+Down shows the next session in sidebar order", ws.activeSession == Sidebar.cycle(order, from: api, forward: true),
+        let expectedNext = Sidebar.cycle(liveRows, from: rowID(api), forward: true)
+        r.check("Shift+Down shows the next row in sidebar order", ws.currentRow == expectedNext,
                 "now \(ws.activeSession.map(app.displayName) ?? "-")")
         r.check("…without the key reaching the terminal", !pane(api).contains("[1;2B"))
         await arrow(126, [.shift])
-        r.check("Shift+Up goes back", ws.activeSession == api)
+        r.check("Shift+Up goes back", ws.currentRow == rowID(api) && ws.activeSession == api)
         let navBound = tmuxOut(["list-keys", "-T", "root", "S-Down"]).contains("switch-client")
         let navDrift = await driftedClients()
         r.check("Shift+Up/Down never reach tmux's Shift+arrow switch-client bindings (no client moved)",
                 navBound && navDrift.isEmpty, navBound ? navDrift.joined(separator: ", ") : "Bosun's S-Down binding isn't installed")
-        app.show(web)
-        await waitUntil(2) { ws.activeTerminal?.hasPaintedContent == true }
-        await arrow(124, [.shift])
-        r.check("Shift+Right moves to the next tab in the row", ws.activeSession == webTests,
-                "now \(ws.activeSession.map(app.displayName) ?? "-"), row tabs \(app.daemon.state.sidebar.container(holding: web)?.tabs.map { app.displayName($0.session) } ?? [])")
-        await waitUntil(2) { app.daemon.state.sidebar.container(holding: web)?.active == webTests }
-        r.check("…and the row remembers its active tab", app.daemon.state.sidebar.container(holding: web)?.active == webTests)
-        await arrow(123, [.shift])
-        r.check("Shift+Left moves back", ws.activeSession == web)
-        let tabDrift = await driftedClients()
-        r.check("Shift+Left/Right never reach tmux's bindings either", tabDrift.isEmpty, tabDrift.joined(separator: ", "))
+        // Shift+Down through the web row: all three panes come up at once.
+        if let webRow = rowID(web), let i = liveRows.firstIndex(of: webRow), i > 0 {
+            ws.selectRow(liveRows[i - 1])
+            await sleep(100)
+            await arrow(125, [.shift])
+            r.check("Shift+Down onto a multi-tab row shows all its panes", ws.currentRow == webRow && ws.layout.count == 3)
+        }
+        await showRow(web)
         await waitUntil(2) { ws.activeTerminal?.hasPaintedContent == true }
         await key(9, "\u{16}", [.control], ignoring: "v")
         await arrow(125, [.shift])
@@ -563,12 +609,12 @@ final class FocusTest: TestKit {
         let on = await clientSession(of: web)
         r.check("…and tmux kept the client on its session", on == web, "client on \(on ?? "-")")
 
-        // 11. Cmd+1…9, Cmd+Shift+U, Cmd+W.
+        // 12. Cmd+1…9, Cmd+Shift+U.
         let rows = app.daemon.state.sidebar.visibleRows
         await cmd("2")
-        r.check("Cmd+2 jumps to the second row", ws.activeSession == rows[1].active)
+        r.check("Cmd+2 shows the second row", ws.currentRow == rows[1].id)
         await cmd("1")
-        r.check("Cmd+1 jumps to the first row", ws.activeSession == rows[0].active)
+        r.check("Cmd+1 shows the first row", ws.currentRow == rows[0].id)
         tmux(["set-option", "-p", "-t", "=\(review2):", "@bosun_state", "waiting"])
         tmux(["set-option", "-p", "-t", "=\(review2):", "@bosun_state_at", "\(Int(Date().timeIntervalSince1970 * 1000))"])
         tmux(["set-option", "-p", "-t", "=\(review2):", "@bosun_state_detail", "permission: Bash"])
@@ -577,17 +623,13 @@ final class FocusTest: TestKit {
         await cmd("u", [.shift])
         r.check("Cmd+Shift+U shows the oldest waiting session", ws.activeSession == oldest && oldest != nil,
                 "oldest \(oldest.map(app.displayName) ?? "-"), shown \(ws.activeSession.map(app.displayName) ?? "-")")
-        await waitUntil(2) { ws.activeTerminal?.hasPaintedContent == true }
-        await cmd("d")
-        await cmd("w")
-        r.check("Cmd+W closes a tile (the session keeps running)", ws.layout.count == 1 && app.isAlive(review2))
         tmux(["set-option", "-p", "-t", "=\(review2):", "@bosun_state", "idle"])
         tmux(["set-option", "-p", "-t", "=\(review2):", "@bosun_state_detail", ""])
 
-        // 12. Ghostty bindings that clash with app shortcuts never fire in the terminal.
-        await showOnly(api)
+        // 13. Ghostty bindings that clash with app shortcuts never fire in the terminal.
+        await showRow(api)
         let fr = (w.firstResponder as? TerminalView)?.session
-        r.check("showing a session puts its terminal first", ws.activeSession == api && fr == api,
+        r.check("showing a row puts its active pane's terminal first", ws.activeSession == api && fr == api,
                 "active=\(ws.activeSession.map(app.displayName) ?? "-") firstResponder=\(fr.map(app.displayName) ?? String(describing: w.firstResponder))")
         await type("clash-check\n")
         _ = await paneShows(api, "got: clash-check")
@@ -595,12 +637,13 @@ final class FocusTest: TestKit {
         await key(53, "\u{1b}")
         r.check("Cmd+K opens the palette instead of Ghostty's clear-screen", pane(api).contains("clash-check"))
 
-        // 13. New-session sheet: Cmd+Shift+N, then Esc returns the keyboard.
+        // 14. New-session sheet: Cmd+Shift+N, then Esc returns the keyboard.
         await cmd("n", [.shift])
         await waitUntil(2) { app.sheetOpen }
         r.check("Cmd+Shift+N opens the new-session sheet", app.sheetOpen && app.focus.exception == .sheet)
+        r.check("…for a new row, not a tab", app.formModel.map { !$0.isAddTab } ?? false)
         await sleep(400)
-        shot("05-new-session-sheet")
+        shot("10-new-session-sheet")
         if let sheet = w.attachedSheet { await key(53, "\u{1b}", window: sheet) }
         await waitUntil(2) { !app.sheetOpen }
         await waitUntil(1) { firstResponderIsActiveTerminal }
@@ -608,7 +651,7 @@ final class FocusTest: TestKit {
         await type("after-sheet\n")
         r.check("typing after the sheet reaches the pane", await paneShows(api, "got: after-sheet"))
 
-        // 14. Create, then kill, a session through the app (the sheet's submit path).
+        // 15. Create, then kill, a session through the app (the sheet's submit path): a new row.
         var spec = Spec(name: "temp-focus", path: "~", agent: "terminal", args: "python3 \(fakeAgentPath) temp")
         spec.containerID = nil
         app.daemon.command(.create(spec: spec, deferLaunch: true)) { [app] ack in
@@ -617,25 +660,34 @@ final class FocusTest: TestKit {
         }
         await waitUntil(5) { session("temp-focus") != nil && ws.activeSession == session("temp-focus") }
         let temp = session("temp-focus")
-        r.check("create (deferred launch) shows the new session", temp != nil && ws.activeSession == temp)
+        r.check("create (deferred launch) shows the new session's row", temp != nil && ws.activeSession == temp && ws.layout.count == 1)
         if let temp {
             r.check("the agent launches once the terminal is attached", await paneShows(temp, "fake agent · temp", timeout: 6))
             await sleep(800)
             r.check("…and nothing but the launch command is typed into it (no ^L)", !pane(temp).contains("^L"))
             let note = app.noticeText
             r.check("the created notice uses the display name (\(note))", !note.contains(temp) && note.contains("temp-focus"))
+            let tempRow = rowID(temp)
             app.daemon.command(.kill(session: temp))
             await waitUntil(5) { !app.isAlive(temp) }
             r.check("kill ends the session", !app.isAlive(temp))
-            if let c = app.daemon.state.sidebar.container(holding: temp) { app.removeRow(c.id) }
+            await sleep(300)
+            if let tempRow, app.daemon.state.sidebar.container(id: tempRow) != nil {
+                r.check("a row whose tabs have all ended shows its exited placeholder",
+                        ws.currentRow == tempRow && ws.layout.isEmpty && ws.tiles == [temp] && ws.activeTerminal == nil)
+                shot("11-exited-row")
+                app.removeRow(tempRow)
+                await waitUntil(3) { app.daemon.state.sidebar.container(id: tempRow) == nil }
+            }
+            await waitUntil(2) { ws.currentRow != nil && ws.currentRow != tempRow }
+            r.check("when the shown row goes, a neighbouring row is shown", ws.currentRow != nil && ws.currentRow != tempRow
+                    && app.daemon.state.sidebar.container(id: ws.currentRow!) != nil)
         }
 
-        // 15. Themes: a light and a dark one for the screenshots, then back.
+        // 16. Themes: a light and a dark one for the screenshots, then back.
         let original = app.daemon.state.theme.name
-        await showOnly(api)
-        await cmd("d")
-        await waitUntil(3) { ws.layout.tiles.allSatisfy { ws.terminal(in: $0)?.hasPaintedContent == true } }
-        for (name, file) in [("github-light", "06-theme-light"), ("tokyonight", "07-theme-dark")] {
+        await showRow(web)
+        for (name, file) in [("github-light", "12-theme-light"), ("tokyonight", "13-theme-dark")] {
             app.daemon.command(.setTheme(name: name, persist: false))
             await waitUntil(3) { app.daemon.state.theme.name == name }
             await sleep(300)
@@ -644,12 +696,11 @@ final class FocusTest: TestKit {
         }
         app.daemon.command(.setTheme(name: original, persist: false))
         await waitUntil(3) { app.daemon.state.theme.name == original }
-        for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
 
-        // 16. tmux moving a terminal's client (Bosun's TUI bindings typed inside it, or anything else).
-        await clientMoves(api: api, docs: docs, review1: review1)
+        // 17. tmux moving a terminal's client (Bosun's TUI bindings typed inside it, or anything else).
+        await clientMoves(f)
 
-        // 17–21. Sheet layout, empty tiles, tile drag, sidebar drag, the shortcuts panel.
+        // 18–22. Sheet layout, placeholders, pane drag, sidebar drag, the shortcuts panel.
         await layoutSections(nil)
         await finish()
     }
@@ -665,6 +716,259 @@ final class FocusTest: TestKit {
         r.say("saved \(r.path)")
     }
 
+    // MARK: Rows
+
+    /// Switching rows replaces every pane, and the keyboard lands in the pane that was active in the row.
+    func rows(_ f: Fixture) async {
+        guard let webRow = rowID(f.web) else { return }
+        await showRow(f.web)
+        r.check("rows: a row with three tabs opens as three panes", ws.currentRow == webRow && Set(ws.layout.panes) == [f.web, f.webTests, f.webShell],
+                "\(ws.layout.panes.map(app.displayName))")
+        r.check("…each pane attached and painted", await waitPanesPainted())
+        r.check("…laid out side by side and stacked, inside the main area", ws.layout.panes.allSatisfy { p in
+            guard let rect = ws.tileRects[p] else { return false }
+            return ws.area.bounds.contains(rect) && rect.width > 200 && rect.height > 150
+        })
+        // The remembered pane: web tests.
+        ws.activate(f.webTests)
+        await waitUntil(1) { firstResponderIsActiveTerminal }
+        // A cold attach paints with the session's tmux status line, which goes a moment later.
+        await sleep(500)
+        shot("03-row-three-panes")
+        r.check("…the row keeps its own name (its first tab's), whichever pane is active", app.rowLabel(app.daemon.state.sidebar.container(id: webRow)!) == "web")
+        let views = Dictionary(uniqueKeysWithValues: ws.layout.panes.compactMap { p in ws.pool.view(for: p).map { (p, ObjectIdentifier($0)) } })
+        let item = app.sidebar.outline.item(atRow: app.sidebar.outline.selectedRow) as? SidebarItem
+        r.check("…the sidebar selects the row itself", item?.kind == .row(webRow))
+
+        // To a single-pane row: everything of the web row goes.
+        if let p = sidebarPoint(f.docs) { await click(p) }
+        await waitUntil(2) { ws.currentRow == rowID(f.docs) && ws.activeTerminal?.hasPaintedContent == true }
+        r.check("rows: clicking a single-pane row replaces all the panes with its one", ws.layout.panes == [f.docs] && ws.tiles == [f.docs])
+        r.check("…the other row's views are hidden, not freed (warm)", [f.web, f.webTests, f.webShell].allSatisfy { ws.pool.view(for: $0)?.isHidden == true })
+        r.check("…and the keyboard is in its pane", firstResponderIsActiveTerminal && (w.firstResponder as? TerminalView)?.session == f.docs)
+        await sleep(150)
+        shot("04-switch-to-single-pane-row")
+
+        // Back: the same three views, and the keyboard in web tests again.
+        if let p = sidebarRowPoint(webRow) { await click(p) }
+        await waitUntil(2) { ws.currentRow == webRow }
+        await waitPanesPainted()
+        let sameViews = ws.layout.panes.allSatisfy { p in ws.pool.view(for: p).map { ObjectIdentifier($0) } == views[p] }
+        r.check("rows: clicking the row again brings all three panes back", Set(ws.layout.panes) == [f.web, f.webTests, f.webShell])
+        r.check("…with the same terminal views (warm, no reattach)", sameViews && ws.layout.panes.allSatisfy { ws.pool.view(for: $0)?.isHidden == false })
+        r.check("…and the keyboard in the pane that was active (web tests)", ws.activeSession == f.webTests && firstResponderIsActiveTerminal
+                && (w.firstResponder as? TerminalView)?.session == f.webTests, "active \(ws.activeSession.map(app.displayName) ?? "-")")
+        await type("remembered\n")
+        r.check("…typing reaches it", await paneShows(f.webTests, "got: remembered"))
+        // The sidebar marks the active pane's tab under the selected row.
+        let tabRow = app.sidebar.itemFor(session: f.webTests).map { app.sidebar.outline.row(forItem: $0) } ?? -1
+        r.check("…the sidebar marks web tests as the active pane", tabRow >= 0 && app.sidebar.isSelectedForRename(app.sidebar.outline.item(atRow: tabRow) as! SidebarItem))
+        await sleep(150)
+        shot("05-back-to-three-panes")
+
+        // Cmd+1…9 switch whole rows too.
+        let visible = app.daemon.state.sidebar.visibleRows
+        if let i = visible.firstIndex(where: { $0.id == webRow }), i < 9, let other = visible.firstIndex(where: { $0.id != webRow }) {
+            await cmd(Character("\(other + 1)"))
+            r.check("rows: Cmd+\(other + 1) replaces the panes with that row's", ws.currentRow == visible[other].id && ws.layout.count == liveCount(visible[other]))
+            await cmd(Character("\(i + 1)"))
+            r.check("…and Cmd+\(i + 1) brings the three panes back, keyboard in web tests", ws.currentRow == webRow && ws.layout.count == 3 && ws.activeSession == f.webTests)
+        }
+
+        // A tab's row in the sidebar activates that pane.
+        if let p = sidebarPoint(f.webShell) { await click(p) }
+        await waitUntil(1) { ws.activeSession == f.webShell }
+        r.check("rows: clicking a tab under the row activates its pane", ws.activeSession == f.webShell && firstResponderIsActiveTerminal)
+        await waitShell(f.webShell)
+        await type("echo tabclick-ok\n")
+        r.check("…and typing reaches it", await paneHasLine(f.webShell, "tabclick-ok"))
+        if let p = sidebarPoint(f.webTests) { await click(p) }
+        await waitUntil(1) { ws.activeSession == f.webTests }
+    }
+
+    private func liveCount(_ c: Container) -> Int { c.tabs.filter { app.isAlive($0.session) }.count }
+
+    // MARK: Pane navigation
+
+    func panes(_ f: Fixture) async {
+        await showRow(f.web)
+        let order = tabs(rowID(f.web) ?? "").filter { ws.layout.contains($0) }
+        // Shift+Right / Shift+Left walk the panes in tab order, wrapping.
+        ws.activate(order[0])
+        var seen: [String] = [ws.activeSession ?? "-"]
+        for _ in 0..<order.count {
+            await arrow(124, [.shift])
+            seen.append(ws.activeSession ?? "-")
+        }
+        r.check("panes: Shift+Right walks the panes in tab order and wraps", seen == order + [order[0]], seen.map(app.displayName).joined(separator: " → "))
+        r.check("…the keyboard follows", firstResponderIsActiveTerminal && (w.firstResponder as? TerminalView)?.session == order[0])
+        await arrow(123, [.shift])
+        r.check("panes: Shift+Left goes back (wrapping to the last tab)", ws.activeSession == order.last)
+        await arrow(124, [.shift])
+        let drift = await driftedClients()
+        r.check("…and the keys never reach the programs or tmux's bindings", drift.isEmpty && !pane(f.web).contains("[1;2C") && !pane(f.webTests).contains("[1;2D"),
+                drift.joined(separator: ", "))
+        r.check("…the row stays the same", ws.currentRow == rowID(f.web) && ws.layout.count == 3)
+
+        // Cmd+Option+arrows move by position.
+        var spatialOK = true
+        var tried = 0
+        for (code, dir) in [(UInt16(123), Direction.left), (124, .right), (126, .up), (125, .down)] {
+            for start in ws.layout.panes {
+                ws.activate(start)
+                let want = SplitNode.neighbor(of: start, dir, in: { var l = SplitNode.Layout(); l.tiles = ws.tileRects; return l }())
+                await arrow(code, [.command, .option])
+                tried += 1
+                if ws.activeSession != (want ?? start) {
+                    spatialOK = false
+                    r.say("      \(dir) from \(app.displayName(start)): now \(ws.activeSession.map(app.displayName) ?? "-"), want \(want.map(app.displayName) ?? "stay")")
+                }
+            }
+        }
+        r.check("panes: Cmd+Option+arrows move to the pane in that direction (\(tried) moves)", spatialOK && firstResponderIsActiveTerminal)
+        ws.activate(f.webTests)
+    }
+
+    // MARK: New and closed panes
+
+    func newPanes(_ f: Fixture) async {
+        guard let webRow = rowID(f.web) else { return }
+        await showRow(f.webTests)
+        let before = tabs(webRow)
+        let from = ws.activeTile
+        let fromRect = ws.tileRects[from] ?? .zero
+        // Cmd+D: a terminal tab of this row, split right of the active pane, active.
+        await cmd("d")
+        let made = await waitUntil(4) { tabs(webRow).count == before.count + 1 && ws.layout.count == 4 }
+        let new = tabs(webRow).first { !before.contains($0) }
+        r.check("Cmd+D adds a tab to the row in the daemon's sidebar", made && new != nil, "tabs \(tabs(webRow).map(app.displayName))")
+        guard let new else { return }
+        r.check("…a plain terminal in the row's directory", app.daemon.state.sessions[new]?.agent == "terminal"
+                && app.daemon.state.sessions[new]?.path == app.daemon.state.sessions[from]?.path,
+                "agent \(app.daemon.state.sessions[new]?.agent ?? "-"), path \(app.daemon.state.sessions[new]?.path ?? "-")")
+        r.check("…named after the row (\(app.displayName(new)))", app.displayName(new).hasPrefix(app.displayName(f.web)))
+        await waitUntil(3) { ws.terminal(in: new)?.hasPaintedContent == true }
+        let r1 = ws.tileRects[new] ?? .zero
+        r.check("…in the layout, to the right of the pane that was active, and active",
+                ws.layout.contains(new) && ws.activeSession == new && r1.minX > fromRect.minX && abs(r1.minY - fromRect.minY) < 1 && r1.maxX <= fromRect.maxX + 1,
+                "new \(r1) was \(fromRect)")
+        r.check("…with the keyboard", firstResponderIsActiveTerminal && (w.firstResponder as? TerminalView)?.session == new)
+        await waitShell(new)
+        await sleep(300)
+        await type("echo cmdd-ok\n")
+        r.check("…typing reaches the new pane", await paneHasLine(new, "cmdd-ok"))
+
+        // Cmd+Shift+D: below.
+        let before2 = tabs(webRow)
+        let r2from = ws.tileRects[new] ?? .zero
+        await cmd("d", [.shift])
+        await waitUntil(4) { tabs(webRow).count == before2.count + 1 && ws.layout.count == 5 }
+        let below = tabs(webRow).first { !before2.contains($0) }
+        let r2 = below.flatMap { ws.tileRects[$0] } ?? .zero
+        r.check("Cmd+Shift+D adds a tab split below the active pane", below != nil && ws.activeSession == below
+                && r2.minY > r2from.minY && abs(r2.minX - r2from.minX) < 1, "new \(r2) was \(r2from)")
+        if let below { await waitUntil(3) { ws.terminal(in: below)?.hasPaintedContent == true } }
+        shot("06-five-panes")
+
+        // Cmd+W on a shell at its prompt: no question, the pane goes, the sibling takes over, the tab ends.
+        if let below {
+            await waitShell(below)
+            let views = ws.pool.views.count
+            let splitHeight = ws.tileRects[new]?.height ?? 0
+            await cmd("w")
+            await sleep(250)
+            r.check("Cmd+W on an idle shell pane closes it without asking", !app.sheetOpen && !ws.layout.contains(below))
+            r.check("…its sibling gets the space and the keyboard", ws.activeSession == new && firstResponderIsActiveTerminal
+                    && (ws.tileRects[new]?.height ?? 0) > splitHeight + 20, "active \(ws.activeSession.map(app.displayName) ?? "-")")
+            let gone = await waitUntil(4) { !app.isAlive(below) && !tabs(webRow).contains(below) }
+            r.check("…and the tab is gone from the daemon's sidebar", gone, "tabs \(tabs(webRow).map(app.displayName))")
+            r.check("…without reattaching the panes that stay", ws.pool.views.count <= views)
+        }
+        await waitShell(new)
+        await cmd("w")
+        await waitUntil(4) { !app.isAlive(new) }
+        r.check("Cmd+W again closes the other new pane: back to the row's three", ws.layout.count == 3 && !tabs(webRow).contains(new) && !app.sheetOpen)
+
+        // Cmd+W on a pane running something: it asks, and Cancel keeps it.
+        ws.activate(f.webTests)
+        await cmd("w")
+        await waitUntil(2) { app.sheetOpen }
+        r.check("Cmd+W on a pane running a program asks first", app.sheetOpen && app.focus.exception == .sheet)
+        await sleep(300)
+        shot("07-close-busy-pane-confirm")
+        if let sheet = w.attachedSheet { await key(53, "\u{1b}", window: sheet) }
+        await waitUntil(2) { !app.sheetOpen }
+        await waitUntil(1) { firstResponderIsActiveTerminal }
+        r.check("…Cancel keeps the pane and its tab, and returns the keyboard", ws.layout.contains(f.webTests) && app.isAlive(f.webTests)
+                && firstResponderIsActiveTerminal)
+
+        // The last pane of a row always asks (it's a kill of the row's session).
+        await showRow(f.docs)
+        await cmd("w")
+        await waitUntil(2) { app.sheetOpen }
+        r.check("Cmd+W on a row's last pane always asks", app.sheetOpen)
+        if let sheet = w.attachedSheet { await key(53, "\u{1b}", window: sheet) }
+        await waitUntil(2) { !app.sheetOpen }
+        r.check("…and Cancel keeps it", app.isAlive(f.docs) && ws.layout.panes == [f.docs])
+
+        // Cmd+T: the new-session sheet for a tab of this row, in its directory; the result is a split.
+        await showRow(f.webTests)
+        let before3 = tabs(webRow)
+        let from3 = ws.activeTile
+        await cmd("t")
+        await waitUntil(2) { app.sheetOpen }
+        let model = app.formModel
+        r.check("Cmd+T opens the sheet for a new tab of the shown row", app.sheetOpen && model?.isAddTab == true && model?.mode == .addTab(containerID: webRow))
+        r.check("…in the row's directory", model?.path == app.daemon.state.sessions[from3]?.path, "path \(model?.path ?? "-")")
+        if let model, let sheet = w.attachedSheet {
+            model.name = "web agent"
+            model.agent = "terminal"
+            model.args = "python3 \(fakeAgentPath) newtab"
+            await sleep(150)
+            await key(36, "\r", window: sheet)
+        }
+        await waitUntil(5) { tabs(webRow).count == before3.count + 1 && ws.layout.count == 4 }
+        let viaSheet = tabs(webRow).first { !before3.contains($0) }
+        if let viaSheet {
+            r.check("…and the new tab opens as a split right of the active pane, active", ws.activeSession == viaSheet
+                    && (ws.tileRects[viaSheet]?.minX ?? 0) > (ws.tileRects[from3]?.minX ?? 0))
+            r.check("…running what the sheet asked for", await paneShows(viaSheet, "fake agent · newtab", timeout: 6))
+            // Busy: Cmd+W asks, Return confirms.
+            await cmd("w")
+            await waitUntil(2) { app.sheetOpen }
+            if let sheet = w.attachedSheet { await key(36, "\r", window: sheet) }
+            await waitUntil(4) { !app.isAlive(viaSheet) }
+            r.check("…and Cmd+W, confirmed, closes it", !app.isAlive(viaSheet) && ws.layout.count == 3 && !ws.layout.contains(viaSheet))
+            r.check("…and its tab leaves the row (no exited tab left behind)", await waitUntil(3) { !tabs(webRow).contains(viaSheet) })
+        } else {
+            r.check("…and the new tab opens as a split", false, "tabs \(tabs(webRow).map(app.displayName))")
+        }
+
+        // A tab made behind the app's back (the TUI, another client) gets a pane; the active pane stays.
+        let before4 = tabs(webRow)
+        let active4 = ws.activeSession
+        var spec = Spec(name: "behind", path: "~", agent: "terminal", args: "")
+        spec.containerID = webRow
+        _ = await app.daemon.request(.create(spec: spec, deferLaunch: false))
+        let appeared = await waitUntil(4) { tabs(webRow).contains { !before4.contains($0) } && ws.layout.count == 4 }
+        let behind = tabs(webRow).first { !before4.contains($0) }
+        r.check("a tab created behind the app's back appears as a pane of its row", appeared && behind.map { ws.layout.contains($0) } == true)
+        r.check("…without taking the keyboard", ws.activeSession == active4 && firstResponderIsActiveTerminal)
+        if let behind {
+            await waitUntil(3) { ws.terminal(in: behind)?.hasPaintedContent == true }
+            r.check("…attached", ws.terminal(in: behind)?.hasPaintedContent == true)
+            await sleep(200)
+            shot("08-tab-from-elsewhere")
+            await killTab(behind)
+            let lost = await waitUntil(4) { !ws.layout.contains(behind) && ws.layout.count == 3 }
+            r.check("a tab that ends elsewhere loses its pane", lost)
+        }
+        // A tab that dies on its own (alive: false, or removed) loses its pane too.
+        await showRow(f.webTests)
+    }
+
+    // MARK: Client moves
+
     /// Prefix 1 (Bosun's jump to the first session, for the TUI), typed inside the app's terminals.
     /// The tmux prefix (whatever ~/.tmux.conf sets, C-b by default), then 1.
     private func typePrefixJump() async {
@@ -676,55 +980,60 @@ final class FocusTest: TestKit {
         await key(18, "1")
     }
 
-    func clientMoves(api: String, docs: String, review1: String) async {
+    func clientMoves(_ f: Fixture) async {
+        let api = f.api, docs = f.docs
         let jumpTarget = tmuxOut(["list-keys", "-T", "prefix", "1"]).components(separatedBy: " ").last?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard jumpTarget == api else {
             r.check("prefix 1 jumps to api in the fixture", false, tmuxOut(["list-keys", "-T", "prefix", "1"]))
             return
         }
-        // a) The tile follows its client to a session no other tile shows.
-        await showOnly(docs)
+        // a) Toward a session in another row: that row is shown, and the client goes back.
+        await showRow(docs)
         let docsView = ws.activeTerminal
         await typePrefixJump()
-        await waitUntil(3) { ws.activeSession == api }
-        r.check("prefix 1 inside a tile: the tile follows its client to the new session", ws.activeSession == api && ws.activeTerminal === docsView,
-                "tile shows \(ws.activeSession.map(app.displayName) ?? "-")")
-        let on = await clientSession(of: api)
-        let selected = (app.sidebar.outline.item(atRow: app.sidebar.outline.selectedRow) as? SidebarItem).flatMap { app.sidebar.session(for: $0) }
-        r.check("…its header, title and sidebar selection say so", on == api && ws.headerSession(ws.activeTile) == api && w.title.contains(app.displayName(api)) &&
-                selected == api, "client on \(on.map(app.displayName) ?? "-"), title \(w.title), sidebar \(selected.map(app.displayName) ?? "-")")
-        r.check("…and the warm pool keys the view by its new session", ws.pool.view(for: api) === docsView && ws.pool.view(for: docs) !== docsView)
+        await waitUntil(3) { ws.currentRow == rowID(api) }
+        r.check("prefix 1 inside a pane: the app shows the target's row", ws.currentRow == rowID(api) && ws.activeSession == api,
+                "shows \(ws.activeSession.map(app.displayName) ?? "-")")
+        let back = await waitUntil(3) { tmuxOut(["list-clients", "-F", "#{client_tty} #{session_name}"]).contains("\(docsView?.ttyName ?? "?") \(docs)") }
+        r.check("…the moved client goes back to its own tab", back && ws.pool.view(for: docs) === docsView)
+        let selected = (app.sidebar.outline.item(atRow: app.sidebar.outline.selectedRow) as? SidebarItem).flatMap { app.sidebar.rowID(for: $0) }
+        r.check("…header, title and sidebar follow", ws.headerSession(ws.activeTile) == api && w.title.contains(app.displayName(api)) && selected == rowID(api),
+                "title \(w.title)")
         await waitUntil(2) { ws.activeTerminal?.hasPaintedContent == true }
+        await waitUntil(1) { firstResponderIsActiveTerminal }
         await type("followed\n")
-        r.check("…and typing reaches the session it now shows", await paneShows(api, "got: followed"))
-        shot("08-client-followed")
+        r.check("…and typing reaches the row now shown", await paneShows(api, "got: followed"))
+        shot("14-client-moved-to-another-row")
 
-        // b) A session another tile shows: the client goes back and that tile becomes active.
-        await showOnly(api)
-        await cmd("d")
-        await waitUntil(3) { ws.layout.tiles.allSatisfy { ws.terminal(in: $0)?.hasPaintedContent == true } }
-        let apiTile = ws.layout.tile(showing: api)
-        let second = ws.activeSession
+        // b) Toward a tab of the same row: that pane becomes active, the client goes back.
+        await showRow(f.web)
+        if let tty = ws.pool.view(for: f.web)?.ttyName {
+            tmux(["switch-client", "-c", tty, "-t", "=\(f.webTests)"])
+            await waitUntil(3) { ws.activeSession == f.webTests }
+            let backHome = await waitUntil(3) { tmuxOut(["list-clients", "-F", "#{client_tty} #{session_name}"]).contains("\(tty) \(f.web)") }
+            r.check("a client moved to a tab of the same row: that pane becomes active", ws.activeSession == f.webTests && ws.currentRow == rowID(f.web) && ws.layout.count == 3)
+            r.check("…and the client goes back to its own tab", backHome)
+        }
+        // c) prefix 1 inside a pane of a multi-pane row: api's row, and every web client stays home.
+        ws.activate(f.web)
+        await waitUntil(1) { firstResponderIsActiveTerminal }
         await typePrefixJump()
-        await waitUntil(3) { ws.activeTile == apiTile }
-        let back = await waitUntil(3) { second.map { s in tmuxOut(["list-clients", "-F", "#{client_tty} #{session_name}"]).contains("\(ws.pool.view(for: s)?.ttyName ?? "?") \(s)") } ?? false }
-        r.check("prefix 1 toward a session in another tile: that tile becomes active", ws.activeTile == apiTile && ws.activeSession == api)
-        r.check("…and the client goes back to its own session", back && ws.layout.session(in: ws.layout.tiles.first { $0 != apiTile }!) == second,
-                "second tile shows \(second.map(app.displayName) ?? "-")")
-        for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
+        await waitUntil(3) { ws.currentRow == rowID(api) }
+        let drift = await driftedClients()
+        r.check("prefix 1 inside a multi-pane row shows the target's row, all clients on their own tabs", ws.currentRow == rowID(api) && drift.isEmpty, drift.joined(separator: ", "))
 
-        // c) A hidden pooled view's client is moved back at once.
-        await showOnly(review1)
-        await showOnly(api)
-        if let hidden = ws.pool.view(for: review1), hidden.isHidden, let tty = hidden.ttyName {
+        // d) A hidden pooled view's client is moved back at once.
+        await showRow(f.review1)
+        await showRow(api)
+        if let hidden = ws.pool.view(for: f.review1), hidden.isHidden, let tty = hidden.ttyName {
             tmux(["switch-client", "-c", tty, "-t", "=\(docs)"])
-            let ok = await waitUntil(3) { tmuxOut(["list-clients", "-F", "#{client_tty} #{session_name}"]).contains("\(tty) \(review1)") }
-            r.check("a hidden pooled terminal's client moved elsewhere is put back", ok && ws.pool.view(for: review1) === hidden)
+            let ok = await waitUntil(3) { tmuxOut(["list-clients", "-F", "#{client_tty} #{session_name}"]).contains("\(tty) \(f.review1)") }
+            r.check("a hidden pooled terminal's client moved elsewhere is put back", ok && ws.pool.view(for: f.review1) === hidden && ws.currentRow == rowID(api))
         } else {
             r.check("a hidden pooled terminal's client moved elsewhere is put back", false, "review-1 isn't pooled and hidden")
         }
 
-        // d) Ctrl+q (Bosun's detach binding) inside a tile: the tile attaches again.
+        // e) Ctrl+q (Bosun's detach binding) inside a pane: it attaches again.
         let before = ws.activeTerminal
         await key(12, "\u{11}", [.control], ignoring: "q")
         let reattached = await waitUntil(5) {
@@ -732,7 +1041,7 @@ final class FocusTest: TestKit {
             return true
         }
         let onAfter = await clientSession(of: api)
-        r.check("Ctrl+q (tmux detach) inside a tile: the tile attaches again", reattached && ws.activeSession == api && onAfter == api,
+        r.check("Ctrl+q (tmux detach) inside a pane: it attaches again", reattached && ws.activeSession == api && onAfter == api,
                 "client on \(onAfter.map(app.displayName) ?? "-")")
         await waitUntil(1) { firstResponderIsActiveTerminal }
         await type("after-detach\n")
@@ -768,12 +1077,16 @@ final class SelfTest: TestKit {
             return
         }
         r.say("launch (this process): sidebar painted \(fmtMs(app.sidebarPaintedAt ?? .nan)), first live terminal \(fmtMs(app.firstTerminalAt ?? .nan))")
-        let all = app.daemon.state.sidebar.cycleOrder(isAlive: app.isAlive)
+        r.say("warm pool: \(ws.pool.capacity) views")
+        // Single-pane rows, by their one session.
+        let singles = app.daemon.state.sidebar.allRows.filter { c in c.tabs.count == 1 && app.isAlive(c.active) }.map(\.active)
+        let ticker = session("ticker")
+        let all = singles.filter { $0 != ticker } + (ticker.map { [$0] } ?? [])
         var samples: [(String, Bool, Double, Double?)] = []
         ws.onShowMeasured = { samples.append(($0, $1, $2, $3)) }
 
-        // Warm switches: 4 attached sessions, 100 swaps.
-        await showOnly(all[0])
+        // Warm switches between single-pane rows: 4 attached sessions, 100 swaps.
+        await showRow(all[0])
         let warmSet = Array(all.prefix(4))
         for s in warmSet { ws.show(s); await waitUntil(3) { ws.activeTerminal?.hasPaintedContent == true }; await sleep(100) }
         samples.removeAll()
@@ -784,7 +1097,34 @@ final class SelfTest: TestKit {
         }
         let warm = samples.filter(\.1).map(\.2)
         r.say("")
-        stats("warm switch -> first frame", warm, budget: 0.016)
+        stats("warm switch, one-pane rows -> first frame", warm, budget: 0.016)
+
+        // Warm row switches with three panes: the web row and a one-pane row, back and forth.
+        if let web = session("web"), let webRow = rowID(web) {
+            var swap: [Double] = [], frames: [Double] = []
+            var shown: (String, Bool, Double)?
+            ws.onRowShown = { shown = ($0, $1, $2) }
+            await showRow(web)
+            await showRow(all[0])
+            await showRow(web)
+            for i in 0..<60 {
+                let toWeb = i % 2 == 1
+                samples.removeAll()
+                shown = nil
+                if toWeb { ws.selectRow(webRow) } else { ws.show(all[0]) }
+                let n = toWeb ? 3 : 1
+                await waitUntil(1) { samples.filter(\.1).count >= n }
+                if toWeb, let s = shown, s.1 {
+                    swap.append(s.2)
+                    let warmSamples = samples.filter(\.1)
+                    if warmSamples.count >= 3 { frames.append(warmSamples.map(\.2).max()!) }
+                }
+                await sleep(40)
+            }
+            ws.onRowShown = nil
+            stats("warm row switch, 3 panes: main-thread swap", swap, budget: 0.008)
+            stats("warm row switch, 3 panes -> every pane's first frame", frames, budget: 0.016)
+        }
 
         // Cold attaches.
         samples.removeAll()
@@ -835,53 +1175,66 @@ final class SelfTest: TestKit {
         }
         stats("daemon round trip (get_spec -> ack)", rtt)
 
-        // Divider drag: layout cost per step at 120 Hz.
-        await showOnly(all[0])
-        ws.split(.horizontal)
-        await waitUntil(3) { ws.layout.tiles.allSatisfy { ws.terminal(in: $0)?.hasPaintedContent == true } }
+        // Divider drag in the three-pane row: layout cost per step at 120 Hz.
         var steps: [Double] = []
-        if let d = ws.area.subviews.compactMap({ $0 as? DividerView }).first?.divider {
-            ws.dividerDragBegan()
-            for i in 0...120 {
-                let p = Double(i) / 120
-                let x = d.container.minX + d.container.width * (0.5 - 0.25 * sin(p * .pi))
-                let t0 = CACurrentMediaTime()
-                ws.dividerDragged(d, to: NSPoint(x: x, y: d.container.midY))
-                ws.area.layoutSubtreeIfNeeded()
-                steps.append(CACurrentMediaTime() - t0)
-                await sleep(1000.0 / 120)
+        if let web = session("web") {
+            await showRow(web)
+            if let d = ws.area.subviews.compactMap({ $0 as? DividerView }).compactMap(\.divider).first(where: { $0.path.isEmpty }) {
+                ws.dividerDragBegan()
+                for i in 0...120 {
+                    let p = Double(i) / 120
+                    let t0 = CACurrentMediaTime()
+                    if d.axis == .horizontal {
+                        ws.dividerDragged(d, to: NSPoint(x: d.container.minX + d.container.width * (0.5 - 0.25 * sin(p * .pi)), y: d.container.midY))
+                    } else {
+                        ws.dividerDragged(d, to: NSPoint(x: d.container.midX, y: d.container.minY + d.container.height * (0.5 - 0.25 * sin(p * .pi))))
+                    }
+                    ws.area.layoutSubtreeIfNeeded()
+                    steps.append(CACurrentMediaTime() - t0)
+                    await sleep(1000.0 / 120)
+                }
+                ws.dividerDragEnded()
             }
-            ws.dividerDragEnded()
         }
         stats("divider drag: layout per step", steps, budget: 0.0083)
 
-        // Idle CPU with 4 tiles of quiet sessions, then with the ticker (one line a second) in one of them.
-        ws.split(.vertical)
-        ws.activate(ws.layout.tiles[0])
-        ws.split(.vertical)
-        let ticker = session("ticker")
-        let quiet = all.filter { $0 != ticker }
-        for (tile, s) in zip(ws.layout.tiles, quiet) { ws.show(s, in: tile, focus: false) }
-        await waitUntil(3) { ws.layout.tiles.allSatisfy { ws.terminal(in: $0)?.hasPaintedContent == true } }
+        // Idle CPU with four panes of quiet sessions (the web row plus a terminal tab), then with the
+        // ticker's row (a line a second) shown and the four hidden.
+        var extra: String?
+        if let web = session("web"), let webRow = rowID(web) {
+            await showRow(web)
+            let before = tabs(webRow)
+            app.newTerminalTab(.horizontal)
+            await waitUntil(4) { ws.layout.count == 4 }
+            extra = tabs(webRow).first { !before.contains($0) }
+            await waitPanesPainted()
+        }
         func idle(_ label: String) async {
             await sleep(2000)
+            let frames0 = Dictionary(uniqueKeysWithValues: ws.pool.views.map { ($0.key, $0.value.contentsCount) })
             let c0 = cpuSeconds(), t0 = Date()
             await sleep(20_000)
             let pct = (cpuSeconds() - c0) / Date().timeIntervalSince(t0) * 100
-            r.say(String(format: "idle CPU, %d tiles%@, %d views attached: %.2f%% of one core over 20 s   budget 0.5%%: %@",
+            r.say(String(format: "idle CPU, %d panes%@, %d views attached: %.2f%% of one core over 20 s   budget 0.5%%: %@",
                          ws.layout.count, label, ws.pool.views.count, pct, pct <= 0.5 ? "met" : "MISSED"))
+            // Which panes drew during the window (a shell prompt with a clock, say, redraws on its own).
+            let drew = ws.layout.panes.map { p in
+                "\(app.displayName(p)) \((ws.pool.view(for: p)?.contentsCount ?? 0) - (frames0[p] ?? 0))\(ws.pool.view(for: p)?.hasTerminalFocus == true ? " (focused)" : "")"
+            }
+            let hiddenFrames = ws.pool.views.filter { !ws.layout.contains($0.key) }.reduce(0) { $0 + $1.value.contentsCount - (frames0[$1.key] ?? 0) }
+            r.say("  frames drawn in that window: \(drew.joined(separator: ", ")); hidden views: \(hiddenFrames)")
         }
         await idle(" (quiet sessions)")
-        if let ticker, let last = ws.layout.tiles.last {
-            ws.show(ticker, in: last, focus: false)
-            await waitUntil(3) { ws.terminal(in: last)?.hasPaintedContent == true }
+        r.say(String(format: "memory footprint: %.0f MB with %d terminal views", physFootprintMB(), ws.pool.views.count))
+        if let ticker {
+            await showRow(ticker)
             let c0 = cpuSeconds(), t0 = Date()
             await sleep(10_000)
             let pct = (cpuSeconds() - c0) / Date().timeIntervalSince(t0) * 100
-            r.say(String(format: "CPU with one tile printing a line a second: %.2f%% of one core over 10 s (no budget; for comparison)", pct))
+            r.say(String(format: "CPU with the ticker's row shown (a line a second) and %d views attached: %.2f%% of one core over 10 s (no budget; for comparison)",
+                         ws.pool.views.count, pct))
         }
-        r.say(String(format: "memory footprint: %.0f MB with %d terminal views", physFootprintMB(), ws.pool.views.count))
-        for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
+        if let extra { await killTab(extra) }
 
         // Launch: separate processes, each reporting sidebar painted and first live terminal.
         r.say("")

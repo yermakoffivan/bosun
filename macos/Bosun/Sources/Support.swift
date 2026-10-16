@@ -148,7 +148,7 @@ final class AppSettings {
     var onChange: [() -> Void] = []
 
     private init() {
-        d.register(defaults: ["focusFollowsMouse": true, "matchTerminalTheme": false, "poolSize": 8, "sidebarWidth": 248.0])
+        d.register(defaults: ["focusFollowsMouse": true, "matchTerminalTheme": false, "poolSize": AppSettings.defaultPoolSize, "sidebarWidth": 248.0])
     }
 
     var focusFollowsMouse: Bool {
@@ -161,8 +161,13 @@ final class AppSettings {
         set { d.set(newValue, forKey: "matchTerminalTheme"); changed() }
     }
 
+    /// Terminal views kept attached, visible ones included. 12 holds the shown row and two or three
+    /// more rows of three panes (about 13–14 MB a view, so roughly 170 MB when full).
+    nonisolated static let defaultPoolSize = 12
+    nonisolated static let poolSizeRange = 4...27
+
     var poolSize: Int {
-        get { max(2, min(16, d.integer(forKey: "poolSize"))) }
+        get { max(AppSettings.poolSizeRange.lowerBound, min(AppSettings.poolSizeRange.upperBound, d.integer(forKey: "poolSize"))) }
         set { d.set(newValue, forKey: "poolSize"); changed() }
     }
 

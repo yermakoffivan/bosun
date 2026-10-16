@@ -123,3 +123,15 @@ public struct RGB: Equatable, Sendable {
         RGB(r: r + (o.r - r) * t, g: g + (o.g - g) * t, b: b + (o.b - b) * t)
     }
 }
+
+/// Whether a pane's foreground command (`pane_command`) is a shell, the same list Bosun uses
+/// (agent_hooks `is_shell_command`): a login shell's leading `-` is ignored. A pane at a shell's
+/// prompt can be closed without asking.
+public enum ShellCommand {
+    public static let shells: Set<String> = ["zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh", "nu", "pwsh"]
+
+    public static func isShell(_ command: String?) -> Bool {
+        guard let command else { return false }
+        return shells.contains(String(command.drop { $0 == "-" }))
+    }
+}

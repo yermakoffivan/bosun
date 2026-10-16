@@ -54,7 +54,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         let cached = daemon.loadCache()
         if !cached { applyTheme() }
         workspace.restore()
-        focus.setTiles(count: workspace.layout.count, active: workspace.activeTile)
+        focus.setTiles(count: workspace.tiles.count, active: workspace.activeTile)
         if noActivate {
             window.orderFront(nil)
         } else {
@@ -75,23 +75,11 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         print("window-id \(window.windowNumber) pid \(getpid())")
         fflush(stdout)
 
-        // 2. Connect in parallel; 3. attach the visible tiles straight away (they only need tmux).
+        // 2. Connect in parallel; 3. attach the shown row's panes straight away (they only need tmux).
         daemon.start()
         statusChanged(daemon.status)
         DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated { self?.attachVisibleTiles() }
-        }
-    }
-
-    private func attachVisibleTiles() {
-        workspace.pool.tmuxSocket = daemon.state.server?.tmuxSocket
-        guard daemon.state.server != nil else { return }
-        for t in workspace.layout.tiles {
-            if let s = workspace.layout.session(in: t), isAlive(s) { workspace.show(s, in: t, focus: t == workspace.activeTile) }
-        }
-        workspace.activate(workspace.activeTile)
-        if workspace.layout.visibleSessions.isEmpty, let first = daemon.state.sidebar.cycleOrder(isAlive: isAlive).first {
-            workspace.show(first)
+            MainActor.assumeIsolated { self?.workspace.startAttaching() }
         }
     }
 
@@ -171,6 +159,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
 
     func persist() {
+        if let row = workspace.currentRow { syncActiveTab(row: row, pane: workspace.rows[row]?.active) }
         daemon.writeCache()
         workspace.save()
     }
@@ -277,54 +266,46 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         }
     }
 
-    /// Previous/next along the sidebar order, shown in the active tile. Sessions already in another tile are skipped.
+    /// Previous/next row along the sidebar order (rows whose tabs have all ended are skipped, as in the
+    /// TUI). The whole main area switches to that row's panes.
     private func stepSession(forward: Bool) {
-        let order = daemon.state.sidebar.cycleOrder(isAlive: isAlive)
-        let current = workspace.activeSession
-        let others = workspace.visibleSessions.subtracting(current.map { [$0] } ?? [])
-        let candidates = order.filter { !others.contains($0) }
-        guard let next = Sidebar.cycle(candidates, from: current.flatMap { candidates.contains($0) ? $0 : nil } ?? nearest(current, in: order, candidates: candidates, forward: forward), forward: forward),
-              next != current else { return }
-        show(next)
-        // Prewarm the one after, so holding the key keeps landing on warm views.
-        if let after = Sidebar.cycle(candidates, from: next, forward: forward), after != current { workspace.prewarm(after) }
-    }
-
-    /// When the current session isn't in the candidate list, start from its neighbour in sidebar order.
-    private func nearest(_ current: String?, in order: [String], candidates: [String], forward: Bool) -> String? {
-        guard let current, let i = order.firstIndex(of: current) else { return nil }
-        let n = order.count
-        for k in 1..<max(n, 1) {
-            let j = forward ? (i - k + n) % n : (i + k) % n
-            if candidates.contains(order[j]) { return order[j] }
+        let all = daemon.state.sidebar.allRows
+        let live = all.filter { c in c.tabs.contains { isAlive($0.session) } }.map(\.id)
+        guard !live.isEmpty else { return }
+        let current = workspace.currentRow
+        var from = current.flatMap { live.contains($0) ? $0 : nil }
+        if from == nil, let current, let i = all.firstIndex(where: { $0.id == current }) {
+            // An exited row: start from its nearest live neighbour behind it, so the step lands next to it.
+            let n = all.count
+            for k in 1..<max(n, 1) {
+                let id = all[forward ? (i - k + n) % n : (i + k) % n].id
+                if live.contains(id) { from = id; break }
+            }
         }
-        return nil
+        guard let next = Sidebar.cycle(live, from: from, forward: forward), next != current else { return }
+        if focus.exception == .rename { window.makeFirstResponder(nil) }
+        workspace.selectRow(next)
+        // Prewarm the one after, so holding the key keeps landing on warm rows.
+        if let after = Sidebar.cycle(live, from: next, forward: forward), after != current { workspace.prewarm(row: after) }
     }
 
     private func stepTab(forward: Bool) {
-        guard let cur = workspace.activeSession,
-              let next = daemon.state.sidebar.cycleTab(from: cur, forward: forward, isAlive: isAlive), next != cur else { return }
-        if workspace.layout.tile(showing: next) != nil {
-            workspace.show(next)
-        } else {
-            show(next)
-        }
+        workspace.stepPane(forward: forward)
     }
 
     // MARK: Showing
 
-    /// Show a session in the active tile (or activate the tile that has it), and remember it as its row's active tab.
+    /// Show `session`'s row with that pane active.
     func show(_ session: String) {
         workspace.show(session)
-        rememberActiveTab(session)
     }
 
-    /// Make `session` its row's shown tab, as the TUI does when you switch to a tab.
-    func rememberActiveTab(_ session: String) {
+    /// Tell the daemon which tab a row was on (the TUI shows that one). Sent when the app leaves a row
+    /// and when it quits, not on every pane change, so hovering between panes never rewrites config.toml.
+    func syncActiveTab(row id: String, pane: String?) {
         var sb = daemon.state.sidebar
-        if let c = sb.container(holding: session), c.tabs.count > 1, sb.setActive(session) {
-            daemon.saveSidebar(sb)
-        }
+        guard let pane, let c = sb.container(id: id), c.tabs.count > 1, c.active != pane, sb.setActive(pane) else { return }
+        daemon.saveSidebar(sb)
     }
 
     func sidebarActivated(session: String) {
@@ -332,11 +313,16 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         show(session)
     }
 
+    func sidebarActivated(row id: String) {
+        if focus.exception == .rename { window.makeFirstResponder(nil) }
+        workspace.selectRow(id)
+    }
+
     func workspaceChanged() {
         seen.setViewed(workspace.visibleSessions)
         sidebar.syncSelection()
         sidebar.refreshRows()
-        focus.setTiles(count: workspace.layout.count, active: workspace.activeTile)
+        focus.setTiles(count: workspace.tiles.count, active: workspace.activeTile)
         updateTitle()
         updateDockBadge()
     }
@@ -363,13 +349,6 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     private func updateDockBadge() {
         let n = waitingSince.count
         NSApp.dockTile.badgeLabel = n > 0 ? "\(n)" : nil
-    }
-
-    /// A session for a freshly split tile: the most recently viewed one not on screen, else the next in sidebar order.
-    func sessionForNewTile(excluding visible: Set<String>, after: String?) -> String? {
-        for s in workspace.pool.lru.reversed() where isAlive(s) && !visible.contains(s) { return s }
-        let order = daemon.state.sidebar.cycleOrder(isAlive: isAlive).filter { !visible.contains($0) }
-        return Sidebar.cycle(order, from: after.flatMap { order.contains($0) ? $0 : nil }, forward: true)
     }
 
     // MARK: State
@@ -420,6 +399,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             case .notice(let m):
                 let shown = readableNotice(m)
                 root.band.flash(shown)
+                lastNotice = (m, shown)
                 // "created X" comes before X's session delta, so name it again once that lands.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                     MainActor.assumeIsolated {
@@ -433,23 +413,28 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 break
             }
         }
+        // "created X" names a session whose display name arrives with the next sessions delta.
+        if let n = lastNotice, changes.contains(where: { if case .sessions = $0 { return true }; return false }) {
+            let better = readableNotice(n.raw)
+            if better != n.shown {
+                root.band.replaceNote(n.shown, with: better)
+                lastNotice = (n.raw, better)
+            }
+        }
         if structure { sidebar.reload() } else if !touched.isEmpty { sidebar.refreshRows(touched) }
-        if !removed.isEmpty || structure { workspace.sessionsChanged(removed: removed) }
+        if !removed.isEmpty || structure { workspace.stateChanged(removed: removed) }
         if chrome { workspace.updateChromeState(); updateTitle() }
         updateDockBadge()
     }
 
     private var hadLiveSnapshot = false
+    /// The last daemon notice, as sent and as shown (see `readableNotice`).
+    private var lastNotice: (raw: String, shown: String)?
 
     private func liveSnapshotArrived() {
         let first = !hadLiveSnapshot
         hadLiveSnapshot = true
-        // Tiles whose session is gone and isn't an exited row any more: empty them.
-        let sb = daemon.state.sidebar
-        for t in workspace.layout.tiles {
-            if let s = workspace.layout.session(in: t), !isAlive(s), sb.container(holding: s) == nil { workspace.clear(t) }
-        }
-        if first { attachVisibleTiles() }
+        if first { workspace.startAttaching() }
     }
 
     private func statusChanged(_ s: DaemonClient.Status) {
@@ -495,11 +480,18 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         return s
     }
 
-    /// A sidebar row's label: the daemon's (the active tab's name, as the TUI shows it), or the
-    /// active tab's display name when the row came from a daemon that sent a tmux name there.
+    /// A sidebar row's label. A single-tab row: the daemon's (its tab's name, as the TUI shows it), or
+    /// the tab's display name when the row came from a daemon that sent a tmux name there. A row with
+    /// several tabs is a workspace whose tabs are all on screen, listed under it with the active pane
+    /// marked, so it's labelled by its first tab (its own name) rather than following the active tab
+    /// as the TUI's label does: adding a tab never renames the row.
     func rowLabel(_ c: Container) -> String {
-        c.name.isEmpty || c.tabs.contains(where: { $0.session == c.name }) ? displayName(c.active) : c.name
+        if c.tabs.count > 1, let first = c.tabs.first { return displayName(first.session) }
+        return c.name.isEmpty || c.tabs.contains(where: { $0.session == c.name }) ? displayName(c.active) : c.name
     }
+
+    /// The tab whose name a row shows (and a rename of the row changes).
+    func rowLabelSession(_ c: Container) -> String { c.tabs.count > 1 ? (c.tabs.first?.session ?? c.active) : c.active }
 
     func displayState(_ s: String) -> AgentState {
         guard isAlive(s) else { return .idle }
@@ -564,12 +556,11 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         }
         var spec = r.spec
         spec.resume = resume
-        let tile = workspace.layout.tile(showing: s)
         daemon.command(.create(spec: spec, deferLaunch: true)) { [weak self] ack in
             guard let self else { return }
             self.report(ack)
             guard ack.ok, let new = ack.session else { return }
-            if let tile { self.workspace.show(new, in: tile) } else { self.show(new) }
+            self.show(new)
             if let p = ack.pendingLaunch { self.workspace.expectLaunch(p.session, resume: p.resume) }
         }
     }
@@ -632,9 +623,9 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     func rename(item: SidebarItem, to name: String) {
         switch item.kind {
         case .row(let id):
-            // A row is labelled by its active tab, so renaming the row renames that session.
+            // A row is labelled by one of its tabs (`rowLabel`), so renaming the row renames that session.
             guard let c = daemon.state.sidebar.container(id: id) else { return }
-            daemon.command(.rename(session: c.active, display: name)) { [weak self] in self?.report($0) }
+            daemon.command(.rename(session: rowLabelSession(c), display: name)) { [weak self] in self?.report($0) }
         case .tab(let s):
             daemon.command(.rename(session: s, display: name)) { [weak self] in self?.report($0) }
         case .section(let id):
@@ -705,13 +696,106 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         presentForm(model) { [weak self] spec in self?.create(spec) }
     }
 
+    /// New Tab… (Cmd+T, or a row's menu): the new-session sheet for a tab of `containerID`, in the row's
+    /// directory. The tab opens as a split to the right of the row's active pane.
     func newTab(in containerID: String) {
         let st = daemon.state
         guard let c = st.sidebar.container(id: containerID) else { return }
-        let path = st.sessions[c.active]?.path ?? st.recents.first?.path
         let model = NewSessionModel(mode: .addTab(containerID: containerID), recents: st.recents, defaultAgent: st.defaultAgent,
-                                    worktreeLocation: st.worktreeLocation, path: path)
-        presentForm(model) { [weak self] spec in self?.create(spec) }
+                                    worktreeLocation: st.worktreeLocation, path: rowDirectory(c))
+        presentForm(model) { [weak self] spec in
+            guard let self else { return }
+            self.createTab(spec, in: containerID, axis: .horizontal, deferLaunch: true)
+        }
+    }
+
+    /// Cmd+D / Cmd+Shift+D: a plain terminal tab in the shown row, in the row's directory, split beside
+    /// the active pane. No sheet: the daemon creates it straight away.
+    func newTerminalTab(_ axis: SplitAxis) {
+        guard let c = workspace.container, workspace.layout.active != nil, workspace.layout.count < RowLayout.maxPanes else {
+            NSSound.beep()
+            return
+        }
+        let spec = Spec(name: newTabName(c), path: rowDirectory(c), agent: "terminal", args: "", containerID: c.id)
+        createTab(spec, in: c.id, axis: axis, deferLaunch: false)
+    }
+
+    private func createTab(_ spec: Spec, in containerID: String, axis: SplitAxis, deferLaunch: Bool) {
+        let from = workspace.currentRow == containerID ? workspace.layout.active : workspace.rememberedPane(row: containerID)
+        workspace.expectSplit(row: containerID, from: from, axis: axis)
+        daemon.command(.create(spec: spec, deferLaunch: deferLaunch)) { [weak self] ack in
+            guard let self else { return }
+            self.report(ack)
+            guard ack.ok, let s = ack.session else {
+                self.workspace.cancelSplit(row: containerID)
+                return
+            }
+            self.workspace.paneCreated(s, row: containerID)
+            if let p = ack.pendingLaunch { self.workspace.expectLaunch(p.session, resume: p.resume) }
+        }
+    }
+
+    /// A row's directory: the active pane's session path, else any tab's, else the last one used.
+    func rowDirectory(_ c: Container) -> String {
+        let st = daemon.state
+        let candidates = [workspace.rememberedPane(row: c.id), c.active].compactMap { $0 } + c.tabs.map(\.session)
+        for s in candidates { if let p = st.sessions[s]?.path, !p.isEmpty { return p } }
+        return st.recents.first?.path ?? "~"
+    }
+
+    /// A new tab's display name: the row's own name (its first tab's), which the daemon makes unique
+    /// the way the TUI does for any create ("web" becomes "web 2").
+    func newTabName(_ c: Container) -> String {
+        let first = c.tabs.first.map { displayName($0.session) } ?? ""
+        return first.isEmpty ? rowLabel(c) : first
+    }
+
+    // MARK: Closing panes
+
+    /// Cmd+W: close the active pane and end its tab. Asks first unless the pane is a shell at its
+    /// prompt; the last pane of a row always asks, since closing it kills the row's session.
+    func closeActivePane() {
+        guard let s = workspace.layout.active, isAlive(s) else { NSSound.beep(); return }
+        let last = workspace.layout.count == 1
+        let command = daemon.state.sessions[s]?.paneCommand
+        let idle = ShellCommand.isShell(command)
+        if !last && idle {
+            closePane(s)
+            return
+        }
+        let alert = NSAlert()
+        let name = displayName(s)
+        let running = command.flatMap { $0.isEmpty || idle ? nil : $0 }
+        if last {
+            alert.messageText = "Close “\(name)” and kill its session?"
+            alert.informativeText = (running.map { "“\($0)” is still running in it. " } ?? "")
+                + "It's the last pane of this row, so closing it kills the tmux session and whatever runs in it. This can't be undone."
+            alert.addButton(withTitle: "Kill")
+        } else {
+            alert.messageText = "Close “\(name)”?"
+            alert.informativeText = (running.map { "“\($0)” is still running in it. " } ?? "Something is still running in it. ")
+                + "Closing the pane ends this tab and kills its tmux session."
+            alert.addButton(withTitle: "Close")
+        }
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        alert.buttons[0].hasDestructiveAction = true
+        runSheet(alert) { [weak self] ok in
+            guard ok, let self else { return }
+            if last { self.daemon.command(.kill(session: s)) { [weak self] in self?.report($0) } } else { self.closePane(s) }
+        }
+    }
+
+    private func closePane(_ s: String) {
+        workspace.closePane(s)
+        daemon.command(.kill(session: s)) { [weak self] ack in
+            guard let self else { return }
+            self.report(ack)
+            guard ack.ok else { self.workspace.closeFailed(s); return }
+            // A closed pane ends its tab: it doesn't stay in the row as an exited tab.
+            var sb = self.daemon.state.sidebar
+            if sb.removeTab(session: s) { self.daemon.saveSidebar(sb) }
+        }
     }
 
     func modify(_ s: String) {
@@ -725,6 +809,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         }
     }
 
+    /// A new session (a new row).
     private func create(_ spec: Spec) {
         daemon.command(.create(spec: spec, deferLaunch: true)) { [weak self] ack in
             guard let self else { return }
@@ -795,12 +880,13 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     static let shortcutCatalog: [(group: String, rows: [(title: String, items: [String])])] = [
         ("Sessions", [("New session", ["New Session…"]), ("Go to session", ["Go to Session…"]),
                       ("Oldest waiting session", ["Oldest Waiting Session"]), ("Sidebar row 1 to 9", ["Row 1", "Row 9"])]),
-        ("Tiles", [("Split right", ["Split Right"]), ("Split down", ["Split Down"]),
-                   ("Focus the tile left / right", ["Focus Tile Left", "Focus Tile Right"]),
-                   ("Focus the tile up / down", ["Focus Tile Up", "Focus Tile Down"]),
-                   ("Close tile (the session keeps running)", ["Close Tile"]), ("Move or swap a tile", [])]),
-        ("Navigation", [("Next session", ["Next Session"]), ("Previous session", ["Previous Session"]),
-                        ("Next tab", ["Next Tab"]), ("Previous tab", ["Previous Tab"]),
+        ("Panes (a row's tabs)", [("New terminal tab, split right", ["Split Right"]), ("New terminal tab, split down", ["Split Down"]),
+                   ("New tab with an agent (sheet), split right", ["New Tab…"]),
+                   ("Focus the pane left / right", ["Focus Pane Left", "Focus Pane Right"]),
+                   ("Focus the pane up / down", ["Focus Pane Up", "Focus Pane Down"]),
+                   ("Close pane and end its tab", ["Close Pane"]), ("Move or swap a pane", [])]),
+        ("Navigation", [("Next session (row)", ["Next Session"]), ("Previous session (row)", ["Previous Session"]),
+                        ("Next tab (pane)", ["Next Tab"]), ("Previous tab (pane)", ["Previous Tab"]),
                         ("Send the next key to the terminal", ["Send Next Key to Terminal"])]),
         ("Other", [("Keyboard shortcuts", ["Keyboard Shortcuts"]), ("Settings", ["Settings…"]),
                    ("Copy / paste", ["Copy", "Paste"]), ("Undo / cut / select all", ["Undo", "Cut", "Select All"]),
@@ -1020,9 +1106,10 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
         let file = sub("File")
         add(file, "New Session…", #selector(menuNewSession), "N", [.command, .shift], target: self)
+        add(file, "New Tab…", #selector(menuNewTab), "t", target: self)
         add(file, "New Section…", #selector(menuNewSection), target: self)
         file.addItem(.separator())
-        add(file, "Close Tile", #selector(menuCloseTile), "w", target: self)
+        add(file, "Close Pane", #selector(menuCloseTile), "w", target: self)
 
         let edit = sub("Edit")
         edit.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
@@ -1036,8 +1123,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         add(view, "Split Right", #selector(menuSplitRight), "d", target: self)
         add(view, "Split Down", #selector(menuSplitDown), "D", [.command, .shift], target: self)
         view.addItem(.separator())
-        let arrows: [(String, Unicode.Scalar, Int)] = [("Focus Tile Left", "\u{F702}", 0), ("Focus Tile Right", "\u{F703}", 1),
-                                                         ("Focus Tile Up", "\u{F700}", 2), ("Focus Tile Down", "\u{F701}", 3)]
+        let arrows: [(String, Unicode.Scalar, Int)] = [("Focus Pane Left", "\u{F702}", 0), ("Focus Pane Right", "\u{F703}", 1),
+                                                         ("Focus Pane Up", "\u{F700}", 2), ("Focus Pane Down", "\u{F701}", 3)]
         for (t, k, tag) in arrows { add(view, t, #selector(menuFocusTile(_:)), String(Character(k)), [.command, .option], target: self, tag: tag) }
         view.addItem(.separator())
         let themeItem = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
@@ -1065,7 +1152,6 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         add(session, "Resume", #selector(menuSession(_:)), target: self, tag: 1)
         add(session, "Modify…", #selector(menuSession(_:)), target: self, tag: 2)
         add(session, "Rename", #selector(menuSession(_:)), target: self, tag: 3)
-        add(session, "New Tab in This Row…", #selector(menuSession(_:)), target: self, tag: 5)
         session.addItem(.separator())
         add(session, "Kill…", #selector(menuSession(_:)), target: self, tag: 4)
 
@@ -1110,9 +1196,13 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     @objc func menuNewSession() { newSession() }
     @objc func menuNewSection() { newSection() }
-    @objc func menuCloseTile() { workspace.closeActive() }
-    @objc func menuSplitRight() { workspace.split(.horizontal) }
-    @objc func menuSplitDown() { workspace.split(.vertical) }
+    @objc func menuCloseTile() { closeActivePane() }
+    @objc func menuSplitRight() { newTerminalTab(.horizontal) }
+    @objc func menuSplitDown() { newTerminalTab(.vertical) }
+    @objc func menuNewTab() {
+        guard let c = workspace.container else { NSSound.beep(); return }
+        newTab(in: c.id)
+    }
     @objc func menuPalette() { showPalette() }
 
     @objc func menuFocusTile(_ sender: NSMenuItem) {
@@ -1126,7 +1216,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     @objc func menuJump(_ sender: NSMenuItem) {
         let rows = daemon.state.sidebar.visibleRows
         guard sender.tag - 1 < rows.count else { NSSound.beep(); return }
-        sidebarActivated(session: rows[sender.tag - 1].active)
+        sidebarActivated(row: rows[sender.tag - 1].id)
     }
 
     /// The session that has been waiting for you the longest.
@@ -1150,7 +1240,6 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         case 2: modify(s)
         case 3: startRename(s)
         case 4: confirmKill(s)
-        case 5: if let c = daemon.state.sidebar.container(holding: s) { newTab(in: c.id) }
         default: break
         }
     }
@@ -1163,7 +1252,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             if item.tag == 2 || item.tag == 4 { return isAlive(s) }
             return true
         case #selector(menuCloseTile):
-            return workspace.layout.count > 1 || workspace.activeSession != nil
+            return workspace.layout.active.map(isAlive) ?? false
         case #selector(menuNav(_:)):
             // Only while the terminal has the keyboard (the key monitor takes these keys first then).
             // Disabled otherwise, so Shift+arrows in the rename field or the palette, or while composing
@@ -1173,7 +1262,9 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         case #selector(menuFocusTile(_:)):
             return workspace.layout.count > 1
         case #selector(menuSplitRight), #selector(menuSplitDown):
-            return workspace.layout.count < TileLayout.maxTiles
+            return workspace.layout.active != nil && workspace.layout.count < RowLayout.maxPanes
+        case #selector(menuNewTab):
+            return workspace.container != nil
         default:
             return true
         }

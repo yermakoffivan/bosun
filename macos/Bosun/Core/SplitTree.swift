@@ -1,7 +1,9 @@
 import CoreGraphics
 import Foundation
 
-public typealias TileID = Int
+/// A pane in a row's split tree. A pane always shows one tab of its row, so it is that tab's
+/// tmux session name: stable for the tab's life (renames change only the display name).
+public typealias TileID = String
 
 public enum SplitAxis: String, Codable, Sendable {
     /// Children side by side (a vertical divider), as Cmd+D makes.
@@ -255,104 +257,205 @@ extension SplitNode {
     }
 }
 
-/// The main area's tiles: the tree, which session each tile shows, and the active tile.
-/// Keeps the "a session is in at most one tile" rule.
-public struct TileLayout: Codable, Equatable, Sendable {
-    public private(set) var root: SplitNode
-    public private(set) var sessions: [TileID: String]
-    public private(set) var active: TileID
-    private var nextID: TileID
+extension SplitNode {
+    /// The pane that takes over when `target` closes: the nearest leaf of its sibling subtree (the
+    /// sibling's first leaf when `target` was the first child, its last leaf when it was the second).
+    /// nil when `target` is the only pane or isn't in the tree.
+    public func nearestSiblingLeaf(of target: TileID) -> TileID? {
+        guard case .split(_, _, let a, let b) = self else { return nil }
+        if case .leaf(let id) = a, id == target { return b.leaves.first }
+        if case .leaf(let id) = b, id == target { return a.leaves.last }
+        if a.contains(target) { return a.nearestSiblingLeaf(of: target) }
+        if b.contains(target) { return b.nearestSiblingLeaf(of: target) }
+        return nil
+    }
+}
 
-    public static let maxTiles = 9
+/// Where the next pane of a row goes when the app itself asked for it (Cmd+D, Cmd+Shift+D, New Tab…):
+/// split `from` (or the active pane) along `axis`.
+public struct PendingSplit: Equatable, Sendable {
+    public var from: TileID?
+    public var axis: SplitAxis
+    public init(from: TileID?, axis: SplitAxis) {
+        self.from = from
+        self.axis = axis
+    }
+}
 
-    public init() {
-        root = .leaf(1)
-        sessions = [:]
-        active = 1
-        nextID = 2
+/// One sidebar row's main area (design section 6): its split tree, whose panes are the row's live
+/// tabs, and the pane that has the keyboard when the row is shown. Pure data.
+public struct RowLayout: Codable, Equatable, Sendable {
+    public private(set) var root: SplitNode?
+    public private(set) var active: TileID?
+
+    /// The supported maximum (design section 6). Only the app's own new-pane commands stop here.
+    public static let maxPanes = 9
+
+    public init(root: SplitNode? = nil, active: TileID? = nil) {
+        self.root = root
+        self.active = active.flatMap { root?.contains($0) == true ? $0 : nil } ?? root?.leaves.first
     }
 
-    public var tiles: [TileID] { root.leaves }
-    public var count: Int { tiles.count }
-    public var activeSession: String? { sessions[active] }
+    public var panes: [TileID] { root?.leaves ?? [] }
+    public var count: Int { panes.count }
+    public var isEmpty: Bool { root == nil }
+    public func contains(_ pane: TileID) -> Bool { root?.contains(pane) ?? false }
 
-    public func session(in tile: TileID) -> String? { sessions[tile] }
-
-    public func tile(showing session: String) -> TileID? {
-        sessions.first { $0.value == session }?.key
+    public mutating func activate(_ pane: TileID) {
+        if contains(pane) { active = pane }
     }
 
-    public var visibleSessions: Set<String> { Set(sessions.values) }
-
-    public mutating func activate(_ tile: TileID) {
-        if root.contains(tile) { active = tile }
-    }
-
-    /// Show `session` in `tile`. If another tile shows it, that tile is emptied first
-    /// (callers that prefer to activate the other tile check `tile(showing:)` before calling).
-    /// Returns the session the tile showed before, if any.
-    @discardableResult
-    public mutating func assign(_ session: String?, to tile: TileID) -> String? {
-        guard root.contains(tile) else { return nil }
-        let old = sessions[tile]
-        if let session, let other = self.tile(showing: session), other != tile { sessions[other] = nil }
-        sessions[tile] = session
-        return old == session ? nil : old
-    }
-
-    /// Split the active tile; the new tile becomes active. Returns its id, or nil at the tile cap.
-    @discardableResult
-    public mutating func splitActive(_ axis: SplitAxis) -> TileID? {
-        guard count < TileLayout.maxTiles else { return nil }
-        let id = nextID
-        nextID += 1
-        root = root.splitting(active, axis: axis, newTile: id)
-        active = id
-        return id
-    }
-
-    /// Close a tile. The last tile can't close; it's emptied instead.
-    /// Returns the session it showed. The new active tile is the closed tile's neighbour in the tree.
-    @discardableResult
-    public mutating func close(_ tile: TileID) -> String? {
-        guard root.contains(tile) else { return nil }
-        let old = sessions[tile]
-        guard count > 1, let newRoot = root.removing(tile) else {
-            sessions[tile] = nil
-            return old
+    /// Split `pane` (or the active pane) along `axis` for `newPane`, which goes right or below and becomes active.
+    public mutating func split(_ pane: TileID?, axis: SplitAxis, newPane: TileID) {
+        guard !contains(newPane) else { active = newPane; return }
+        guard let root else {
+            self.root = .leaf(newPane)
+            active = newPane
+            return
         }
-        let order = tiles
-        let idx = order.firstIndex(of: tile) ?? 0
-        root = newRoot
-        sessions[tile] = nil
-        if active == tile {
-            let remaining = root.leaves
-            active = remaining[min(max(0, idx - 1), remaining.count - 1)]
-        }
-        return old
+        let target = pane.flatMap { contains($0) ? $0 : nil } ?? active.flatMap { contains($0) ? $0 : nil } ?? root.leaves.last!
+        self.root = root.splitting(target, axis: axis, newTile: newPane)
+        active = newPane
     }
 
-    /// Move a tile beside another, or swap them (see `SplitNode.moving`). The moved tile becomes
-    /// active and keeps its session. Returns false when nothing changed.
+    /// Remove a pane. Its sibling takes the space, and if the pane was active, the sibling's nearest
+    /// pane becomes active. Returns false when the pane isn't in the row.
     @discardableResult
-    public mutating func move(_ tile: TileID, to target: TileID, zone: TileDropZone) -> Bool {
-        guard let r = root.moving(tile, to: target, zone: zone) else { return false }
+    public mutating func close(_ pane: TileID) -> Bool {
+        guard let root, root.contains(pane) else { return false }
+        let sibling = root.nearestSiblingLeaf(of: pane)
+        self.root = root.removing(pane)
+        if active == pane || active.map({ !contains($0) }) ?? true {
+            active = sibling ?? self.root?.leaves.first
+        }
+        return true
+    }
+
+    /// Give `newPane` a pane by the automatic rule: split the biggest pane in half along its longer
+    /// side (ties go to the first in `order`, the row's tab order). Sizes are taken in a rect of the
+    /// given width/height `aspect`, so the direction alternates as the panes get narrower or flatter,
+    /// and 2, 3 and 4 tabs open as side by side, a column and a stack, and a 2×2 grid.
+    public mutating func place(_ newPane: TileID, order: [String], aspect: Double) {
+        guard !contains(newPane) else { return }
+        guard let root else {
+            self.root = .leaf(newPane)
+            return
+        }
+        let h: CGFloat = 1000
+        let l = root.layout(in: CGRect(x: 0, y: 0, width: CGFloat(max(0.2, min(5, aspect))) * h, height: h), gap: 0)
+        let leaves = root.leaves
+        let ranked = leaves.enumerated().sorted { a, b in
+            let ra = order.firstIndex(of: a.element) ?? Int.max, rb = order.firstIndex(of: b.element) ?? Int.max
+            return ra != rb ? ra < rb : a.offset < b.offset
+        }.map(\.element)
+        var best: (pane: TileID, area: CGFloat)?
+        for p in ranked {
+            guard let r = l.tiles[p] else { continue }
+            let area = r.width * r.height
+            if best == nil || area > best!.area * 1.01 { best = (p, area) }
+        }
+        guard let target = best?.pane, let r = l.tiles[target] else { return }
+        self.root = root.inserting(newPane, beside: target, on: r.width >= r.height ? .right : .down)
+    }
+
+    public struct Change: Equatable, Sendable {
+        public var added: [TileID] = []
+        public var removed: [TileID] = []
+        /// The first added pane went where `pending` said (and became active).
+        public var usedPending = false
+        public var isEmpty: Bool { added.isEmpty && removed.isEmpty }
+        public init() {}
+    }
+
+    /// Match the panes to the row's live tabs (in tab order): panes of tabs that ended go, and their
+    /// space goes to their sibling; live tabs without a pane get one, the first by `pending` when the
+    /// app asked for it, the rest by `place`. A row seen for the first time lays all its tabs out this
+    /// way. The active pane stays unless it went, falling back to `preferredActive` (the row's active
+    /// tab in the sidebar), then to the first pane.
+    @discardableResult
+    public mutating func reconcile(liveTabs: [String], preferredActive: String?, aspect: Double, pending: PendingSplit? = nil) -> Change {
+        var change = Change()
+        let live = Set(liveTabs)
+        for p in panes where !live.contains(p) {
+            close(p)
+            change.removed.append(p)
+        }
+        var pending = pending
+        for t in liveTabs where !contains(t) {
+            if let ps = pending {
+                split(ps.from, axis: ps.axis, newPane: t)
+                pending = nil
+                change.usedPending = true
+            } else {
+                place(t, order: liveTabs, aspect: aspect)
+            }
+            change.added.append(t)
+        }
+        if active.map({ !contains($0) }) ?? true {
+            active = preferredActive.flatMap { contains($0) ? $0 : nil } ?? panes.first
+        }
+        return change
+    }
+
+    /// The pane after (or before) the active one in tab order, wrapping. nil with fewer than two panes.
+    public func step(forward: Bool, order: [String]) -> TileID? {
+        let seq = order.filter { contains($0) } + panes.filter { !order.contains($0) }
+        guard seq.count > 1 else { return nil }
+        return Sidebar.cycle(seq, from: active.flatMap { seq.contains($0) ? $0 : nil }, forward: forward)
+    }
+
+    /// Move a pane beside another, or swap them (see `SplitNode.moving`). The moved pane becomes
+    /// active. Returns false when nothing changed.
+    @discardableResult
+    public mutating func move(_ pane: TileID, to target: TileID, zone: TileDropZone) -> Bool {
+        guard let r = root?.moving(pane, to: target, zone: zone) else { return false }
         root = r
-        active = tile
+        active = pane
         return true
     }
 
     public mutating func setRatio(at path: [Int], _ ratio: Double) {
-        root = root.settingRatio(at: path, to: ratio)
+        root = root?.settingRatio(at: path, to: ratio)
+    }
+}
+
+/// What the app keeps between runs (Application Support JSON): every row's layout by container id,
+/// and the row that was shown.
+public struct SavedLayouts: Codable, Equatable, Sendable {
+    public static let currentVersion = 2
+    public var version: Int
+    public var current: String?
+    public var rows: [String: RowLayout]
+
+    public init(current: String? = nil, rows: [String: RowLayout] = [:]) {
+        version = SavedLayouts.currentVersion
+        self.current = current
+        self.rows = rows
     }
 
-    /// Drop sessions that no longer exist from their tiles.
-    public mutating func prune(keeping alive: (String) -> Bool) -> [String] {
-        var gone: [String] = []
-        for (t, s) in sessions where !alive(s) {
-            sessions[t] = nil
-            gone.append(s)
+    /// nil for anything this version can't read (including the old one-tree-per-window file).
+    public static func decode(_ data: Data) -> SavedLayouts? {
+        guard let s = try? JSONDecoder().decode(SavedLayouts.self, from: data), s.version == currentVersion else { return nil }
+        return s
+    }
+
+    public func encoded() -> Data? { try? JSONEncoder().encode(self) }
+
+    /// Forget rows that no longer exist.
+    public mutating func prune(keeping ids: Set<String>) {
+        rows = rows.filter { ids.contains($0.key) }
+        if let c = current, !ids.contains(c) { current = nil }
+    }
+
+    /// The session the old single-tree layout file had active (`{"root":…,"sessions":{"1":"name",…},"active":1}`),
+    /// so the first run after the change opens that session's row. The tree itself can't be carried
+    /// over: its tiles mixed sessions from different rows.
+    public static func legacyActiveSession(_ data: Data) -> String? {
+        struct Legacy: Decodable {
+            var sessions: [Int: String]
+            var active: Int
         }
-        return gone
+        guard let l = try? JSONDecoder().decode(Legacy.self, from: data) else { return nil }
+        return l.sessions[l.active]
     }
 }

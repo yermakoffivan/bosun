@@ -1,9 +1,9 @@
 import AppKit
 import BosunCore
 
-// Focus-test sections for layout and dragging: the new-session sheet at every window and tile
-// size, empty tiles in narrow tiles, moving tiles by their header, sidebar drag and drop through
-// the outline's own drag code, and the keyboard shortcuts panel.
+// Focus-test sections for layout and dragging: the new-session sheet at every window and pane
+// count, the exited-row and no-rows placeholders at every width, moving panes by their header,
+// sidebar drag and drop through the outline's own drag code, and the keyboard shortcuts panel.
 
 extension FocusTest {
     func layoutSections(_ only: Set<String>?) async {
@@ -91,66 +91,52 @@ extension FocusTest {
         await waitUntil(1) { firstResponderIsActiveTerminal }
     }
 
-    /// The "New Session…" button in an empty tile's placeholder.
-    func placeholderButton(_ tile: TileID, title: String) -> NSButton? {
-        func find(_ v: NSView) -> NSButton? {
-            if let b = v as? NSButton, b.title == title, !b.isHidden { return b }
-            for s in v.subviews { if let b = find(s) { return b } }
-            return nil
-        }
-        return ws.area.subviews.compactMap { $0 as? TileChromeView }.first { $0.tile == tile }.flatMap(find)
-    }
-
     func sheetLayout() async {
-        guard let api = session("api") else { return }
-        await showOnly(api)
-        // One tile.
+        guard let api = session("api"), let web = session("web"), let webRow = rowID(web) else { return }
+        await showRow(api)
+        // One pane.
         await cmd("n", [.shift])
         await waitUntil(2) { app.sheetOpen }
         await sleep(300)
-        await checkSheet("sheet over one tile", shot: "10-sheet-1-tile")
+        await checkSheet("sheet over one pane", shot: "15-sheet-1-pane")
         await closeSheet()
 
-        // Two tiles, opened from the new (empty) tile's placeholder, as Andy did.
+        // The three-pane row, with the sheet opened by Cmd+T (New Tab…).
+        await showRow(web)
+        await cmd("t")
+        await waitUntil(2) { app.sheetOpen }
+        r.check("Cmd+T opens the sheet over the three-pane row", app.sheetOpen && app.formModel?.isAddTab == true)
+        await sleep(300)
+        await checkSheet("sheet over three panes", shot: "16-sheet-3-panes")
+        await closeSheet()
+
+        // Four panes: Cmd+D adds a terminal tab.
+        let before = tabs(webRow)
         await cmd("d")
-        await waitUntil(2) { ws.layout.count == 2 }
-        r.check("Cmd+D after the sheet splits", ws.layout.count == 2)
-        let newTile = ws.activeTile
-        ws.clear(newTile)
-        await sleep(200)
-        if let b = placeholderButton(newTile, title: "New Session…") {
-            await click(b.convert(NSPoint(x: b.bounds.midX, y: b.bounds.midY), to: nil))
-        }
-        await waitUntil(2) { app.sheetOpen }
-        r.check("the empty tile's New Session… button opens the sheet", app.sheetOpen)
-        await sleep(300)
-        await checkSheet("sheet over two tiles", shot: "11-sheet-2-tiles")
-        await closeSheet()
-
-        // Four tiles.
-        await cmd("d", [.shift])
-        await arrow(123, [.command, .option])
-        await cmd("d", [.shift])
-        await waitUntil(3) { ws.layout.count == 4 }
+        await waitUntil(4) { ws.layout.count == 4 }
+        let extra = tabs(webRow).first { !before.contains($0) }
         await cmd("n", [.shift])
         await waitUntil(2) { app.sheetOpen }
         await sleep(300)
-        await checkSheet("sheet over four tiles", shot: "12-sheet-4-tiles")
+        await checkSheet("sheet over four panes", shot: "17-sheet-4-panes")
         await closeSheet()
 
-        // The smallest window the app allows, still with four tiles.
+        // The smallest window the app allows, still with four panes.
         let frame = w.frame
         w.setFrame(NSRect(origin: frame.origin, size: w.minSize), display: true)
         await sleep(300)
         await cmd("n", [.shift])
         await waitUntil(2) { app.sheetOpen }
         await sleep(300)
-        await checkSheet("sheet in the smallest window", shot: "13-sheet-small-window")
+        await checkSheet("sheet in the smallest window", shot: "18-sheet-small-window")
         await closeSheet()
         r.check("after the sheet the keyboard is back in the terminal", firstResponderIsActiveTerminal)
         w.setFrame(frame, display: true)
         await sleep(200)
-        for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
+        if let extra {
+            await killTab(extra)
+            await waitUntil(4) { ws.layout.count == 3 }
+        }
     }
 
     // MARK: Empty tiles
@@ -174,44 +160,28 @@ extension FocusTest {
         return bad
     }
 
+    /// The two placeholders (an exited row, and an empty main area with no rows at all) keep their text
+    /// and buttons inside at every width, wrapping rather than running off the edge.
     func emptyState() async {
         guard let api = session("api") else { return }
-        await showOnly(api)
-        await cmd("d")
-        await cmd("d")
-        await waitUntil(3) { ws.layout.count == 3 }
-        // Squeeze the first tile with the first divider, then empty it.
-        let first = ws.layout.tiles[0]
-        if let d = ws.area.subviews.compactMap({ $0 as? DividerView }).compactMap(\.divider).first(where: { $0.path.isEmpty }) {
-            ws.dividerDragBegan()
-            ws.dividerDragged(d, to: NSPoint(x: d.container.minX + 30, y: d.container.midY))
-            ws.dividerDragEnded()
-        }
-        ws.clear(first)
-        await sleep(200)
-        let chrome = ws.area.subviews.compactMap { $0 as? TileChromeView }.first { $0.tile == first }
-        let width = Int(ws.tileRects[first]?.width ?? 0)
-        if let p = chrome?.placeholderView {
-            let bad = placeholderProblems(p)
-            r.check("a narrow empty tile (\(width) pt) wraps and centres its text, nothing cut off", bad.isEmpty, bad.joined(separator: "; "))
-            r.check("…its title wraps onto more lines rather than running off the edge", p.title.frame.height > 22, "title \(p.title.frame)")
-        } else {
-            r.check("a narrow empty tile shows its placeholder", false)
-        }
-        shot("14-empty-tile-narrow")
-        // Every width from very narrow to wide: nothing ever cut off.
-        var bad: [String] = []
-        if let d = ws.area.subviews.compactMap({ $0 as? DividerView }).compactMap(\.divider).first(where: { $0.path.isEmpty }), let p = chrome?.placeholderView {
-            for x in stride(from: 20, through: Int(d.container.width * 0.6), by: 25) {
-                ws.dividerDragged(d, to: NSPoint(x: d.container.minX + CGFloat(x), y: d.container.midY))
-                ws.area.layoutSubtreeIfNeeded()
-                bad += placeholderProblems(p).map { "\(Int(ws.tileRects[first]?.width ?? 0)) pt: \($0)" }
+        await showRow(api)
+        for (label, session) in [("an exited row's placeholder", api as String?), ("the no-rows placeholder", nil)] {
+            let p = PlaceholderView(frame: NSRect(x: 0, y: 0, width: 400, height: 500))
+            p.configure(session: session, app: app, theme: app.theme)
+            var bad: [String] = []
+            var narrowTitle: CGFloat = 0
+            for width in stride(from: 40, through: 900, by: 20) {
+                p.setFrameSize(NSSize(width: CGFloat(width), height: 500))
+                p.needsLayout = true
+                bad += placeholderProblems(p).map { "\(width) pt: \($0)" }
+                if width == 80 { narrowTitle = p.title.frame.height }
             }
-            ws.dividerDragEnded()
+            r.check("\(label) keeps its text inside at every width from 40 to 900 pt", bad.isEmpty, bad.prefix(4).joined(separator: "; "))
+            r.check("…its title wraps onto more lines when narrow", narrowTitle > 22, "title \(narrowTitle) pt at 80 pt")
+            if session == nil {
+                r.check("…and offers New Session…", p.primary.title == "New Session…" && p.secondary.isHidden)
+            }
         }
-        r.check("an empty tile at every width from narrow to wide keeps its text inside", bad.isEmpty, bad.prefix(4).joined(separator: "; "))
-        for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
-        await showOnly(api)
     }
 
     // MARK: Tile drag
@@ -263,10 +233,10 @@ extension FocusTest {
         await sleep(120)
     }
 
-    /// Tile → its terminal view, to check that moves reuse the same views (tiles keep their ids when moved).
+    /// Pane → its terminal view, to check that moves reuse the same views.
     private var viewsByTile: [TileID: ObjectIdentifier] {
         var out: [TileID: ObjectIdentifier] = [:]
-        for t in ws.layout.tiles { if let v = ws.terminal(in: t) { out[t] = ObjectIdentifier(v) } }
+        for t in ws.layout.panes { if let v = ws.terminal(in: t) { out[t] = ObjectIdentifier(v) } }
         return out
     }
 
@@ -276,32 +246,31 @@ extension FocusTest {
         await sleep(250)
         guard (w.firstResponder as? TerminalView)?.session == s else { return false }
         if app.displayName(s) == "ticker" { return true }
+        if ShellCommand.isShell(app.daemon.state.sessions[s]?.paneCommand) {
+            await type("echo \(tag)\n")
+            return await paneHasLine(s, tag)
+        }
         await type("\(tag)\n")
         // Matched within a "got:" line: an earlier section can leave a stray key in the agent's input line.
         return await waitUntil(3) { pane(s).split(separator: "\n").contains { $0.hasPrefix("got: ") && $0.contains(tag) } }
     }
 
     func tileDrag() async {
-        guard let api = session("api"), let docs = session("docs"), let parser = session("parser") else { return }
-        await showOnly(api)
-        await cmd("d")
-        await cmd("d", [.shift])
+        guard let api = session("api"), let web = session("web"), let webTests = session("web tests"),
+              let webShell = session("web shell") else { return }
+        await showRow(web)
         await waitUntil(3) { ws.layout.count == 3 }
-        // Fixed sessions: api | (docs / parser).
-        let tiles = ws.layout.tiles
-        ws.show(api, in: tiles[0], focus: false)
-        ws.show(docs, in: tiles[1], focus: false)
-        ws.show(parser, in: tiles[2], focus: false)
-        await waitUntil(3) { ws.layout.tiles.allSatisfy { ws.terminal(in: $0)?.hasPaintedContent == true } }
+        r.check("pane drag: the three-pane row", Set(ws.layout.panes) == [web, webTests, webShell])
+        let parser = webShell
         await sleep(300)
 
         // Each edge: drag parser's tile onto api's tile, then check the tree, the views and the keyboard.
-        let moving = ws.layout.tile(showing: parser)!
-        let target = ws.layout.tile(showing: api)!
+        let moving = parser
+        let target = web
         var edgeShot = false
         for side in [Direction.left, .right, .up, .down] {
             let zone = TileDropZone.edge(side)
-            let expected = ws.layout.root.moving(moving, to: target, zone: zone)
+            let expected = ws.layout.root?.moving(moving, to: target, zone: zone)
             guard let from = headerPoint(moving), let to = zonePoint(target, zone) else { continue }
             let views = viewsByTile
             let poolSize = ws.pool.views.count
@@ -311,7 +280,7 @@ extension FocusTest {
             await drag(from: from, to: to) { [self] in
                 indicator = ws.dropIndicator.shownRect
                 reported = ws.tileDropTarget?.zone
-                if !edgeShot, side == .right { edgeShot = true; shot("15-tile-drop-edge") }
+                if !edgeShot, side == .right { edgeShot = true; shot("21-pane-drop-edge") }
             }
             if expected == nil {
                 r.check("drag to the \(side) edge: a no-op drop shows nothing and changes nothing", indicator == nil && reported == nil)
@@ -322,26 +291,27 @@ extension FocusTest {
             r.check("drag to the \(side) edge: the tile moves there", ws.layout.root == expected, "\(ws.layout.root)")
             let sameViews = viewsByTile == views && ws.pool.views.count == poolSize
             r.check("…with the same terminal views (no reattach)", sameViews)
-            r.check("…and the dragged tile stays active with the keyboard", ws.activeTile == moving && ws.activeSession == parser)
+            r.check("…and the dragged pane stays active with the keyboard", ws.activeTile == moving && ws.activeSession == parser)
             r.check("…typing reaches it", await keysLandIn(parser, "moved-\(side)"))
         }
 
         // Swap: two tiles that aren't the one just moved.
-        let others = ws.layout.tiles.filter { $0 != moving && ws.layout.session(in: $0) != nil }
-        guard others.count >= 2, let docsAgain = ws.layout.session(in: others[0]) else {
-            r.check("tile drag: two other tiles with sessions to swap", false, "\(ws.layout.tiles.count) tiles")
+        let others = ws.layout.panes.filter { $0 != moving }
+        guard others.count >= 2 else {
+            r.check("pane drag: two other panes to swap", false, "\(ws.layout.count) panes")
             return
         }
+        let docsAgain = others[0]
         let a = others[0]
         let b = others[1]
-        let swapped = ws.layout.root.swapping(a, b)
+        let swapped = ws.layout.root?.swapping(a, b)
         let views = viewsByTile
         let poolSize = ws.pool.views.count
         if let from = headerPoint(a), let to = zonePoint(b, .swap) {
             var label = false
             await drag(from: from, to: to) { [self] in
                 label = ws.dropIndicator.showsSwap
-                shot("16-tile-drop-swap")
+                shot("22-pane-drop-swap")
             }
             r.check("drag to the middle: the indicator says swap", label)
             r.check("…and the two tiles swap places", ws.layout.root == swapped, "\(ws.layout.root)")
@@ -365,7 +335,7 @@ extension FocusTest {
             r.check("…and the Esc never reaches the terminal", !pane(current).contains("^["))
         }
         // Released outside the tiles (over the sidebar).
-        if let from = headerPoint(b), let to = zonePoint(a, .edge(.down)), let side = sidebarPoint(docs) {
+        if let from = headerPoint(b), let to = zonePoint(a, .edge(.down)), let side = sidebarPoint(api) {
             await drag(from: from, to: to, release: side)
             r.check("a drop outside the tiles cancels", ws.layout.root == before && !ws.tileDragActive && ws.dropIndicator.superview == nil)
         }
@@ -383,8 +353,8 @@ extension FocusTest {
         let pb = NSPasteboard(name: NSPasteboard.Name("dev.yetidevworks.bosun.test-drag-tiles"))
         pb.clearContents()
         pb.writeObjects([URL(fileURLWithPath: file) as NSURL])
-        if let t = ws.layout.tiles.first(where: { ws.layout.session(in: $0).map { app.displayName($0) != "ticker" } ?? false }),
-           let target = ws.layout.session(in: t), let c = tileCenter(t) {
+        if let t = ws.layout.panes.first(where: { $0 != webShell }), let c = tileCenter(t) {
+            let target = t
             let info = FakeDrag(location: c, pasteboard: pb, window: w)
             let op = ws.area.draggingEntered(info)
             r.check("a file dragged over a tile is still accepted, without the tile drop indicator",
@@ -394,8 +364,8 @@ extension FocusTest {
             await type("\n")
             r.check("…and the drop inserts the path as before", await paneShows(target, "got: \(ShellEscape.escape(file))"))
         }
-        for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
-        await showOnly(api)
+        r.check("after the pane drags the row still has its three tabs as panes", Set(ws.layout.panes) == [web, webTests, webShell])
+        await showRow(api)
     }
 
     // MARK: Sidebar drag and drop
@@ -468,7 +438,7 @@ extension FocusTest {
         guard let api = session("api"), let docs = session("docs"), let parser = session("parser"),
               let web = session("web"), let webTests = session("web tests") else { return }
         let original = app.daemon.state.sidebar
-        await showOnly(review1Session ?? api)
+        await showRow(review1Session ?? api)
         let shownBefore = ws.activeSession
 
         // a) A row onto the lower edge of the next row: reordered among the ungrouped rows.
@@ -479,7 +449,7 @@ extension FocusTest {
             await waitUntil(1) { names(app.daemon.state.sidebar.ungrouped) == ["docs", "api"] }
             r.check("…and the rows are reordered", names(app.daemon.state.sidebar.ungrouped) == ["docs", "api"],
                     "\(names(app.daemon.state.sidebar.ungrouped))")
-            r.check("…a drag isn't a click: the tile still shows what it did", ws.activeSession == shownBefore)
+            r.check("…a drag isn't a click: the main area still shows what it did", ws.activeSession == shownBefore)
         }
         // b) A row dropped on the middle of a row in a section: it goes into that section, beside that row.
         if let from = rowPoint(rowItem(api), 0.5), let to = rowPoint(rowItem(parser), 0.4) {
@@ -500,7 +470,7 @@ extension FocusTest {
            let from = rowPoint(tabItem, 0.5, x: 80), let to = rowPoint(webItem, 0.1, x: 80) {
             let res = await outlineDrag(from: from, to: to)
             let tabs = app.daemon.state.sidebar.container(holding: web)?.tabs.map { app.displayName($0.session) } ?? []
-            r.check("sidebar: a tab dragged above its sibling reorders the row's tabs", res.accepted && tabs == ["web tests", "web"], "\(tabs) op \(res.op.rawValue)")
+            r.check("sidebar: a tab dragged above its sibling reorders the row's tabs", res.accepted && Array(tabs.prefix(3)) == ["web tests", "web", "web shell"], "\(tabs) op \(res.op.rawValue)")
         }
         // e) A row dropped over a multi-tab row's tabs goes beside that row, not inside it (refused before).
         if let shell = session("shell"), let webTab = app.sidebar.itemFor(session: web),
@@ -511,7 +481,7 @@ extension FocusTest {
                     "Work: \(work) op \(res.op.rawValue)")
         }
         // f) Finder-style rename tells a click from a drag: dragging the selected row's name never renames.
-        await showOnly(docs)
+        await showRow(docs)
         if let from = sidebarPoint(docs), let to = rowPoint(sectionItem("Reviews"), 0.9) {
             let res = await outlineDrag(from: from, to: to)
             await sleep(NSEvent.doubleClickInterval * 1000 + 300)
@@ -530,7 +500,7 @@ extension FocusTest {
         app.daemon.saveSidebar(original)
         await sleep(300)
         r.check("sidebar: put back as it was", app.daemon.state.sidebar == original)
-        await showOnly(api)
+        await showRow(api)
     }
 
     private var review1Session: String? { session("review-1") }
@@ -539,7 +509,7 @@ extension FocusTest {
 
     func shortcuts() async {
         guard let api = session("api") else { return }
-        await showOnly(api)
+        await showRow(api)
         // The catalog and the menus agree both ways.
         var missing: [String] = []
         var listed = Set<String>()
@@ -568,8 +538,8 @@ extension FocusTest {
         walk(NSApp.mainMenu)
         r.check("every menu shortcut is listed in the panel", unlisted.isEmpty, unlisted.joined(separator: ", "))
         // The nav keys come from [keybindings].
-        let navRows: [(String, NavAction)] = [("Next session", .nextSession), ("Previous session", .previousSession),
-                                               ("Next tab", .nextTab), ("Previous tab", .previousTab),
+        let navRows: [(String, NavAction)] = [("Next session (row)", .nextSession), ("Previous session (row)", .previousSession),
+                                               ("Next tab (pane)", .nextTab), ("Previous tab (pane)", .previousTab),
                                                ("Send the next key to the terminal", .sendNextKey)]
         let groups = app.shortcutGroups()
         let nav = groups.first { $0.name == "Navigation" }?.rows ?? []
@@ -586,7 +556,7 @@ extension FocusTest {
             r.check("…and fits in the window", inside, "\(p.frame)")
         }
         await sleep(200)
-        shot("17-shortcuts-panel")
+        shot("19-shortcuts-panel")
         await type("with-help-open\n")
         r.check("…typing while it's open still reaches the terminal", await paneShows(api, "got: with-help-open"))
         await key(53, "\u{1b}")
@@ -613,7 +583,7 @@ extension FocusTest {
             let main = ws.area.frame
             r.check("in the smallest window the panel fits inside the main area, its list scrolling",
                     main.contains(p.frame) && p.scrolls, "\(p.frame) in \(main), scrolls \(p.scrolls)")
-            shot("18-shortcuts-panel-small")
+            shot("20-shortcuts-panel-small")
         }
         await key(53, "\u{1b}")
         w.setFrame(frame, display: true)

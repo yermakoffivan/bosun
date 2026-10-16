@@ -38,7 +38,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     private var updatingSelection = false
     private var reloading = false
     private var hoverTimer: Timer?
-    private var hoverSession: String?
+    private var hoverRow: String?
     private var renameTimer: Timer?
     private var renaming: (item: SidebarItem, field: NSTextField, original: String)?
     /// Rows whose badge changed state recently (selftest hook): session → state.
@@ -166,20 +166,40 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
     }
 
-    /// The session a click on this item shows.
+    /// The session a click on this item makes the active pane: a tab's own, or the row's remembered pane.
     func session(for item: SidebarItem) -> String? {
         switch item.kind {
         case .tab(let s): return s
-        case .row(let id): return app.daemon.state.sidebar.container(id: id)?.active
+        case .row(let id): return app.workspace.rememberedPane(row: id)
         case .section: return nil
         }
     }
 
-    /// Select the row for the active tile's session (selection follows the active tile, never the other way).
+    /// The row (container id) an item belongs to.
+    func rowID(for item: SidebarItem) -> String? {
+        switch item.kind {
+        case .row(let id): return id
+        case .tab(let s): return app.daemon.state.sidebar.container(holding: s)?.id
+        case .section: return nil
+        }
+    }
+
+    /// Whether a click on this item's name renames it (Finder style: it's already what's selected):
+    /// the shown row, or the active pane's tab under it.
+    func isSelectedForRename(_ item: SidebarItem) -> Bool {
+        switch item.kind {
+        case .row(let id): return id == app.workspace.currentRow
+        case .tab(let s): return rowID(for: item) == app.workspace.currentRow && s == app.workspace.layout.active
+        case .section: return false
+        }
+    }
+
+    /// Select the shown row (selection follows the main area, never the other way). Its tab rows show
+    /// which pane is active (drawn by `SidebarRowView`).
     func syncSelection() {
         updatingSelection = true
         defer { updatingSelection = false }
-        guard let s = app.workspace.activeSession, let item = itemFor(session: s) else {
+        guard let id = app.workspace.currentRow, let item = cache["r:\(id)"] else {
             outline.deselectAll(nil)
             return
         }
@@ -222,8 +242,11 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             app.setSectionCollapsed(id, outline.isItemExpanded(item))
             return
         }
-        guard let s = session(for: item) else { return }
-        app.sidebarActivated(session: s)
+        switch item.kind {
+        case .row(let id): app.sidebarActivated(row: id)
+        case .tab(let s): app.sidebarActivated(session: s)
+        case .section: break
+        }
     }
 
     /// Finder-style rename: a click on the name of the row that's already selected, after the double-click interval.
@@ -239,14 +262,15 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
 
     // MARK: Hover prewarm
 
+    /// Hovering a row (or one of its tabs) for 50 ms warms every pane of that row.
     func hovered(row: Int) {
-        let s = row >= 0 ? (outline.item(atRow: row) as? SidebarItem).flatMap { session(for: $0) } : nil
-        guard s != hoverSession else { return }
-        hoverSession = s
+        let id = row >= 0 ? (outline.item(atRow: row) as? SidebarItem).flatMap { rowID(for: $0) } : nil
+        guard id != hoverRow else { return }
+        hoverRow = id
         hoverTimer?.invalidate()
-        guard let s else { return }
+        guard let id else { return }
         hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.app.workspace.prewarm(s) }
+            MainActor.assumeIsolated { self?.app.workspace.prewarm(row: id) }
         }
     }
 
@@ -585,7 +609,7 @@ final class SidebarOutlineView: NSOutlineView {
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         let row = self.row(at: p)
-        let wasSelected = row >= 0 && selectedRowIndexes.contains(row)
+        let wasSelected = row >= 0 && (item(atRow: row) as? SidebarItem).map { controller?.isSelectedForRename($0) ?? false } ?? false
         var onName = false
         if row >= 0, let cell = view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarCellView {
             let q = cell.convert(event.locationInWindow, from: nil)
@@ -651,15 +675,15 @@ final class SidebarRowView: NSTableRowView {
 
     override func drawBackground(in dirtyRect: NSRect) {
         guard let theme, let item, let controller, !isSelected else { return }
-        // A session shown in another (inactive) tile gets an outline, so you can see where it is.
-        if case .section = item.kind { return }
-        let app = controller.app
-        if let s = controller.session(for: item), app.workspace.visibleSessions.contains(s), s != app.workspace.activeSession,
-           !(item.kind != .tab(s) && (app.daemon.state.sidebar.container(holding: s)?.tabs.count ?? 0) > 1) {
-            let p = NSBezierPath(roundedRect: bounds.insetBy(dx: 6.5, dy: 0.5), xRadius: 6, yRadius: 6)
-            theme.panelAlt.setFill()
-            p.fill()
-        }
+        // The shown row's tabs each have a pane on screen; the active pane's tab is marked (a fill and
+        // an accent bar), so the row says which pane has the keyboard.
+        guard case .tab(let s) = item.kind, let ws = controller.app.workspace else { return }
+        guard controller.rowID(for: item) == ws.currentRow, s == ws.layout.active, ws.layout.count > 1 else { return }
+        let r = bounds.insetBy(dx: 6.5, dy: 0.5)
+        theme.panelAlt.setFill()
+        NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6).fill()
+        theme.accent.setFill()
+        NSBezierPath(roundedRect: NSRect(x: r.minX + 3, y: r.minY + 5, width: 3, height: r.height - 10), xRadius: 1.5, yRadius: 1.5).fill()
     }
 
     override var isEmphasized: Bool { get { false } set {} }

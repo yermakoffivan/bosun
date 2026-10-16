@@ -492,17 +492,19 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
 struct SettingsView: View {
     @AppStorage("focusFollowsMouse") private var focusFollowsMouse = true
     @AppStorage("matchTerminalTheme") private var matchTerminalTheme = false
-    @AppStorage("poolSize") private var poolSize = 8
+    @AppStorage("poolSize") private var poolSize = AppSettings.defaultPoolSize
 
     var body: some View {
         Form {
-            Toggle("Focus follows the mouse between tiles", isOn: $focusFollowsMouse)
-            Text("With two or more tiles, moving the pointer into a tile makes it active. Off: click to activate.")
+            Toggle("Focus follows the mouse between panes", isOn: $focusFollowsMouse)
+            Text("With two or more panes, moving the pointer into a pane makes it active. Off: click to activate.")
                 .font(.caption).foregroundStyle(.secondary)
             Toggle("Match terminal colours to the Bosun theme", isOn: $matchTerminalTheme)
             Text("Off: terminals keep your Ghostty theme. Your Ghostty config file is never changed.")
                 .font(.caption).foregroundStyle(.secondary)
-            Stepper("Warm terminals kept attached: \(poolSize)", value: $poolSize, in: 2...16)
+            Stepper("Warm terminals kept attached: \(poolSize)", value: $poolSize, in: AppSettings.poolSizeRange)
+            Text("One per pane, including the ones on screen, so recently shown rows switch back in one frame. About 14 MB each.")
+                .font(.caption).foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
         .frame(width: 460)

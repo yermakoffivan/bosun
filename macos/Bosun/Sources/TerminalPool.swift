@@ -1,8 +1,9 @@
 import AppKit
 import BosunCore
 
-/// The warm pool (design section 5): an LRU of attached terminal views keyed by session.
-/// Showing a pooled session is a view swap. Hidden views are occluded (their renderer stops,
+/// The warm pool (design section 5): an LRU of attached terminal views keyed by session, sized in
+/// views (panes), not rows. A row's panes are touched together when it's shown, so recently shown
+/// rows stay warm as a whole. Showing a pooled session is a view swap. Hidden views are occluded (their renderer stops,
 /// their pty keeps draining) and marked `ignore-size` so they never size a session.
 @MainActor
 final class TerminalPool {
@@ -92,21 +93,6 @@ final class TerminalPool {
     /// The pooled view whose tmux client is on terminal `tty`, if it's one of ours and still running.
     func view(onTTY tty: String) -> TerminalView? {
         views.values.first { !$0.exited && !$0.detaching && $0.ttyName == tty }
-    }
-
-    /// The view for `old` now shows `new` (its tmux client was moved there inside the terminal):
-    /// key it by `new`, and detach any other view of `new`, since a session has one view.
-    func rekey(_ old: String, to new: String) {
-        guard old != new, let v = views.removeValue(forKey: old) else { return }
-        if let other = views.removeValue(forKey: new) {
-            lru.removeAll { $0 == new }
-            ignoringSize.remove(new)
-            other.detachThenFree(socket: tmuxSocket)
-        }
-        v.session = new
-        views[new] = v
-        lru = lru.map { $0 == old ? new : $0 }
-        if ignoringSize.remove(old) != nil { ignoringSize.insert(new) }
     }
 
     /// Put the tmux client on `tty` back on `session`.

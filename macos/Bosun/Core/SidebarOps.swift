@@ -72,6 +72,25 @@ extension Sidebar {
         return false
     }
 
+    /// Take an ended tab out of its row (a pane closed in the app ends its tab for good, whatever
+    /// `remove_dead_sessions` says). A row's only tab stays: the row would go with it.
+    @discardableResult
+    public mutating func removeTab(session: String) -> Bool {
+        func drop(_ c: inout Container) -> Bool {
+            guard c.tabs.count > 1, let i = c.tabs.firstIndex(where: { $0.session == session }) else { return false }
+            c.tabs.remove(at: i)
+            if c.active == session { c.active = c.tabs[min(i, c.tabs.count - 1)].session }
+            return true
+        }
+        for i in ungrouped.indices where ungrouped[i].tabs.contains(where: { $0.session == session }) { return drop(&ungrouped[i]) }
+        for s in sections.indices {
+            for i in sections[s].members.indices where sections[s].members[i].tabs.contains(where: { $0.session == session }) {
+                return drop(&sections[s].members[i])
+            }
+        }
+        return false
+    }
+
     @discardableResult
     public mutating func setCollapsed(section id: String, _ collapsed: Bool) -> Bool {
         guard let i = sections.firstIndex(where: { $0.id == id }), sections[i].collapsed != collapsed else { return false }
