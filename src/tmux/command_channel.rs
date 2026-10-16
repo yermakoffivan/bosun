@@ -30,11 +30,21 @@
 //! - tmux runs one client's commands strictly in order, so a slow
 //!   command on a shared client would delay the monitor's own work.
 //!
-//! The connection attaches with `attach-session -t =__bosun_monitor`
+//! The connection runs `tmux -N -C attach-session -t =__bosun_monitor`
 //! and never creates anything: a missing server or monitor session
 //! just means "not up", and commands use exec. That keeps a bare
 //! `TokioTmuxClient` (tests, a server that was killed) from starting a
 //! tmux server as a side effect of a read like `list-sessions`.
+//!
+//! The `-N` (tmux 3.2+) matters: `attach-session` starts a server when
+//! none is running, and that server exits again as soon as the attach
+//! fails for want of a session. On tmux 3.4 (Ubuntu 24.04, Debian) a
+//! `new-session` that starts the server at the same moment (Bosun's
+//! first command after a boot, or the monitor's
+//! `ensure_monitor_session`) then fails about one time in four with
+//! "server exited unexpectedly". tmux 3.8 didn't lose that race in
+//! testing, but `-N` takes the transient server out of the picture on
+//! every version.
 //!
 //! It never sends `refresh-client -C`: a control client with no size
 //! is ignored by window-size negotiation, and setting one would make
@@ -527,7 +537,7 @@ impl Connection {
         }
     }
 
-    /// Spawn `tmux -C attach-session -t =__bosun_monitor` and wait for
+    /// Spawn `tmux -N -C attach-session -t =__bosun_monitor` and wait for
     /// the attach's own reply block. Fails when the server or the
     /// monitor session isn't there.
     async fn open(socket: Option<&str>) -> Result<Arc<Self>> {
@@ -536,7 +546,9 @@ impl Connection {
             cmd.arg("-L").arg(s);
         }
         let target = format!("={MONITOR_SESSION}");
-        cmd.arg("-C")
+        // `-N`: never start a server (see the module docs).
+        cmd.arg("-N")
+            .arg("-C")
             .arg("attach-session")
             .arg("-t")
             .arg(&target)

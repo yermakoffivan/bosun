@@ -16,6 +16,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **Faster tmux commands.** Bosun now sends its tmux commands over one long-lived control-mode connection instead of starting a `tmux` process for each one. Navigating starts about 80% fewer processes, and common commands take well under a millisecond instead of about 5 ms. Set `BOSUN_TMUX_CONTROL=0` to go back to the old behaviour.
+- **Checked against tmux 3.4**, the version Ubuntu 24.04 and Debian ship. The new command connection never starts a tmux server of its own now: on 3.4, the short-lived server its attach used to start could make Bosun's first command after starting the tmux server (the first launch after a reboot, say) fail with "server exited unexpectedly". The integration tests now pass on tmux 3.4 as well as 3.8.
 
 ### Fixed
 
