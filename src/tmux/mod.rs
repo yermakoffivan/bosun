@@ -1,5 +1,6 @@
 pub mod attach;
 pub mod client;
+pub mod command_channel;
 pub mod control;
 pub mod control_client;
 pub mod detector;

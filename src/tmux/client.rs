@@ -3,11 +3,13 @@
 
 use std::ffi::OsStr;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::process::Command;
 
 use crate::error::{BosunError, Result};
+use crate::tmux::command_channel::{CommandChannel, Outcome};
 use crate::tmux::parse::{parse_list_sessions, LIST_SESSIONS_FORMAT};
 use crate::tmux::session::TmuxSession;
 
@@ -176,23 +178,68 @@ pub trait TmuxClient: Send + Sync {
     async fn ensure_excluded(&self, repo: &str, pattern: &str) -> Result<()>;
 }
 
-/// Production implementation backed by `tokio::process::Command`.
-/// Supports an optional `-L <socket>` for test isolation.
+/// Production implementation. tmux commands go over a long-lived
+/// control-mode connection when it's up and fall back to one
+/// `tokio::process::Command` exec each otherwise; see
+/// [`crate::tmux::command_channel`]. Supports an optional `-L <socket>`
+/// for test isolation. Clones share one command channel.
 #[derive(Debug, Clone)]
 pub struct TokioTmuxClient {
     socket: Option<String>,
+    channel: Arc<CommandChannel>,
+}
+
+/// Output of one tmux command, whichever way it was carried. For the
+/// control channel, `stderr` holds the lines of an `%error` block —
+/// the same text exec prints on stderr.
+#[derive(Debug, Clone, Default)]
+pub struct TmuxOutput {
+    pub success: bool,
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+}
+
+/// Whether a command can be re-run over exec when the control
+/// connection dies after the command was written but before its reply
+/// arrived (tmux may already have run it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retry {
+    /// Reads and idempotent writes (`set-option`, `kill-session` of a
+    /// possibly-missing session): run again over exec.
+    Safe,
+    /// `new-session`, `send-keys`: report the failure instead of
+    /// risking a duplicate session or doubled keystrokes.
+    Unsafe,
 }
 
 impl TokioTmuxClient {
     pub fn new() -> Self {
-        Self { socket: None }
+        Self::build(None)
     }
 
     #[allow(dead_code)]
     pub fn with_socket(socket: impl Into<String>) -> Self {
-        Self {
-            socket: Some(socket.into()),
-        }
+        Self::build(Some(socket.into()))
+    }
+
+    fn build(socket: Option<String>) -> Self {
+        let channel = Arc::new(CommandChannel::new(
+            socket.clone(),
+            crate::tmux::command_channel::enabled_from_env(),
+        ));
+        Self { socket, channel }
+    }
+
+    /// Same socket, but every command execs (the pre-control-mode
+    /// behavior). For comparisons and as an escape hatch.
+    pub fn exec_only(mut self) -> Self {
+        self.channel = Arc::new(CommandChannel::new(self.socket.clone(), false));
+        self
+    }
+
+    /// The shared command channel, for stats and tests.
+    pub fn command_channel(&self) -> &Arc<CommandChannel> {
+        &self.channel
     }
 
     /// Build a tmux command with the configured socket prefix.
@@ -204,6 +251,110 @@ impl TokioTmuxClient {
         c.stdin(Stdio::null());
         c.kill_on_drop(true);
         c
+    }
+
+    /// Run one tmux command: over the control channel when it's up,
+    /// otherwise (or after a lost connection, for [`Retry::Safe`]
+    /// commands) by exec. Errors only when the command couldn't be run
+    /// at all; a tmux-level failure comes back as `success == false`.
+    pub async fn run(&self, args: &[&str], retry: Retry) -> Result<TmuxOutput> {
+        match self.channel.execute(args).await {
+            Outcome::Replied(block) => {
+                let mut out = TmuxOutput {
+                    success: block.ok,
+                    ..Default::default()
+                };
+                if block.ok {
+                    out.stdout = block.stdout();
+                } else {
+                    out.stderr = String::from_utf8_lossy(&block.stdout()).into_owned();
+                }
+                return Ok(out);
+            }
+            Outcome::NotSent => {}
+            Outcome::Lost => {
+                if retry == Retry::Unsafe {
+                    return Err(BosunError::Tmux(format!(
+                        "tmux connection lost while running {}",
+                        args.first().copied().unwrap_or("command")
+                    )));
+                }
+            }
+        }
+        self.channel.note_exec();
+        let mut cmd = self.cmd();
+        cmd.args(args);
+        let output = cmd.output().await.map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => BosunError::TmuxNotInstalled,
+            _ => BosunError::Io(e),
+        })?;
+        Ok(TmuxOutput {
+            success: output.status.success(),
+            stdout: output.stdout,
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+
+    /// `refresh-client -t <tty> -f ignore-size` (or `!ignore-size`).
+    /// Lets a hidden GUI view stop taking part in window-size
+    /// negotiation without detaching. Only a flag, never a size.
+    pub async fn set_client_ignore_size(&self, tty: &str, ignore: bool) -> Result<()> {
+        check_client_tty(tty)?;
+        let flag = if ignore {
+            "ignore-size"
+        } else {
+            "!ignore-size"
+        };
+        let out = self
+            .run(&["refresh-client", "-t", tty, "-f", flag], Retry::Safe)
+            .await?;
+        if out.success {
+            Ok(())
+        } else {
+            Err(BosunError::Tmux(format!(
+                "refresh-client -t {tty}: {}",
+                out.stderr.trim()
+            )))
+        }
+    }
+
+    /// Make the client on `tty` tmux's "latest" client for its session,
+    /// so under `window-size latest` the session takes that client's
+    /// size. `refresh-client` can't do this; `switch-client` to the
+    /// session the client is already on does, without changing its
+    /// last-session. Side effects, same as a keypress in that client:
+    /// the client redraws and the session's activity time is bumped.
+    pub async fn make_client_latest(&self, tty: &str) -> Result<()> {
+        check_client_tty(tty)?;
+        let out = self
+            .run(
+                &["display-message", "-p", "-c", tty, "#{client_session}"],
+                Retry::Safe,
+            )
+            .await?;
+        let session = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !out.success || session.is_empty() {
+            return Err(BosunError::Tmux(format!(
+                "no tmux client on {tty}{}",
+                if out.stderr.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", out.stderr.trim())
+                }
+            )));
+        }
+        let target = format!("={session}:");
+        let out = self
+            .run(&["switch-client", "-c", tty, "-t", &target], Retry::Safe)
+            .await?;
+        if out.success {
+            Ok(())
+        } else {
+            Err(BosunError::Tmux(format!(
+                "switch-client -c {tty}: {}",
+                out.stderr.trim()
+            )))
+        }
     }
 
     /// Pull the socket flag for use by `attach.rs` when it needs to spawn
@@ -221,18 +372,40 @@ impl TokioTmuxClient {
     /// for "agent has died" and "agent has started" without relying on
     /// fixed-duration sleeps.
     async fn pane_current_command(&self, session: &str) -> String {
-        let mut cmd = self.cmd();
-        cmd.arg("display-message")
-            .arg("-p")
-            .arg("-t")
-            .arg(session)
-            .arg("#{pane_current_command}");
-        match cmd.output().await {
-            Ok(out) if out.status.success() => {
-                String::from_utf8_lossy(&out.stdout).trim().to_string()
-            }
+        let args = [
+            "display-message",
+            "-p",
+            "-t",
+            session,
+            "#{pane_current_command}",
+        ];
+        match self.run(&args, Retry::Safe).await {
+            Ok(out) if out.success => String::from_utf8_lossy(&out.stdout).trim().to_string(),
             _ => String::new(),
         }
+    }
+
+    /// `send-keys -t <session> <keys…>`, logging (not returning) a
+    /// failure — the restart path's fire-and-forget keystrokes.
+    async fn send_keys_logged(&self, session: &str, keys: &[&str]) {
+        let mut args = vec!["send-keys", "-t", session];
+        args.extend_from_slice(keys);
+        if let Err(e) = self.run(&args, Retry::Unsafe).await {
+            tracing::warn!("send-keys to {}: {}", session, e);
+        }
+    }
+}
+
+/// A client target for `refresh-client -t` / `switch-client -c` must
+/// be a tty path (what libghostty's `ghostty_surface_tty_name` and
+/// tmux's `#{client_tty}` report).
+fn check_client_tty(tty: &str) -> Result<()> {
+    if tty.starts_with("/dev/") && tty.len() > 5 {
+        Ok(())
+    } else {
+        Err(BosunError::Tmux(format!(
+            "client tty must be a /dev path, got {tty:?}"
+        )))
     }
 }
 
@@ -256,14 +429,11 @@ impl Default for TokioTmuxClient {
 #[async_trait]
 impl TmuxClient for TokioTmuxClient {
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>> {
-        let mut cmd = self.cmd();
-        cmd.arg("list-sessions").arg("-F").arg(LIST_SESSIONS_FORMAT);
-        let output = cmd.output().await.map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => BosunError::TmuxNotInstalled,
-            _ => BosunError::Io(e),
-        })?;
+        let output = self
+            .run(&["list-sessions", "-F", LIST_SESSIONS_FORMAT], Retry::Safe)
+            .await?;
 
-        if output.status.success() {
+        if output.success {
             let s = String::from_utf8_lossy(&output.stdout);
             return parse_list_sessions(&s);
         }
@@ -281,20 +451,18 @@ impl TmuxClient for TokioTmuxClient {
         //     user. (Seen on Linux tmux; macOS usually finishes exiting
         //     before we ask and answers "no server running".)
         // All of them mean "empty" for our purposes.
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if is_empty_server_stderr(&stderr) {
+        let stderr = &output.stderr;
+        if is_empty_server_stderr(stderr) {
             return Ok(Vec::new());
         }
 
         Err(BosunError::Tmux(format!(
-            "list-sessions failed ({}): {}",
-            output.status,
+            "list-sessions failed: {}",
             stderr.trim()
         )))
     }
 
     async fn capture_pane(&self, session: &str) -> Result<Vec<u8>> {
-        let mut cmd = self.cmd();
         // -p : stdout
         // -e : include escape sequences
         // -J : join wrapped lines (so we don't split in the middle of an
@@ -303,31 +471,25 @@ impl TmuxClient for TokioTmuxClient {
         // scrollback history. Scrollback would pick up whatever the user
         // typed earlier (e.g. literal `printf '\033[32m...'` source),
         // which looks like escape code garbage in the preview.
-        cmd.arg("capture-pane")
-            .arg("-p")
-            .arg("-e")
-            .arg("-J")
-            .arg("-t")
-            .arg(session);
+        let output = self
+            .run(
+                &["capture-pane", "-p", "-e", "-J", "-t", session],
+                Retry::Safe,
+            )
+            .await?;
 
-        let output = cmd.output().await.map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => BosunError::TmuxNotInstalled,
-            _ => BosunError::Io(e),
-        })?;
-
-        if output.status.success() {
+        if output.success {
             return Ok(output.stdout);
         }
 
         // Session may have just been killed — treat as empty capture.
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = &output.stderr;
         if stderr.contains("can't find session") || stderr.contains("no server running") {
             return Ok(Vec::new());
         }
         Err(BosunError::Tmux(format!(
-            "capture-pane {} failed ({}): {}",
+            "capture-pane {} failed: {}",
             session,
-            output.status,
             stderr.trim()
         )))
     }
@@ -352,25 +514,28 @@ impl TmuxClient for TokioTmuxClient {
         // `[env]` entry can't override it. `new-session -e` needs
         // tmux 3.2+. Restart-in-place reuses this shell, so the
         // variables carry over without being set again.
-        let mut cmd = self.cmd();
-        cmd.arg("new-session").arg("-d").arg("-s").arg(&spec.name);
+        let env_pairs: Vec<String> = spec
+            .env
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        let mut args: Vec<&str> = vec!["new-session", "-d", "-s", &spec.name];
         if !spec.path.is_empty() {
-            cmd.arg("-c").arg(&spec.path);
+            args.push("-c");
+            args.push(&spec.path);
         }
-        for (key, value) in &spec.env {
-            cmd.arg("-e").arg(format!("{key}={value}"));
+        for pair in &env_pairs {
+            args.push("-e");
+            args.push(pair);
         }
-        cmd.arg("-e").arg("BOSUN=1");
-        let output = cmd.output().await.map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => BosunError::TmuxNotInstalled,
-            _ => BosunError::Io(e),
-        })?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        args.push("-e");
+        args.push("BOSUN=1");
+        let output = self.run(&args, Retry::Unsafe).await?;
+        if !output.success {
             return Err(BosunError::Tmux(format!(
                 "new-session -s {} failed: {}",
                 spec.name,
-                stderr.trim()
+                output.stderr.trim()
             )));
         }
 
@@ -379,14 +544,12 @@ impl TmuxClient for TokioTmuxClient {
         // server uses csi-u (the default is `xterm`), and modern agents
         // generally encode modified keys better with it. These are
         // *global* (`-g`) server options, but they only touch the
-        // `-L bosun` socket (`self.cmd()` carries it), so the user's
+        // `-L bosun` socket (`self.run` carries it), so the user's
         // default tmux is untouched, and they're harmless for
         // claude/codex. Best-effort — a failure just means the warning
         // may reappear. Idempotent, so re-running per create is fine.
         for (opt, val) in [("extended-keys", "on"), ("extended-keys-format", "csi-u")] {
-            let mut set = self.cmd();
-            set.arg("set-option").arg("-g").arg(opt).arg(val);
-            if let Err(e) = set.output().await {
+            if let Err(e) = self.run(&["set-option", "-g", opt, val], Retry::Safe).await {
                 tracing::warn!("set -g {} {}: {}", opt, val, e);
             }
         }
@@ -395,13 +558,8 @@ impl TmuxClient for TokioTmuxClient {
         // session via a per-session user option. Best-effort — if
         // this fails, the UI falls back to the internal name.
         if let Some(display) = &spec.display_name {
-            let mut set = self.cmd();
-            set.arg("set-option")
-                .arg("-t")
-                .arg(&spec.name)
-                .arg("@bosun_display")
-                .arg(display);
-            if let Err(e) = set.output().await {
+            let args = ["set-option", "-t", &spec.name, "@bosun_display", display];
+            if let Err(e) = self.run(&args, Retry::Safe).await {
                 tracing::warn!("set @bosun_display on {}: {}", spec.name, e);
             }
         }
@@ -412,13 +570,8 @@ impl TmuxClient for TokioTmuxClient {
         // this session.
         if let Some(meta) = &spec.metadata {
             for (key, value) in metadata_options(meta) {
-                let mut set = self.cmd();
-                set.arg("set-option")
-                    .arg("-t")
-                    .arg(&spec.name)
-                    .arg(key)
-                    .arg(&value);
-                if let Err(e) = set.output().await {
+                let args = ["set-option", "-t", &spec.name, key, &value];
+                if let Err(e) = self.run(&args, Retry::Safe).await {
                     tracing::warn!("set {} on {}: {}", key, spec.name, e);
                 }
             }
@@ -437,27 +590,17 @@ impl TmuxClient for TokioTmuxClient {
         //     the same call as `-l` would make it a literal "Enter"
         //     string instead of a newline.
         if !spec.command.is_empty() {
-            let mut literal = self.cmd();
-            literal
-                .arg("send-keys")
-                .arg("-l")
-                .arg("-t")
-                .arg(&spec.name)
-                .arg("--")
-                .arg(&spec.command);
-            if let Err(e) = literal.output().await {
+            let args = ["send-keys", "-l", "-t", &spec.name, "--", &spec.command];
+            if let Err(e) = self.run(&args, Retry::Unsafe).await {
                 tracing::warn!("send-keys -l to {}: {}", spec.name, e);
             }
 
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-            let mut enter = self.cmd();
-            enter
-                .arg("send-keys")
-                .arg("-t")
-                .arg(&spec.name)
-                .arg("Enter");
-            if let Err(e) = enter.output().await {
+            if let Err(e) = self
+                .run(&["send-keys", "-t", &spec.name, "Enter"], Retry::Unsafe)
+                .await
+            {
                 tracing::warn!("send-keys Enter to {}: {}", spec.name, e);
             }
         }
@@ -466,14 +609,14 @@ impl TmuxClient for TokioTmuxClient {
     }
 
     async fn kill_session(&self, session: &str) -> Result<()> {
-        let mut cmd = self.cmd();
-        cmd.arg("kill-session").arg("-t").arg(session);
-        let output = cmd.output().await.map_err(BosunError::Io)?;
-        if output.status.success() {
+        let output = self
+            .run(&["kill-session", "-t", session], Retry::Safe)
+            .await?;
+        if output.success {
             return Ok(());
         }
         // If the session is already gone, treat as idempotent success.
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = &output.stderr;
         if stderr.contains("can't find session") || stderr.contains("no server running") {
             return Ok(());
         }
@@ -485,21 +628,19 @@ impl TmuxClient for TokioTmuxClient {
     }
 
     async fn set_display_name(&self, session: &str, display: &str) -> Result<()> {
-        let mut cmd = self.cmd();
-        cmd.arg("set-option")
-            .arg("-t")
-            .arg(session)
-            .arg("@bosun_display")
-            .arg(display);
-        let output = cmd.output().await.map_err(BosunError::Io)?;
-        if output.status.success() {
+        let output = self
+            .run(
+                &["set-option", "-t", session, "@bosun_display", display],
+                Retry::Safe,
+            )
+            .await?;
+        if output.success {
             return Ok(());
         }
-        let stderr = String::from_utf8_lossy(&output.stderr);
         Err(BosunError::Tmux(format!(
             "set @bosun_display on {}: {}",
             session,
-            stderr.trim()
+            output.stderr.trim()
         )))
     }
 
@@ -517,19 +658,14 @@ impl TmuxClient for TokioTmuxClient {
             "#{{@bosun_display}}{SEP}#{{@bosun_path}}{SEP}#{{@bosun_agent}}{SEP}#{{@bosun_args}}{SEP}#{{@bosun_claude_session_mode}}{SEP}#{{@bosun_claude_skip_permissions}}{SEP}#{{@bosun_codex_yolo}}{SEP}#{{@bosun_container_id}}{SEP}#{{@bosun_worktree_path}}{SEP}#{{@bosun_branch}}{SEP}#{{@bosun_kimi_session_mode}}{SEP}#{{@bosun_kimi_yolo}}{SEP}#{{@bosun_codex_session_mode}}{SEP}#{{@bosun_opencode_session_mode}}{SEP}#{{@bosun_opencode_auto}}{SEP}#{{@bosun_qwen_session_mode}}{SEP}#{{@bosun_qwen_yolo}}{SEP}#{{@bosun_claude_remote_control}}",
             SEP = SEP
         );
-        let mut cmd = self.cmd();
-        cmd.arg("display-message")
-            .arg("-p")
-            .arg("-t")
-            .arg(session)
-            .arg(&fmt);
-        let output = cmd.output().await.map_err(BosunError::Io)?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        let output = self
+            .run(&["display-message", "-p", "-t", session, &fmt], Retry::Safe)
+            .await?;
+        if !output.success {
             return Err(BosunError::Tmux(format!(
                 "display-message on {}: {}",
                 session,
-                stderr.trim()
+                output.stderr.trim()
             )));
         }
 
@@ -547,20 +683,15 @@ impl TmuxClient for TokioTmuxClient {
         // — partial-update state is rare enough (it would mean
         // tmux died mid-call) that we'd rather fail loudly.
         for (key, value) in metadata_options(metadata) {
-            let mut cmd = self.cmd();
-            cmd.arg("set-option")
-                .arg("-t")
-                .arg(session)
-                .arg(key)
-                .arg(&value);
-            let output = cmd.output().await.map_err(BosunError::Io)?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
+            let output = self
+                .run(&["set-option", "-t", session, key, &value], Retry::Safe)
+                .await?;
+            if !output.success {
                 return Err(BosunError::Tmux(format!(
                     "set {} on {}: {}",
                     key,
                     session,
-                    stderr.trim()
+                    output.stderr.trim()
                 )));
             }
         }
@@ -602,19 +733,6 @@ impl TmuxClient for TokioTmuxClient {
         use std::time::Duration;
         use tokio::time::Instant;
 
-        let send_keys = |args: Vec<&str>| {
-            let mut c = self.cmd();
-            c.arg("send-keys").arg("-t").arg(session);
-            for a in args {
-                c.arg(a);
-            }
-            async move {
-                if let Err(e) = c.output().await {
-                    tracing::warn!("restart_in_place send-keys to {}: {}", session, e);
-                }
-            }
-        };
-
         // ── Phase 1: kill the running agent, wait for shell ──────────
         // Only send the interrupting C-c when there's actually a live
         // agent to stop (`kill_first`). The deferred launch path types
@@ -623,7 +741,7 @@ impl TmuxClient for TokioTmuxClient {
         // half-built, so late-appended tool dirs (e.g. `~/.kimi-code/bin`)
         // go missing and the agent binary isn't found. See the trait doc.
         if kill_first {
-            send_keys(vec!["C-c"]).await;
+            self.send_keys_logged(session, &["C-c"]).await;
         }
         let kill_deadline = Instant::now() + Duration::from_millis(3500);
         let mut next_cc = Instant::now() + Duration::from_millis(250);
@@ -648,7 +766,7 @@ impl TmuxClient for TokioTmuxClient {
                 break;
             }
             if kill_first && Instant::now() >= next_cc {
-                send_keys(vec!["C-c"]).await;
+                self.send_keys_logged(session, &["C-c"]).await;
                 next_cc = Instant::now() + Duration::from_millis(400);
             }
         }
@@ -673,7 +791,7 @@ impl TmuxClient for TokioTmuxClient {
         // deferral's bare *stop* call only kills the agent and must not
         // touch the line at all (the matching launch call preps).
         if prep_line {
-            send_keys(vec!["C-u"]).await;
+            self.send_keys_logged(session, &["C-u"]).await;
             tokio::time::sleep(Duration::from_millis(160)).await;
         }
 
@@ -724,19 +842,12 @@ impl TmuxClient for TokioTmuxClient {
                     LAUNCH_ATTEMPTS
                 );
                 // Clear any half-entered residue before re-sending.
-                send_keys(vec!["C-u"]).await;
+                self.send_keys_logged(session, &["C-u"]).await;
                 tokio::time::sleep(Duration::from_millis(150)).await;
             }
 
-            let mut literal = self.cmd();
-            literal
-                .arg("send-keys")
-                .arg("-l")
-                .arg("-t")
-                .arg(session)
-                .arg("--")
-                .arg(&atomic);
-            if let Err(e) = literal.output().await {
+            let args = ["send-keys", "-l", "-t", session, "--", &atomic];
+            if let Err(e) = self.run(&args, Retry::Unsafe).await {
                 tracing::warn!("restart_in_place send-keys -l to {}: {}", session, e);
             }
 
@@ -781,7 +892,7 @@ impl TmuxClient for TokioTmuxClient {
         if agent_up {
             // Let the TUI claim the alt-screen before nudging it.
             tokio::time::sleep(Duration::from_millis(250)).await;
-            send_keys(vec!["C-l"]).await;
+            self.send_keys_logged(session, &["C-l"]).await;
         }
 
         Ok(())
