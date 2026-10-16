@@ -89,6 +89,34 @@ final class TerminalPool {
         }
     }
 
+    /// The pooled view whose tmux client is on terminal `tty`, if it's one of ours and still running.
+    func view(onTTY tty: String) -> TerminalView? {
+        views.values.first { !$0.exited && !$0.detaching && $0.ttyName == tty }
+    }
+
+    /// The view for `old` now shows `new` (its tmux client was moved there inside the terminal):
+    /// key it by `new`, and detach any other view of `new`, since a session has one view.
+    func rekey(_ old: String, to new: String) {
+        guard old != new, let v = views.removeValue(forKey: old) else { return }
+        if let other = views.removeValue(forKey: new) {
+            lru.removeAll { $0 == new }
+            ignoringSize.remove(new)
+            other.detachThenFree(socket: tmuxSocket)
+        }
+        v.session = new
+        views[new] = v
+        lru = lru.map { $0 == old ? new : $0 }
+        if ignoringSize.remove(old) != nil { ignoringSize.insert(new) }
+    }
+
+    /// Put the tmux client on `tty` back on `session`.
+    func moveClient(_ tty: String, to session: String) {
+        let socket = tmuxSocket
+        DispatchQueue.global(qos: .userInitiated).async {
+            TmuxCLI.run(socket: socket, ["switch-client", "-c", tty, "-t", "=\(session)"])
+        }
+    }
+
     func hide(_ session: String) {
         guard let v = views[session] else { return }
         v.isHidden = true

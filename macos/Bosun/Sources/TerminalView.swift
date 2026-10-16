@@ -6,7 +6,9 @@ import GhosttyKit
 /// The only class that talks to libghostty per terminal: one `ghostty_surface_t` running `tmux attach` for one session.
 /// Keyboard and IME handling is a trimmed port of Ghostty's own SurfaceView_AppKit.swift.
 final class TerminalView: NSView, @preconcurrency NSTextInputClient {
-    let session: String
+    /// The session this view's tmux client is on. Changes only when the client is moved inside the
+    /// terminal and the app follows it (`TerminalPool.rekey`).
+    var session: String
     private(set) var surface: ghostty_surface_t?
     var cellSize = CGSize(width: 8, height: 16)
 

@@ -38,6 +38,7 @@ final class Workspace {
     var activeTerminal: TerminalView? { activeSession.flatMap { pool.view(for: $0) }.flatMap { $0.exited ? nil : $0 } }
     var visibleSessions: Set<String> { layout.visibleSessions }
     var tileRects: [TileID: CGRect] { lastLayout.tiles }
+    func headerSession(_ tile: TileID) -> String? { chrome[tile]?.headerSession }
 
     func terminal(in tile: TileID) -> TerminalView? {
         layout.session(in: tile).flatMap { pool.view(for: $0) }
@@ -155,9 +156,52 @@ final class Workspace {
         if let v = pool.view(for: session) { pool.drop(session); _ = v }
         if layout.tile(showing: session) != nil, app.isAlive(session) {
             // Still alive (detached by someone else): attach again.
-            if let t = layout.tile(showing: session) { attachVisible(session, in: t) }
+            if let t = layout.tile(showing: session) {
+                attachVisible(session, in: t)
+                // The old view had the keyboard; the new one takes it over.
+                if t == layout.active { focusActiveTerminal() }
+            }
         }
         syncChrome()
+    }
+
+    /// The daemon saw the tmux client on `tty` move to `target` (nil: it detached). Bosun's tmux
+    /// bindings for the TUI (prefix 1-9, `switch-client`), or tmux's own, typed inside a terminal
+    /// can do that, and the tile must never show one session while its header and the sidebar
+    /// name another.
+    func clientMoved(tty: String, to target: String?) {
+        guard let v = pool.view(onTTY: tty) else { return }  // not one of ours, or already going away
+        let session = v.session
+        // A detach also ends the `tmux attach` in the view, and `terminalExited` attaches it again
+        // (or leaves the tile to pick a session if the session ended). Attaches and `make_latest`
+        // report the session the client is already on.
+        guard let target, target != session else { return }
+        guard let tile = layout.tile(showing: session) else {
+            // A hidden pooled view: nobody is looking at it, so it goes back where it belongs.
+            log.info("pooled client \(tty, privacy: .public) moved to \(target, privacy: .public); moving it back")
+            pool.moveClient(tty, to: session)
+            return
+        }
+        if let other = layout.tile(showing: target) {
+            // One tile per session: put this client back and show the tile that has `target`.
+            pool.moveClient(tty, to: session)
+            activate(other)
+            return
+        }
+        guard app.isAlive(target) else {
+            // Not a session Bosun shows (another tool's, or the monitor): back where it was.
+            pool.moveClient(tty, to: session)
+            return
+        }
+        // The tile now shows `target` through the same view, and everything else follows.
+        log.info("client \(tty, privacy: .public) moved from \(session, privacy: .public) to \(target, privacy: .public); following it")
+        pool.rekey(session, to: target)
+        _ = layout.assign(target, to: tile)
+        pool.evict(keeping: visibleSessions)
+        syncChrome()
+        app.rememberActiveTab(target)
+        app.workspaceChanged()
+        save()
     }
 
     /// The daemon's session list changed: refresh chrome, and drop views for sessions that are gone.
@@ -412,6 +456,8 @@ final class TileChromeView: NSView {
     private var placeholder: PlaceholderView?
     private(set) var isActive = false
     private var session: String?
+    /// The session the header names (for the test modes).
+    var headerSession: String? { session }
 
     override var isFlipped: Bool { true }
 

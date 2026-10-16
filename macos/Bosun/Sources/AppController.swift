@@ -293,6 +293,11 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     /// Show a session in the active tile (or activate the tile that has it), and remember it as its row's active tab.
     func show(_ session: String) {
         workspace.show(session)
+        rememberActiveTab(session)
+    }
+
+    /// Make `session` its row's shown tab, as the TUI does when you switch to a tab.
+    func rememberActiveTab(_ session: String) {
         var sb = daemon.state.sidebar
         if let c = sb.container(holding: session), c.tabs.count > 1, sb.setActive(session) {
             daemon.saveSidebar(sb)
@@ -399,6 +404,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                         self.root.band.replaceNote(shown, with: self.readableNotice(m))
                     }
                 }
+            case .client(let tty, let session):
+                workspace.clientMoved(tty: tty, to: session)
             case .recents, .config, .themes:
                 break
             }

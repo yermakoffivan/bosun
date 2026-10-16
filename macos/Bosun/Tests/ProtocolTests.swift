@@ -64,6 +64,10 @@ final class ProtocolTests: XCTestCase {
                        .sessions(seq: 3, upsert: [], removed: ["bosun-old-0f0f0f0f"]))
         XCTAssertEqual(try decode(#"{"t":"notice","seq":10,"message":"created bosun-api-1a2b3c4d"}"#),
                        .notice(seq: 10, "created bosun-api-1a2b3c4d"))
+        XCTAssertEqual(try decode(#"{"t":"client_session","seq":11,"tty":"/dev/ttys026","session":"bosun-api-1a2b3c4d"}"#),
+                       .client(seq: 11, tty: "/dev/ttys026", session: "bosun-api-1a2b3c4d"))
+        XCTAssertEqual(try decode(#"{"t":"client_detached","seq":12,"tty":"/dev/ttys026"}"#),
+                       .client(seq: 12, tty: "/dev/ttys026", session: nil))
         if case .themes(let q, let t) = try decode(#"{"t":"themes","seq":9,"themes":[{"name":"nord","source":"bundled"}]}"#) {
             XCTAssertEqual(q, 9)
             XCTAssertEqual(t.first?.name, "nord")
@@ -179,7 +183,11 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(st.apply(try decode(#"{"t":"notice","seq":5,"message":"x"}"#)), .gap(expected: 4, got: 5))
         // An unknown kind still advances seq.
         XCTAssertEqual(st.apply(try decode(#"{"t":"wobble","seq":4}"#)), .applied([]))
-        XCTAssertEqual(st.apply(try decode(##"{"t":"theme","seq":5,"theme":{"name":"nord","bg":"#000000","panel":"#111111","panel_alt":"#222222","selection_bg":"#333333","text":"#ffffff","text_muted":"#888888","accent":"#88c0d0","shadow":"#000000","dim_fg":"#444444","status_running":"#00ff00","status_waiting":"#ffff00","status_idle":"#888888","status_error":"#ff0000","status_done":"#0000ff"}}"##)), .applied([.theme]))
+        XCTAssertEqual(st.apply(try decode(#"{"t":"client_session","seq":5,"tty":"/dev/ttys026","session":"bosun-new-1"}"#)),
+                       .applied([.client(tty: "/dev/ttys026", session: "bosun-new-1")]))
+        XCTAssertEqual(st.apply(try decode(#"{"t":"client_detached","seq":6,"tty":"/dev/ttys026"}"#)),
+                       .applied([.client(tty: "/dev/ttys026", session: nil)]))
+        XCTAssertEqual(st.apply(try decode(##"{"t":"theme","seq":7,"theme":{"name":"nord","bg":"#000000","panel":"#111111","panel_alt":"#222222","selection_bg":"#333333","text":"#ffffff","text_muted":"#888888","accent":"#88c0d0","shadow":"#000000","dim_fg":"#444444","status_running":"#00ff00","status_waiting":"#ffff00","status_idle":"#888888","status_error":"#ff0000","status_done":"#0000ff"}}"##)), .applied([.theme]))
         XCTAssertEqual(st.theme.bg, "#000000")
         // The cache round-trips, and a cached snapshot is never live.
         let snap = try XCTUnwrap(st.snapshot())

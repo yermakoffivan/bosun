@@ -27,6 +27,8 @@ public struct BosunState: Sendable {
         case themes
         case keybindings
         case notice(String)
+        /// A tmux client moved to `session`, or detached (nil). See `ServerMessage.client`.
+        case client(tty: String, session: String?)
     }
 
     public enum ApplyResult: Equatable, Sendable {
@@ -100,6 +102,8 @@ public struct BosunState: Sendable {
             return .applied([.keybindings])
         case .notice(_, let m):
             return .applied([.notice(m)])
+        case .client(_, let tty, let session):
+            return .applied([.client(tty: tty, session: session)])
         default:
             return .applied([])
         }

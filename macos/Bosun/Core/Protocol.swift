@@ -559,6 +559,8 @@ public enum ServerMessage: Equatable, Sendable {
     case themes(seq: UInt64, [ThemeEntry])
     case keybindings(seq: UInt64, KeyBindingsWire)
     case notice(seq: UInt64, String)
+    /// The tmux client on `tty` is now on `session` (nil: it detached). An event, not state.
+    case client(seq: UInt64, tty: String, session: String?)
     case ack(Ack)
     case error(code: String, message: String)
     /// A kind this client doesn't know. Its `seq` still counts.
@@ -568,7 +570,7 @@ public enum ServerMessage: Equatable, Sendable {
         switch self {
         case .snapshot(let s): s.seq
         case .sessions(let q, _, _), .status(let q, _, _), .sidebar(let q, _), .recents(let q, _), .config(let q, _),
-             .theme(let q, _), .themes(let q, _), .keybindings(let q, _), .notice(let q, _): q
+             .theme(let q, _), .themes(let q, _), .keybindings(let q, _), .notice(let q, _), .client(let q, _, _): q
         case .ack, .error: nil
         case .unknown(_, let q): q
         }
@@ -600,6 +602,11 @@ public enum ServerMessage: Equatable, Sendable {
             value = try c.decode(T.self, forKey: AnyKey(key))
         }
         static var fieldKey: CodingUserInfoKey { CodingUserInfoKey(rawValue: "bosun.field")! }
+    }
+    private struct ClientBody: Decodable {
+        let seq: UInt64
+        let tty: String
+        let session: String?
     }
     private struct ErrorBody: Decodable {
         let code: String
@@ -645,6 +652,9 @@ public enum ServerMessage: Equatable, Sendable {
         case "notice":
             let (q, v) = try field(String.self, "message")
             return .notice(seq: q, v)
+        case "client_session", "client_detached":
+            let b = try plain.decode(ClientBody.self, from: data)
+            return .client(seq: b.seq, tty: b.tty, session: head.t == "client_session" ? b.session : nil)
         case "ack":
             return .ack(try plain.decode(Ack.self, from: data))
         case "error":
