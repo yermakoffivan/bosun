@@ -75,7 +75,9 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
                     MainActor.assumeIsolated {
                         guard let self else { return }
                         self.contentsCount += 1
+                        self.lastFrameAt = CACurrentMediaTime()
                         if debugFrames { print(String(format: "frame %.3f %@", CACurrentMediaTime(), self.session)) }
+                        self.checkUnfocusedBlink()
                         self.onContents?(self)
                     }
                 }
@@ -377,8 +379,89 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
         guard let surface, f != hasTerminalFocus else { return }
         hasTerminalFocus = f
         lastFocusSent = CACurrentMediaTime()
+        unfocusedFrames.removeAll()
         if debugFrames { print(String(format: "focus %.3f %@ %@", CACurrentMediaTime(), session, f ? "true" : "false")) }
         ghostty_surface_set_focus(surface, f)
+        if f { scheduleBlinkCheck(tries: 3) }
+    }
+
+    // MARK: Blink guard
+    //
+    // libghostty's renderer thread can still lose a focus change's effect on the blink timer, even
+    // with the spacing above. A focus-out read in the same batch as a cursor-blink reset (sent on
+    // pty output, so whenever tmux redraws a pane that is losing focus, as on a split) sees the
+    // reset's cancel in flight and doesn't cancel the timer: the pane goes on drawing a frame every
+    // 600 ms while unfocused. A focus-in that lands while a cancel is in flight leaves a focused pane
+    // that never blinks. The timer can't be read from outside, but its frames can: the guards below
+    // watch for both and give libghostty the focus change again.
+
+    /// libghostty's cursor blink interval (CURSOR_BLINK_INTERVAL in renderer/Thread.zig).
+    static let blinkInterval: CFTimeInterval = 0.6
+    private var lastFrameAt: CFTimeInterval = 0
+    /// Recent frame times while this terminal is unfocused and drawing.
+    private var unfocusedFrames: [CFTimeInterval] = []
+    /// How many times the guards gave libghostty a focus change again (for the test modes).
+    private(set) var blinkRepairs = 0
+
+    /// Unfocused, yet drawing at exactly the blink interval: the timer survived the focus-out.
+    private func checkUnfocusedBlink() {
+        guard let surface, !hasTerminalFocus, !focusApplyPending, rendererVisible else { unfocusedFrames.removeAll(); return }
+        unfocusedFrames.append(lastFrameAt)
+        if unfocusedFrames.count > 4 { unfocusedFrames.removeFirst() }
+        guard unfocusedFrames.count == 4 else { return }
+        let gaps = zip(unfocusedFrames.dropFirst(), unfocusedFrames).map { $0 - $1 }
+        guard gaps.allSatisfy({ abs($0 - TerminalView.blinkInterval) < 0.06 }) else { return }
+        unfocusedFrames.removeAll()
+        blinkRepairs += 1
+        if debugFrames { print(String(format: "blinkguard %.3f %@ unfocused but blinking", CACurrentMediaTime(), session)) }
+        // In, then out: the focus-in finds the timer running and leaves it, the focus-out cancels it.
+        ghostty_surface_set_focus(surface, true)
+        ghostty_surface_set_focus(surface, false)
+        lastFocusSent = CACurrentMediaTime()
+    }
+
+    /// Test modes: put libghostty in the states the guards are for. `blinkingUnfocused` gives it focus
+    /// behind the app's back (its timer runs while the app says unfocused); otherwise a focus-out and
+    /// focus-in back to back, which libghostty reads in one batch and leaves the timer cancelled.
+    func breakBlinkForTest(blinkingUnfocused: Bool) {
+        guard let surface else { return }
+        if blinkingUnfocused {
+            ghostty_surface_set_focus(surface, true)
+        } else {
+            ghostty_surface_set_focus(surface, false)
+            ghostty_surface_set_focus(surface, true)
+            scheduleBlinkCheck(tries: 3)
+        }
+    }
+
+    /// A focused, visible terminal draws at least every blink interval. If it hasn't since shortly
+    /// after the focus-in, its timer never started: go out and back in, spaced.
+    private func scheduleBlinkCheck(tries: Int) {
+        let since = CACurrentMediaTime()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5 * TerminalView.blinkInterval) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, let surface = self.surface, self.hasTerminalFocus, !self.focusApplyPending, self.rendererVisible,
+                      self.lastFrameAt < since + 0.2 else { return }
+                self.blinkRepairs += 1
+                if debugFrames { print(String(format: "blinkguard %.3f %@ focused but not blinking", CACurrentMediaTime(), self.session)) }
+                ghostty_surface_set_focus(surface, false)
+                self.focusApplyPending = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + TerminalView.focusSpacing) { [weak self] in
+                    MainActor.assumeIsolated {
+                        guard let self, let surface = self.surface else { return }
+                        self.focusApplyPending = false
+                        self.lastFocusSent = CACurrentMediaTime()
+                        // The wanted focus may have changed meanwhile; libghostty still thinks it's out.
+                        let f = self.isResponder && self.windowKey
+                        self.hasTerminalFocus = f
+                        if f {
+                            ghostty_surface_set_focus(surface, true)
+                            if tries > 1 { self.scheduleBlinkCheck(tries: tries - 1) }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // MARK: Edit menu

@@ -24,7 +24,7 @@ final class Workspace {
     static let headerHeight: CGFloat = 26
     static let gap: CGFloat = 1
     static let inset: CGFloat = 5
-    private var windowKey = true
+    private(set) var windowKey = true
     private var dropTile: TileID?
     /// A pane being dragged by its header, and where it would land (see `tileDragMoved`).
     private var tileDrag: (tile: TileID, target: TileID?, zone: TileDropZone?)?
@@ -439,6 +439,7 @@ final class Workspace {
             return
         }
         let changed = tile != layout.active
+        if debugFrames, changed { print(String(format: "activate %.3f %@", CACurrentMediaTime(), tile)) }
         rows[id]?.activate(tile)
         app.focus.activate(tile)
         if changed {

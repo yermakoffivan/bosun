@@ -736,6 +736,8 @@ final class FocusTest: TestKit {
         // Nothing above may have left a tmux client on another session than its view says.
         let drift = await driftedClients()
         r.check("every terminal's tmux client is still on its own session", drift.isEmpty, drift.joined(separator: ", "))
+        await sleep(200)
+        checkFocusCount()
 
         r.say("")
         r.say("\(r.failures == 0 ? "ALL PASSED" : "\(r.failures) FAILED")")
@@ -1331,6 +1333,8 @@ final class SelfTest: TestKit {
                 }
             }
             stats("divider drag: layout per step", steps, budget: 0.0083)
+
+            await rapidSwitching(all)
         }
 
         // Idle CPU with four panes of quiet sessions (the web row plus a terminal tab), then with the
@@ -1358,6 +1362,18 @@ final class SelfTest: TestKit {
             }
             let hiddenFrames = ws.pool.views.filter { !ws.layout.contains($0.key) }.reduce(0) { $0 + $1.value.contentsCount - (frames0[$1.key] ?? 0) }
             r.say("  frames drawn in that window: \(drew.joined(separator: ", ")); hidden views: \(hiddenFrames)")
+            // Only the active pane of a key window blinks (a frame every 600 ms, about 33 in 20 s);
+            // the others draw only for tmux's own redraws (Bosun's daemon re-asserts its bindings every 30 s).
+            let active = ws.activeTerminal
+            let blinking = ws.layout.panes.compactMap { ws.pool.view(for: $0) }.filter { v in
+                v !== active && v.contentsCount - (frames0[v.session] ?? 0) > 10
+            }
+            r.check("…no pane but the active one blinks", blinking.isEmpty, blinking.map { app.displayName($0.session) }.joined(separator: ", "))
+            if app.windowIsKey, ws.windowKey, let active {
+                let n = active.contentsCount - (frames0[active.session] ?? 0)
+                r.check("…and the active pane does (a frame per blink)", n >= 25, "\(n) frames")
+            }
+            checkFocusCount()
         }
         await idle(" (quiet sessions)")
         // The same with the window not key (another app in front): the active pane stops blinking too.
@@ -1400,8 +1416,71 @@ final class SelfTest: TestKit {
         }
         stats("launch -> sidebar painted (cached snapshot)", sidebarT, budget: 0.300)
         stats("launch -> first live terminal", terminalT, budget: 0.500)
+        r.say("")
+        checkFocusCount()
         r.save()
         r.say("saved \(r.path)")
+    }
+}
+
+extension SelfTest {
+    /// Panes and rows switched faster than libghostty's renderer settles focus: afterwards the
+    /// active pane is the only one libghostty thinks is focused, it blinks, and nothing else does.
+    func rapidSwitching(_ all: [String]) async {
+        guard let web = session("web"), let webRow = rowID(web) else { return }
+        await showRow(web)
+        let panes = ws.layout.panes
+        let repairs0 = ws.pool.views.values.reduce(0) { $0 + $1.blinkRepairs }
+        for i in 0..<80 {
+            switch i % 6 {
+            case 4: ws.show(all[(i / 6) % min(4, all.count)])
+            case 5: ws.selectRow(webRow)
+            default: ws.activate(panes[(i * 7) % panes.count])
+            }
+            await sleep([0, 5, 20, 45, 70, 110][i % 6])
+        }
+        ws.selectRow(webRow)
+        ws.activate(panes[1 % panes.count])
+        await sleep(2500)
+        let f0 = Dictionary(uniqueKeysWithValues: ws.pool.views.map { ($0.key, $0.value.contentsCount) })
+        await sleep(4200)
+        let active = ws.activeTerminal
+        var bad: [String] = []
+        for v in panes.compactMap({ ws.pool.view(for: $0) }) {
+            let n = v.contentsCount - (f0[v.session] ?? 0)
+            if v === active, n < 6 { bad.append("\(app.displayName(v.session)) is active and drew \(n)") }
+            if v !== active, n > 5 { bad.append("\(app.displayName(v.session)) isn't active and drew \(n)") }
+        }
+        let repairs = ws.pool.views.values.reduce(0) { $0 + $1.blinkRepairs } - repairs0
+        r.say("")
+        r.check("rapid pane and row switching (80 in about 4 s): only the active pane blinks", bad.isEmpty, bad.joined(separator: "; "))
+        r.say("  blink guard repairs during it: \(repairs)")
+        checkFocusCount()
+
+        // The guards themselves: libghostty put in each broken state on purpose, then left alone.
+        if let active, let other = panes.compactMap({ ws.pool.view(for: $0) }).first(where: { $0 !== active }) {
+            let a0 = active.blinkRepairs, o0 = other.blinkRepairs
+            other.breakBlinkForTest(blinkingUnfocused: true)
+            active.breakBlinkForTest(blinkingUnfocused: false)
+            await sleep(4000)
+            let fa = active.contentsCount, fo = other.contentsCount
+            await sleep(3000)
+            r.check("blink guard: a pane blinking without focus is stopped", other.blinkRepairs > o0 && other.contentsCount - fo <= 2,
+                    "\(other.blinkRepairs - o0) repairs, \(other.contentsCount - fo) frames in 3 s")
+            r.check("blink guard: a focused pane that stopped blinking blinks again",
+                    active.contentsCount - fa >= 4, "\(active.blinkRepairs - a0) repairs, \(active.contentsCount - fa) frames in 3 s")
+            checkFocusCount()
+        }
+    }
+}
+
+extension TestKit {
+    /// libghostty is told a terminal has focus only for the active pane of a key window.
+    func checkFocusCount() {
+        let focused = ws.pool.views.values.filter(\.hasTerminalFocus)
+        let names = focused.map { app.displayName($0.session) }.joined(separator: ", ")
+        r.check("terminals libghostty thinks are focused: \(focused.count) (at most 1)", focused.count <= 1
+                && focused.allSatisfy { $0 === ws.activeTerminal }, names)
     }
 }
 
