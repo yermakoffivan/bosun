@@ -132,10 +132,16 @@ impl Store {
     }
 }
 
-fn default_db_path() -> Result<PathBuf> {
+/// Bosun's per-user data directory: where `bosun.db` lives, and the
+/// `bosun serve` socket and lock file next to it.
+pub fn data_dir() -> Result<PathBuf> {
     let dirs = directories::ProjectDirs::from("dev", "yetidevworks", "bosun")
         .ok_or_else(|| BosunError::Store("could not determine user data directory".to_string()))?;
-    Ok(dirs.data_dir().join("bosun.db"))
+    Ok(dirs.data_dir().to_path_buf())
+}
+
+fn default_db_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("bosun.db"))
 }
 
 pub(crate) fn map_sql_err(e: rusqlite::Error) -> BosunError {

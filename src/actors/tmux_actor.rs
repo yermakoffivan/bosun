@@ -808,6 +808,9 @@ pub fn spawn(
                     // intercept path is broken.
                     tracing::warn!("tmux_actor received UI-only command — should be intercepted by app");
                 }
+                        Command::Barrier(id) => {
+                            let _ = evt_tx.send(AppMsg::CommandDone(id));
+                        }
                         Command::Shutdown => break,
                     }
                 }

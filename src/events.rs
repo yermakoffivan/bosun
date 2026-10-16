@@ -302,6 +302,13 @@ pub enum Command {
     /// The reducer pre-resolves both fields so the loop just calls
     /// `Command::new(...).spawn()`.
     OpenEditor { editor: String, path: String },
+    /// Ordering marker from `bosun serve`. The actor runs commands one
+    /// at a time, so when it reaches this it has finished everything
+    /// queued before it, and it answers with `AppMsg::CommandDone`
+    /// carrying the same id. The daemon uses it to know when a
+    /// forwarded command is done (and which warnings it produced) so
+    /// it can acknowledge the client. The TUI never sends it.
+    Barrier(u64),
     /// Graceful shutdown signal.
     #[allow(dead_code)]
     Shutdown,
@@ -423,4 +430,8 @@ pub enum AppMsg {
     /// echo a terminal emits when focus reporting is re-enabled), so
     /// recovery runs once instead of looping. See `App::has_focus`.
     FocusLost,
+    /// Reply to `Command::Barrier`: every command queued before the
+    /// barrier with this id has finished. Only `bosun serve` sends
+    /// barriers, so the TUI never sees this.
+    CommandDone(u64),
 }
