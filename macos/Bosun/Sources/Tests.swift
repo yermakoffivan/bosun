@@ -571,6 +571,8 @@ final class FocusTest: TestKit {
         r.check("create (deferred launch) shows the new session", temp != nil && ws.activeSession == temp)
         if let temp {
             r.check("the agent launches once the terminal is attached", await paneShows(temp, "fake agent · temp", timeout: 6))
+            let note = app.noticeText
+            r.check("the created notice uses the display name (\(note))", !note.contains(temp) && note.contains("temp-focus"))
             app.daemon.command(.kill(session: temp))
             await waitUntil(5) { !app.isAlive(temp) }
             r.check("kill ends the session", !app.isAlive(temp))
@@ -722,17 +724,31 @@ final class SelfTest: TestKit {
         }
         stats("divider drag: layout per step", steps, budget: 0.0083)
 
-        // Idle CPU with 4 tiles.
+        // Idle CPU with 4 tiles of quiet sessions, then with the ticker (one line a second) in one of them.
         ws.split(.vertical)
         ws.activate(ws.layout.tiles[0])
         ws.split(.vertical)
+        let ticker = session("ticker")
+        let quiet = all.filter { $0 != ticker }
+        for (tile, s) in zip(ws.layout.tiles, quiet) { ws.show(s, in: tile, focus: false) }
         await waitUntil(3) { ws.layout.tiles.allSatisfy { ws.terminal(in: $0)?.hasPaintedContent == true } }
-        await sleep(2000)
-        let c0 = cpuSeconds(), t0 = Date()
-        await sleep(20_000)
-        let pct = (cpuSeconds() - c0) / Date().timeIntervalSince(t0) * 100
-        r.say(String(format: "idle CPU, %d tiles, %d views attached: %.2f%% of one core over 20 s   budget 0.5%%: %@",
-                     ws.layout.count, ws.pool.views.count, pct, pct <= 0.5 ? "met" : "MISSED"))
+        func idle(_ label: String) async {
+            await sleep(2000)
+            let c0 = cpuSeconds(), t0 = Date()
+            await sleep(20_000)
+            let pct = (cpuSeconds() - c0) / Date().timeIntervalSince(t0) * 100
+            r.say(String(format: "idle CPU, %d tiles%@, %d views attached: %.2f%% of one core over 20 s   budget 0.5%%: %@",
+                         ws.layout.count, label, ws.pool.views.count, pct, pct <= 0.5 ? "met" : "MISSED"))
+        }
+        await idle(" (quiet sessions)")
+        if let ticker, let last = ws.layout.tiles.last {
+            ws.show(ticker, in: last, focus: false)
+            await waitUntil(3) { ws.terminal(in: last)?.hasPaintedContent == true }
+            let c0 = cpuSeconds(), t0 = Date()
+            await sleep(10_000)
+            let pct = (cpuSeconds() - c0) / Date().timeIntervalSince(t0) * 100
+            r.say(String(format: "CPU with one tile printing a line a second: %.2f%% of one core over 10 s (no budget; for comparison)", pct))
+        }
         r.say(String(format: "memory footprint: %.0f MB with %d terminal views", physFootprintMB(), ws.pool.views.count))
         for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
 
@@ -772,12 +788,21 @@ final class LaunchProbe {
     init(app: AppController) { self.app = app }
 
     func run() {
+        app.enableTestKey()
         app.onFirstTerminal = { [app] in
             print("launchprobe \(app.sidebarPaintedAt ?? -1) \(app.firstTerminalAt ?? -1)")
             fflush(stdout)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { NSApp.terminate(nil) }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { NSApp.terminate(nil) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [app] in
+            let ws: Workspace = app.workspace
+            let views = ws.pool.views.map { s, v in
+                "\(s) contents=\(v.contentsCount) painted=\(v.hasPaintedContent) hidden=\(v.isHidden) text=\(v.viewportText().prefix(60).debugDescription)"
+            }
+            print("launchprobe timeout status=\(app.daemon.status) tiles=\(ws.layout.count) visible=\(ws.visibleSessions) views=\(views)")
+            fflush(stdout)
+            NSApp.terminate(nil)
+        }
     }
 }
 
