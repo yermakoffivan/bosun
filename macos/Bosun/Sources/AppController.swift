@@ -719,24 +719,43 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     private func presentForm(_ model: NewSessionModel, onSubmit: @escaping (Spec) -> Void) {
         closePalette()
-        let sheet = NSWindow(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false)
+        let form = NewSessionFormView(model: model)
+        let sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: NewSessionFormView.width, height: form.fittingHeight),
+                             styleMask: [.titled], backing: .buffered, defer: false)
         let close = { [weak self, weak sheet] in
             guard let self, let sheet else { return }
             self.window.endSheet(sheet)
         }
-        let form = NewSessionForm(model: model, onSubmit: { spec in close(); onSubmit(spec) }, onCancel: { close() })
-        let host = NSHostingController(rootView: form)
-        sheet.contentViewController = host
+        form.onSubmit = { spec in close(); onSubmit(spec) }
+        form.onCancel = { close() }
+        // The sheet's width is fixed; only its height follows the rows the form shows.
+        form.onHeightChange = { [weak sheet, weak form] in
+            guard let sheet, let form else { return }
+            let h = form.fittingHeight
+            if abs(sheet.contentLayoutRect.height - h) > 0.5 {
+                sheet.setContentSize(NSSize(width: NewSessionFormView.width, height: h))
+            }
+        }
+        sheet.contentView = form
+        sheet.contentMinSize = NSSize(width: NewSessionFormView.width, height: 120)
+        sheet.contentMaxSize = NSSize(width: NewSessionFormView.width, height: 4000)
+        sheet.setContentSize(NSSize(width: NewSessionFormView.width, height: form.fittingHeight))
+        sheet.initialFirstResponder = form.nameField
         sheet.appearance = theme.appearance
+        formModel = model
         focus.begin(.sheet)
         window.beginSheet(sheet) { [weak self] _ in
             MainActor.assumeIsolated {
+                self?.formModel = nil
                 if self?.focus.end(.sheet) == true { self?.workspace.focusActiveTerminal() }
             }
         }
+        sheet.makeFirstResponder(form.nameField)
     }
 
     var sheetOpen: Bool { window.attachedSheet != nil }
+    /// The open new-session / modify form's model (the focus test switches agents through it).
+    private(set) var formModel: NewSessionModel?
 
     @objc func showSettings() {
         if settingsWindow == nil {

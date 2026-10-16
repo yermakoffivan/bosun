@@ -107,107 +107,204 @@ final class NewSessionModel {
     }
 }
 
-struct NewSessionForm: View {
-    @Bindable var model: NewSessionModel
-    var onSubmit: (Spec) -> Void
-    var onCancel: () -> Void
-    @FocusState private var nameFocused: Bool
+/// The new-session / modify / new-tab form, laid out with AppKit at a fixed width so nothing in it
+/// can push it wider than the sheet: labels in a right-aligned column, controls filling the rest,
+/// long values scrolling inside their fields. The sheet is sized from it (see `fittingHeight`).
+@MainActor
+final class NewSessionFormView: NSView, NSTextFieldDelegate {
+    static let width: CGFloat = 600
+    static let margin: CGFloat = 24
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text(model.title).font(.system(size: 15, weight: .semibold))
-                Spacer()
-                if !model.recents.isEmpty {
-                    Menu("From Recent") {
-                        ForEach(model.recents.prefix(20), id: \.id) { r in
-                            Button("\(r.name)  —  \(r.agent) · \(abbreviate(r.path))") { model.fill(from: r) }
-                        }
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                }
-            }
-            .padding(.bottom, 14)
+    let model: NewSessionModel
+    var onSubmit: ((Spec) -> Void)?
+    var onCancel: (() -> Void)?
+    /// Called when rows appear or disappear, so the sheet can follow the new height.
+    var onHeightChange: (() -> Void)?
 
-            Form {
-                TextField("Name", text: $model.name, prompt: Text("api"))
-                    .focused($nameFocused)
-                HStack {
-                    TextField("Path", text: $model.path, prompt: Text("~/work/api"))
-                        .disabled(model.isAddTab)
-                    Button("Choose…") { choosePath() }
-                        .disabled(model.isAddTab)
-                }
-                if !model.isModify && !model.isAddTab {
-                    Toggle("Create in git worktree", isOn: $model.worktree)
-                    if model.worktree {
-                        TextField("Branch", text: $model.branch, prompt: Text(Slug.make(model.name).isEmpty ? "branch" : Slug.make(model.name)))
-                        LabeledContent("Worktree") {
-                            Text(model.worktreePreview).foregroundStyle(.secondary).font(.system(size: 12, design: .monospaced))
-                        }
-                    }
-                }
-                Picker("Agent", selection: $model.agent) {
-                    ForEach(agentNames, id: \.self) { Text(agentLabel($0)).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                TextField(model.agent == "terminal" ? "Command" : "Arguments", text: $model.args,
-                          prompt: Text(model.agent == "terminal" ? "optional command to run" : "optional, e.g. --model opus"))
-                agentOptions
-            }
-            .formStyle(.columns)
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let recentButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    let nameField = NSTextField()
+    private let pathField = NSTextField()
+    private let chooseButton = NSButton(title: "Choose…", target: nil, action: nil)
+    private let worktreeBox = NSButton(checkboxWithTitle: "Create in git worktree", target: nil, action: nil)
+    private let branchField = NSTextField()
+    private let worktreePreview = NSTextField(labelWithString: "")
+    private let agentControl = NSSegmentedControl()
+    private let argsLabel = NSTextField(labelWithString: "Arguments")
+    private let argsField = NSTextField()
+    private var modeRadios: [SessionMode: NSButton] = [:]
+    private var checkboxes: [(agent: String, button: NSButton, key: WritableKeyPath<SpecOptions, Bool>)] = []
+    private let errorLabel = NSTextField(wrappingLabelWithString: "")
+    private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+    private let submitButton = NSButton(title: "Create", target: nil, action: nil)
+    private let grid = NSGridView()
+    private var rows: [String: NSGridRow] = [:]
+    private var lastHidden: [String: Bool] = [:]
 
-            if let e = model.error {
-                Text(e).foregroundStyle(.red).font(.callout).padding(.top, 10)
-            }
+    override var isFlipped: Bool { true }
 
-            HStack {
-                Spacer()
-                Button("Cancel", role: .cancel) { onCancel() }
-                    .keyboardShortcut(.cancelAction)
-                Button(model.isModify ? "Save" : "Create") {
-                    if let spec = model.buildSpec() { onSubmit(spec) }
-                }
-                .keyboardShortcut(.defaultAction)
-            }
-            .padding(.top, 18)
-        }
-        .padding(22)
-        .frame(width: 540)
-        .onAppear { nameFocused = true }
+    init(model: NewSessionModel) {
+        self.model = model
+        super.init(frame: NSRect(x: 0, y: 0, width: NewSessionFormView.width, height: 300))
+        build()
+        refresh()
+        observe()
     }
 
-    @ViewBuilder private var agentOptions: some View {
-        switch model.agent {
-        case "claude":
-            modePicker($model.options.claude.sessionMode, modes: SessionMode.allCases)
-            Toggle("Skip permissions (--dangerously-skip-permissions)", isOn: $model.options.claude.skipPermissions)
-            Toggle("Remote Control (--remote-control)", isOn: $model.options.claude.remoteControl)
-        case "codex":
-            modePicker($model.options.codex.sessionMode, modes: SessionMode.allCases)
-            Toggle("YOLO mode (--yolo, bypass approvals and sandbox)", isOn: $model.options.codex.yolo)
-        case "kimi":
-            modePicker($model.options.kimi.sessionMode, modes: SessionMode.allCases)
-            Toggle("YOLO mode (--yolo, auto-approve all actions)", isOn: $model.options.kimi.yolo)
-        case "opencode":
-            // OpenCode's CLI has no session picker, so Resume isn't offered.
-            modePicker($model.options.opencode.sessionMode, modes: [.new, .continue])
-            Toggle("Auto mode (--auto, auto-approve permissions)", isOn: $model.options.opencode.auto)
-        case "qwen":
-            modePicker($model.options.qwen.sessionMode, modes: SessionMode.allCases)
-            Toggle("YOLO mode (--yolo, auto-approve all actions)", isOn: $model.options.qwen.yolo)
-        default:
-            EmptyView()
-        }
+    required init?(coder: NSCoder) { fatalError() }
+
+    // MARK: Building
+
+    private func label(_ s: String) -> NSTextField {
+        let l = NSTextField(labelWithString: s)
+        l.alignment = .right
+        l.setContentHuggingPriority(.required, for: .horizontal)
+        l.setContentCompressionResistancePriority(.required, for: .horizontal)
+        return l
     }
 
-    private func modePicker(_ binding: Binding<SessionMode>, modes: [SessionMode]) -> some View {
-        Picker("Session", selection: binding) {
-            ForEach(modes, id: \.self) { Text($0.label).tag($0) }
+    private func field(_ f: NSTextField, placeholder: String) {
+        f.placeholderString = placeholder
+        f.delegate = self
+        f.lineBreakMode = .byTruncatingTail
+        f.cell?.isScrollable = true
+        f.cell?.wraps = false
+        f.usesSingleLineMode = true
+        // Long text scrolls inside the field; it never asks for more width.
+        f.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        f.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    }
+
+    private func checkbox(_ title: String, agent: String, _ key: WritableKeyPath<SpecOptions, Bool>) -> NSButton {
+        let b = NSButton(checkboxWithTitle: title, target: self, action: #selector(optionToggled(_:)))
+        b.lineBreakMode = .byTruncatingTail
+        b.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        checkboxes.append((agent, b, key))
+        return b
+    }
+
+    private func build() {
+        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        titleLabel.stringValue = model.title
+        addSubview(titleLabel)
+
+        recentButton.bezelStyle = .push
+        recentButton.isBordered = false
+        recentButton.addItem(withTitle: "From Recent")
+        for (i, r) in model.recents.prefix(20).enumerated() {
+            let item = NSMenuItem(title: "\(r.name)  —  \(r.agent) · \((r.path as NSString).abbreviatingWithTildeInPath)", action: #selector(recentChosen(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = i
+            recentButton.menu?.addItem(item)
         }
-        .pickerStyle(.radioGroup)
-        .horizontalRadioGroupLayout()
+        recentButton.isHidden = model.recents.isEmpty
+        recentButton.sizeToFit()
+        addSubview(recentButton)
+
+        field(nameField, placeholder: "api")
+        field(pathField, placeholder: "~/work/api")
+        field(branchField, placeholder: "branch")
+        field(argsField, placeholder: "")
+        chooseButton.bezelStyle = .push
+        chooseButton.target = self
+        chooseButton.action = #selector(choosePath)
+        chooseButton.setContentHuggingPriority(.required, for: .horizontal)
+        chooseButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let pathRow = NSStackView(views: [pathField, chooseButton])
+        pathRow.orientation = .horizontal
+        pathRow.spacing = 8
+        worktreeBox.target = self
+        worktreeBox.action = #selector(worktreeToggled)
+        worktreePreview.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        worktreePreview.textColor = .secondaryLabelColor
+        worktreePreview.lineBreakMode = .byTruncatingMiddle
+        worktreePreview.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        agentControl.segmentCount = agentNames.count
+        agentControl.trackingMode = .selectOne
+        for (i, a) in agentNames.enumerated() { agentControl.setLabel(agentLabel(a), forSegment: i) }
+        agentControl.target = self
+        agentControl.action = #selector(agentChanged)
+        agentControl.segmentDistribution = .fillEqually
+
+        var radios: [NSView] = []
+        for m in SessionMode.allCases {
+            let b = NSButton(radioButtonWithTitle: m.label, target: self, action: #selector(modeChanged(_:)))
+            modeRadios[m] = b
+            radios.append(b)
+        }
+        let modeRow = NSStackView(views: radios)
+        modeRow.orientation = .horizontal
+        modeRow.spacing = 14
+
+        let claudeSkip = checkbox("Skip permissions (--dangerously-skip-permissions)", agent: "claude", \.claude.skipPermissions)
+        let claudeRC = checkbox("Remote Control (--remote-control)", agent: "claude", \.claude.remoteControl)
+        let codexYolo = checkbox("YOLO mode (--yolo, bypass approvals and sandbox)", agent: "codex", \.codex.yolo)
+        let kimiYolo = checkbox("YOLO mode (--yolo, auto-approve all actions)", agent: "kimi", \.kimi.yolo)
+        let ocAuto = checkbox("Auto mode (--auto, auto-approve permissions)", agent: "opencode", \.opencode.auto)
+        let qwenYolo = checkbox("YOLO mode (--yolo, auto-approve all actions)", agent: "qwen", \.qwen.yolo)
+
+        grid.rowSpacing = 10
+        grid.columnSpacing = 10
+        grid.rowAlignment = .firstBaseline
+        func add(_ key: String, _ l: NSView?, _ v: NSView) {
+            let row = grid.addRow(with: [l ?? NSGridCell.emptyContentView, v])
+            rows[key] = row
+        }
+        add("name", label("Name"), nameField)
+        add("path", label("Path"), pathRow)
+        add("worktree", nil, worktreeBox)
+        add("branch", label("Branch"), branchField)
+        add("preview", label("Worktree"), worktreePreview)
+        add("agent", label("Agent"), agentControl)
+        add("args", argsLabel, argsField)
+        add("mode", label("Session"), modeRow)
+        add("claude-skip", nil, claudeSkip)
+        add("claude-rc", nil, claudeRC)
+        add("codex-yolo", nil, codexYolo)
+        add("kimi-yolo", nil, kimiYolo)
+        add("opencode-auto", nil, ocAuto)
+        add("qwen-yolo", nil, qwenYolo)
+        argsLabel.alignment = .right
+        argsLabel.setContentHuggingPriority(.required, for: .horizontal)
+        grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 1).xPlacement = .fill
+        rows["agent"]?.topPadding = 4
+        for k in ["path", "mode"] {
+            rows[k]?.rowAlignment = .none
+            rows[k]?.yPlacement = .center
+        }
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(grid)
+
+        errorLabel.textColor = .systemRed
+        errorLabel.font = .systemFont(ofSize: 12)
+        errorLabel.preferredMaxLayoutWidth = NewSessionFormView.width - 2 * NewSessionFormView.margin
+        addSubview(errorLabel)
+
+        cancelButton.bezelStyle = .push
+        cancelButton.keyEquivalent = "\u{1b}"
+        cancelButton.target = self
+        cancelButton.action = #selector(cancel)
+        submitButton.bezelStyle = .push
+        submitButton.keyEquivalent = "\r"
+        submitButton.title = model.isModify ? "Save" : "Create"
+        submitButton.target = self
+        submitButton.action = #selector(submit)
+        addSubview(cancelButton)
+        addSubview(submitButton)
+
+        let m = NewSessionFormView.margin
+        NSLayoutConstraint.activate([
+            grid.leadingAnchor.constraint(equalTo: leadingAnchor, constant: m),
+            grid.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -m),
+            grid.topAnchor.constraint(equalTo: topAnchor, constant: m + 34),
+            grid.widthAnchor.constraint(equalToConstant: NewSessionFormView.width - 2 * m),
+        ])
+        nameField.stringValue = model.name
+        pathField.stringValue = model.path
+        argsField.stringValue = model.args
+        branchField.stringValue = model.branch
     }
 
     private func agentLabel(_ a: String) -> String {
@@ -218,9 +315,161 @@ struct NewSessionForm: View {
         }
     }
 
-    private func abbreviate(_ p: String) -> String { (p as NSString).abbreviatingWithTildeInPath }
+    // MARK: Model -> view
 
-    private func choosePath() {
+    /// Re-render whenever the model changes (from the controls, "From Recent", or a test).
+    private func observe() {
+        withObservationTracking {
+            _ = (model.name, model.path, model.worktree, model.branch, model.agent, model.args, model.options, model.error)
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.refresh(); self?.observe() } }
+        }
+    }
+
+    private var sessionMode: SessionMode {
+        switch model.agent {
+        case "claude": model.options.claude.sessionMode
+        case "codex": model.options.codex.sessionMode
+        case "kimi": model.options.kimi.sessionMode
+        case "opencode": model.options.opencode.sessionMode
+        case "qwen": model.options.qwen.sessionMode
+        default: .new
+        }
+    }
+
+    func refresh() {
+        func set(_ f: NSTextField, _ v: String) { if f.stringValue != v { f.stringValue = v } }
+        set(nameField, model.name)
+        set(pathField, model.path)
+        set(branchField, model.branch)
+        set(argsField, model.args)
+        pathField.isEnabled = !model.isAddTab
+        chooseButton.isEnabled = !model.isAddTab
+        worktreeBox.state = model.worktree ? .on : .off
+        let slug = Slug.make(model.name)
+        branchField.placeholderString = slug.isEmpty ? "branch" : slug
+        worktreePreview.stringValue = model.worktreePreview
+        agentControl.selectedSegment = agentNames.firstIndex(of: model.agent) ?? 0
+        let terminal = model.agent == "terminal"
+        argsLabel.stringValue = terminal ? "Command" : "Arguments"
+        argsField.placeholderString = terminal ? "optional command to run" : "optional, e.g. --model opus"
+        let mode = sessionMode
+        for (m, b) in modeRadios {
+            b.state = m == mode ? .on : .off
+            // OpenCode's CLI has no session picker, so Resume isn't offered.
+            b.isHidden = model.agent == "opencode" && m == .resume
+        }
+        for c in checkboxes { c.button.state = model.options[keyPath: c.key] ? .on : .off }
+        errorLabel.stringValue = model.error ?? ""
+        errorLabel.isHidden = model.error == nil
+
+        let canWorktree = !model.isModify && !model.isAddTab
+        var hidden: [String: Bool] = [
+            "worktree": !canWorktree, "branch": !(canWorktree && model.worktree), "preview": !(canWorktree && model.worktree),
+            "mode": terminal,
+        ]
+        for key in ["claude-skip", "claude-rc", "codex-yolo", "kimi-yolo", "opencode-auto", "qwen-yolo"] {
+            hidden[key] = !key.hasPrefix(model.agent + "-")
+        }
+        for (k, h) in hidden { rows[k]?.isHidden = h }
+        if hidden != lastHidden {
+            lastHidden = hidden
+            needsLayout = true
+            onHeightChange?()
+        }
+    }
+
+    // MARK: Layout
+
+    /// The height the form needs at its fixed width.
+    var fittingHeight: CGFloat {
+        grid.layoutSubtreeIfNeeded()
+        let m = NewSessionFormView.margin
+        var h = m + 34 + grid.fittingSize.height
+        if !errorLabel.isHidden { h += 10 + errorLabel.intrinsicContentSize.height }
+        return ceil(h + 20 + 28 + m)
+    }
+
+    override func layout() {
+        super.layout()
+        let m = NewSessionFormView.margin
+        titleLabel.sizeToFit()
+        titleLabel.frame.origin = NSPoint(x: m, y: m - 2)
+        recentButton.sizeToFit()
+        let rw = min(recentButton.frame.width, bounds.width / 2 - m)
+        recentButton.frame = NSRect(x: bounds.width - m - rw + 6, y: m - 4, width: rw, height: recentButton.frame.height)
+        titleLabel.frame.size.width = min(titleLabel.frame.width, recentButton.frame.minX - m - 8)
+        grid.layoutSubtreeIfNeeded()
+        var y = grid.frame.maxY
+        if !errorLabel.isHidden {
+            let s = errorLabel.intrinsicContentSize
+            errorLabel.frame = NSRect(x: m, y: y + 10, width: bounds.width - 2 * m, height: s.height)
+            y = errorLabel.frame.maxY
+        }
+        submitButton.sizeToFit()
+        cancelButton.sizeToFit()
+        let bw = max(submitButton.frame.width, 80)
+        let by = bounds.height - m - 28
+        submitButton.frame = NSRect(x: bounds.width - m - bw, y: by, width: bw, height: 28)
+        let cw = max(cancelButton.frame.width, 80)
+        cancelButton.frame = NSRect(x: submitButton.frame.minX - 12 - cw, y: by, width: cw, height: 28)
+    }
+
+    // MARK: Actions
+
+    func controlTextDidChange(_ obj: Notification) {
+        guard let f = obj.object as? NSTextField else { return }
+        switch f {
+        case nameField: model.name = f.stringValue
+        case pathField: model.path = f.stringValue
+        case branchField: model.branch = f.stringValue
+        case argsField: model.args = f.stringValue
+        default: break
+        }
+    }
+
+    /// Esc in a field comes up the responder chain as cancelOperation; Return as insertNewline.
+    override func cancelOperation(_ sender: Any?) { onCancel?() }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+        switch sel {
+        case #selector(NSResponder.insertNewline(_:)): submit(); return true
+        case #selector(NSResponder.cancelOperation(_:)): onCancel?(); return true
+        default: return false
+        }
+    }
+
+    @objc private func worktreeToggled() { model.worktree = worktreeBox.state == .on }
+
+    @objc private func agentChanged() {
+        let i = agentControl.selectedSegment
+        if i >= 0, i < agentNames.count { model.agent = agentNames[i] }
+    }
+
+    @objc private func modeChanged(_ sender: NSButton) {
+        guard let mode = modeRadios.first(where: { $0.value === sender })?.key else { return }
+        switch model.agent {
+        case "claude": model.options.claude.sessionMode = mode
+        case "codex": model.options.codex.sessionMode = mode
+        case "kimi": model.options.kimi.sessionMode = mode
+        case "opencode": model.options.opencode.sessionMode = mode
+        case "qwen": model.options.qwen.sessionMode = mode
+        default: break
+        }
+    }
+
+    @objc private func optionToggled(_ sender: NSButton) {
+        guard let c = checkboxes.first(where: { $0.button === sender }) else { return }
+        model.options[keyPath: c.key] = sender.state == .on
+    }
+
+    @objc private func recentChosen(_ sender: NSMenuItem) {
+        let recents = Array(model.recents.prefix(20))
+        guard sender.tag < recents.count else { return }
+        model.fill(from: recents[sender.tag])
+    }
+
+    @objc private func choosePath() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -229,6 +478,13 @@ struct NewSessionForm: View {
         if panel.runModal() == .OK, let url = panel.url {
             model.path = (url.path as NSString).abbreviatingWithTildeInPath
         }
+    }
+
+    @objc private func cancel() { onCancel?() }
+
+    @objc private func submit() {
+        // A field still being edited has its latest text in the model already (controlTextDidChange).
+        if let spec = model.buildSpec() { onSubmit?(spec) }
     }
 }
 

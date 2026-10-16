@@ -301,6 +301,13 @@ final class FocusTest: TestKit {
         await showOnly(api)
         r.check("start: the active terminal is first responder", firstResponderIsActiveTerminal)
 
+        // --only a,b runs just those of the later sections (sheet, empty, tiledrag, sidebardrag, shortcuts).
+        if let only = argValue("--only") {
+            await layoutSections(Set(only.split(separator: ",").map(String.init)))
+            await finish()
+            return
+        }
+
         // 0. Nothing typed into a session that the user didn't type: launching the fixture's agents
         // used to leave a Ctrl-L behind, echoed as `^L` at the fake agent's prompt.
         let strays = [api, docs, parser, review1, review2].filter { pane($0).contains("^L") }
@@ -644,6 +651,12 @@ final class FocusTest: TestKit {
         // 16. tmux moving a terminal's client (Bosun's TUI bindings typed inside it, or anything else).
         await clientMoves(api: api, docs: docs, review1: review1)
 
+        // 17–21. Sheet layout, empty tiles, tile drag, sidebar drag, the shortcuts panel.
+        await layoutSections(nil)
+        await finish()
+    }
+
+    private func finish() async {
         // Nothing above may have left a tmux client on another session than its view says.
         let drift = await driftedClients()
         r.check("every terminal's tmux client is still on its own session", drift.isEmpty, drift.joined(separator: ", "))
