@@ -23,8 +23,8 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
 
     private(set) var rendererVisible = true
     /// What libghostty believes about this terminal's focus. It starts out true there (a new
-    /// terminal counts as focused), so `init` syncs it to false straight away: a focused terminal
-    /// runs the cursor blink timer, which redraws the whole frame every 600 ms.
+    /// terminal counts as focused), so `init` syncs it: a focused terminal runs the cursor blink
+    /// timer, which redraws the whole frame every 600 ms.
     private(set) var hasTerminalFocus = true
     /// This view is the window's first responder (the app's active pane).
     private(set) var isResponder = false
@@ -333,10 +333,31 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
     /// focused terminal blinks its cursor, and every blink is a full frame, so every other pane
     /// (and the active one while the window isn't key) is told it's unfocused and draws nothing
     /// until its content changes.
+    ///
+    /// Changes are applied a run loop turn later, only the net one, and at least `focusSpacing`
+    /// apart. libghostty's renderer thread cancels its blink timer asynchronously, and a focus-in
+    /// that it reads in the same batch as the focus-out before it (a row switch, a new pane taking
+    /// the keyboard) sees the timer still armed and doesn't restart it: that pane then never
+    /// blinks. Spacing the two lets the cancel land first.
     private func syncFocus() {
+        guard surface != nil, !focusApplyPending else { return }
+        focusApplyPending = true
+        let wait = max(0, lastFocusSent + TerminalView.focusSpacing - CACurrentMediaTime())
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+            MainActor.assumeIsolated { self?.applyFocus() }
+        }
+    }
+
+    static let focusSpacing: CFTimeInterval = 0.05
+    private var focusApplyPending = false
+    private var lastFocusSent: CFTimeInterval = 0
+
+    private func applyFocus() {
+        focusApplyPending = false
         let f = isResponder && windowKey
         guard let surface, f != hasTerminalFocus else { return }
         hasTerminalFocus = f
+        lastFocusSent = CACurrentMediaTime()
         if debugFrames { print(String(format: "focus %.3f %@ %@", CACurrentMediaTime(), session, f ? "true" : "false")) }
         ghostty_surface_set_focus(surface, f)
     }
