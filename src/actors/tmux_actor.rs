@@ -175,6 +175,11 @@ impl CachedCapture {
 
 impl Drop for GlobalsGuard {
     fn drop(&mut self) {
+        // Another live bosun on this server still relies on the
+        // bindings; leave them for the last owner to remove.
+        if !crate::tmux::owners::release(self.socket.as_deref()) {
+            return;
+        }
         if self.installed {
             status_bar::uninstall_globals(self.socket.as_deref());
         }
@@ -240,6 +245,9 @@ pub fn spawn(
 
         // The monitor has started the server; install input bindings before
         // accepting session commands, including on a fresh Bosun socket.
+        // Registering as an owner first means a second bosun exiting
+        // won't remove them from under this one (see `tmux::owners`).
+        crate::tmux::owners::register(socket.as_deref());
         ensure_ctrl_q_bound(socket.as_deref());
         globals.cq_installed = true;
 
@@ -1656,6 +1664,9 @@ async fn do_refresh(
     // the entire life of the process.
     if globals.last_self_heal.elapsed() >= SELF_HEAL_EVERY {
         globals.last_self_heal = std::time::Instant::now();
+        // Re-register too, in case another process's exit or a server
+        // restart lost this process from the owner list.
+        crate::tmux::owners::register(socket);
         ensure_ctrl_q_bound(socket);
         // Same self-heal for the S-Left / S-Right cycle bindings.
         ensure_keybindings_bound(socket, &config.keybindings);

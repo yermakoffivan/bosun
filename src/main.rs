@@ -129,8 +129,11 @@ async fn run() -> Result<()> {
             DisableMouseCapture,
             LeaveAlternateScreen
         );
-        emergency_unbind(socket_for_hook.as_deref());
-        emergency_status_bar(socket_for_hook.as_deref());
+        // Only the last bosun on the server removes the shared bindings.
+        if bosun::tmux::owners::release(socket_for_hook.as_deref()) {
+            emergency_unbind(socket_for_hook.as_deref());
+            emergency_status_bar(socket_for_hook.as_deref());
+        }
         default_hook(info);
     }));
 

@@ -3,6 +3,7 @@ pub mod client;
 pub mod control;
 pub mod control_client;
 pub mod detector;
+pub mod owners;
 pub mod parse;
 pub mod session;
 pub mod status_bar;
