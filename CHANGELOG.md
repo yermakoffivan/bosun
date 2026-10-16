@@ -18,6 +18,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **No stray `^L` after a launch.** Starting or restarting an agent used to send a Ctrl-L a moment after the agent appeared, to force a repaint. It often arrived before the agent was ready to read keys, so the terminal echoed a literal `^L` into the agent's prompt. Bosun now types only the launch command.
+- **Plain shells read as idle, not waiting.** A terminal session sitting at its shell prompt showed as waiting for half a minute after every keystroke or prompt redraw, so a waiting badge didn't reliably mean an agent needed you. A session whose foreground process is a shell now reads as idle; a command you start from it (a build, a REPL) still shows as running while it works.
 - **Two Bosun processes on one tmux server no longer undo each other.** A Bosun that's still running now picks up section changes made by another one instead of reverting them on its next save, and quitting one no longer removes the shared tmux key bindings (C-q, Shift+Left/Right, M-O, prefix 1–9) while another is still running.
 
 ## [2.1.16] — 2026-10-05
