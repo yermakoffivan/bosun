@@ -9,6 +9,10 @@ let log = Logger(subsystem: appSubsystem, category: "app")
 
 /// BOSUN_DEBUG_KEYS=1 logs every key routing decision to stdout.
 let debugKeys = ProcessInfo.processInfo.environment["BOSUN_DEBUG_KEYS"] != nil
+/// A scripted test mode (--focustest, --selftest, --launchprobe) is running.
+let testMode = CommandLine.arguments.contains { ["--focustest", "--selftest", "--launchprobe"].contains($0) }
+/// --no-activate: open the window without activating the app, so a test run never takes the keyboard from whatever you're using.
+let noActivate = CommandLine.arguments.contains("--no-activate")
 
 enum Env {
     static func value(_ key: String) -> String? {

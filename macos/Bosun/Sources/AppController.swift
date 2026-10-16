@@ -53,8 +53,12 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         if !cached { applyTheme() }
         workspace.restore()
         focus.setTiles(count: workspace.layout.count, active: workspace.activeTile)
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate()
+        if noActivate {
+            window.orderFront(nil)
+        } else {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate()
+        }
         root.layoutSubtreeIfNeeded()
         workspace.relayout()
         sidebar.reload()
@@ -102,7 +106,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         w.minSize = NSSize(width: 640, height: 400)
         w.delegate = self
         w.responderPolicy = { [weak self] r in self?.firstResponderPolicy(r) ?? r }
-        w.setFrameAutosaveName("BosunMain")
+        // Test modes share the app's defaults; they must never save their window frame over yours.
+        if !testMode { w.setFrameAutosaveName("BosunMain") }
         if !w.setFrameUsingName("BosunMain") { w.center() }
         root = RootView(sidebar: sidebar.view, main: workspace.area, sidebarWidth: AppSettings.shared.sidebarWidth)
         root.onSidebarResized = { AppSettings.shared.sidebarWidth = $0 }

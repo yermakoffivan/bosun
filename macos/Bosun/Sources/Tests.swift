@@ -875,7 +875,7 @@ final class SelfTest: TestKit {
             let out = await Task.detached { () -> String in
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: exe)
-                p.arguments = ["--launchprobe", "-ApplePersistenceIgnoreState", "YES"]
+                p.arguments = ["--launchprobe", "-ApplePersistenceIgnoreState", "YES"] + (noActivate ? ["--no-activate"] : [])
                 let pipe = Pipe()
                 p.standardOutput = pipe
                 p.standardError = FileHandle.nullDevice
