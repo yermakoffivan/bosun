@@ -95,6 +95,12 @@ pub const DEFAULT_REMOVE_DEAD_SESSIONS: bool = false;
 /// `config.toml` with `default_agent`.
 pub const DEFAULT_AGENT: &str = "claude";
 
+/// A `theme_light` / `theme_dark` value: blank means unset ("same as
+/// `theme`"), the same as leaving the key out.
+fn optional_theme(name: Option<String>) -> Option<String> {
+    name.map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+}
+
 /// Turn the raw `[env]` table into the variables passed to every new
 /// session. Names must be shell-valid (`[A-Za-z_][A-Za-z0-9_]*`) since
 /// tmux splits `-e KEY=VALUE` at the first `=`. Strings pass through
@@ -181,6 +187,14 @@ pub struct Config {
     /// Theme name. Resolved against user themes first, then
     /// built-ins (`opencode`, `tokyonight`), then a hard-fallback.
     pub theme: String,
+    /// Optional theme for the macOS Light appearance (`theme_light`).
+    /// Only Bosun for Mac reads it, through `bosun serve`: the TUI
+    /// can't tell the system appearance, so it always uses `theme`.
+    /// `None` means "same as `theme`".
+    pub theme_light: Option<String>,
+    /// Optional theme for the macOS Dark appearance (`theme_dark`).
+    /// See `theme_light`.
+    pub theme_dark: Option<String>,
     /// Persisted divider position (absolute terminal column). `None`
     /// means use the default 38% split.
     pub divider_x: Option<u16>,
@@ -310,6 +324,8 @@ impl Default for Config {
             tmux_socket: Some(DEFAULT_TMUX_SOCKET.to_string()),
             self_session: None,
             theme: DEFAULT_THEME.to_string(),
+            theme_light: None,
+            theme_dark: None,
             divider_x: None,
             sidebar: SidebarModel::default(),
             session_history: std::collections::HashMap::new(),
@@ -378,6 +394,12 @@ struct ConfigFile {
     tmux_socket: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     theme: Option<String>,
+    /// The Mac app's Light/Dark pair. See `Config::theme_light`. Kept
+    /// here so every read-modify-write of the file carries them along.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    theme_light: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    theme_dark: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     divider_x: Option<u16>,
     /// Explicit-membership sidebar (v0.2.9+). Tables + arrays.
@@ -483,6 +505,8 @@ impl Config {
             .ok()
             .or(file.theme)
             .unwrap_or_else(|| DEFAULT_THEME.to_string());
+        let theme_light = optional_theme(file.theme_light);
+        let theme_dark = optional_theme(file.theme_dark);
 
         // Only detect self-session if we're on the same socket as
         // the caller's tmux. If bosun uses a dedicated socket, the
@@ -641,6 +665,8 @@ impl Config {
             tmux_socket,
             self_session,
             theme,
+            theme_light,
+            theme_dark,
             divider_x,
             sidebar,
             session_history,
@@ -786,9 +812,15 @@ fn update_config_file(edit: impl FnOnce(&mut ConfigFile)) -> std::io::Result<()>
     let dir =
         config_dir().ok_or_else(|| std::io::Error::other("cannot resolve bosun config dir"))?;
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join("config.toml");
+    update_config_file_at(&dir.join("config.toml"), edit)
+}
 
-    let mut file = match std::fs::read_to_string(&path) {
+/// [`update_config_file`] against an explicit `config.toml` path.
+fn update_config_file_at(
+    path: &std::path::Path,
+    edit: impl FnOnce(&mut ConfigFile),
+) -> std::io::Result<()> {
+    let mut file = match std::fs::read_to_string(path) {
         Ok(s) => toml::from_str::<ConfigFile>(&s).unwrap_or_default(),
         Err(_) => ConfigFile::default(),
     };
@@ -799,8 +831,19 @@ fn update_config_file(edit: impl FnOnce(&mut ConfigFile)) -> std::io::Result<()>
 
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, &path)?;
+    std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Persist the Mac app's Light-appearance theme. `None` removes the key
+/// ("same as `theme`").
+pub fn write_theme_light(name: Option<&str>) -> std::io::Result<()> {
+    update_config_file(|f| f.theme_light = name.map(str::to_string))
+}
+
+/// Persist the Mac app's Dark-appearance theme. `None` removes the key.
+pub fn write_theme_dark(name: Option<&str>) -> std::io::Result<()> {
+    update_config_file(|f| f.theme_dark = name.map(str::to_string))
 }
 
 /// Persist the agent preselected by the new-session form.
@@ -840,26 +883,7 @@ pub fn write_embed_enabled(on: bool) -> std::io::Result<()> {
 }
 
 pub fn write_theme(name: &str) -> std::io::Result<()> {
-    let dir =
-        config_dir().ok_or_else(|| std::io::Error::other("cannot resolve bosun config dir"))?;
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("config.toml");
-
-    let mut file = match std::fs::read_to_string(&path) {
-        Ok(s) => toml::from_str::<ConfigFile>(&s).unwrap_or_default(),
-        Err(_) => ConfigFile::default(),
-    };
-    file.theme = Some(name.to_string());
-
-    let body = toml::to_string(&file)
-        .map_err(|e| std::io::Error::other(format!("toml serialize: {e}")))?;
-
-    // Atomic write: temp file + rename. Avoids a half-written
-    // config.toml if bosun is killed mid-write.
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    update_config_file(|f| f.theme = Some(name.to_string()))
 }
 
 /// Persist the sticky hide-sidebar-while-focused preference to
@@ -1150,12 +1174,56 @@ mod tests {
         );
     }
 
+    /// The TUI never reads the Mac app's Light/Dark pair, but every one
+    /// of its writes goes through `ConfigFile`, so the pair has to
+    /// survive them all.
+    #[test]
+    fn theme_pair_survives_tui_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "theme = 'nord'\ntheme_light = 'github-light'\ntheme_dark = 'tokyonight'\n",
+        )
+        .unwrap();
+        // The theme picker, a settings-panel row, a sidebar save.
+        update_config_file_at(&path, |f| f.theme = Some("dracula".into())).unwrap();
+        update_config_file_at(&path, |f| f.remove_dead_sessions = Some(true)).unwrap();
+        write_sidebar_at(&path, &SidebarModel::default()).unwrap();
+        let file = read_config_file_at(&path).unwrap();
+        assert_eq!(file.theme.as_deref(), Some("dracula"));
+        assert_eq!(file.theme_light.as_deref(), Some("github-light"));
+        assert_eq!(file.theme_dark.as_deref(), Some("tokyonight"));
+
+        // Clearing one side removes its key and leaves the other.
+        update_config_file_at(&path, |f| f.theme_light = None).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("theme_light"), "{body}");
+        assert!(body.contains("theme_dark = \"tokyonight\""), "{body}");
+    }
+
+    #[test]
+    fn theme_pair_parses_and_empty_means_unset() {
+        let file: ConfigFile =
+            toml::from_str("theme_light = 'one-light'\ntheme_dark = ''\n").unwrap();
+        assert_eq!(file.theme_light.as_deref(), Some("one-light"));
+        assert_eq!(
+            optional_theme(file.theme_light).as_deref(),
+            Some("one-light")
+        );
+        assert_eq!(optional_theme(file.theme_dark), None);
+        let none: ConfigFile = toml::from_str("theme = 'nord'\n").unwrap();
+        assert!(none.theme_light.is_none() && none.theme_dark.is_none());
+    }
+
     fn cfg(prefix: &str) -> Config {
         Config {
             session_prefix: prefix.to_string(),
             tmux_socket: Some(DEFAULT_TMUX_SOCKET.to_string()),
             self_session: None,
             theme: DEFAULT_THEME.to_string(),
+            theme_light: None,
+            theme_dark: None,
             divider_x: None,
             sidebar: SidebarModel::default(),
             session_history: std::collections::HashMap::new(),
@@ -1275,6 +1343,8 @@ mod tests {
             tmux_socket: None,
             self_session: Some("bosun-mine-abc".to_string()),
             theme: DEFAULT_THEME.to_string(),
+            theme_light: None,
+            theme_dark: None,
             divider_x: None,
             sidebar: SidebarModel::default(),
             session_history: std::collections::HashMap::new(),

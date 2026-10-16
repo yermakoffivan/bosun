@@ -558,6 +558,8 @@ Example `config.toml`:
 
 ```toml
 theme             = "tokyonight"
+theme_light       = "github-light"   # Bosun for Mac only: theme while macOS is in Light appearance (unset: `theme`)
+theme_dark        = "tokyonight"     # Bosun for Mac only: theme in Dark appearance. The TUI always uses `theme`.
 session_prefix    = "bosun-"     # bosun only manages sessions with this prefix
 worktree_location = "subdir"     # where "create in worktree" puts new worktrees: "subdir" (<repo>/.worktrees/<branch>) or "sibling" (<repo>-<branch>)
 tmux_socket       = "bosun"      # dedicated tmux -L socket; "default" uses your shared socket
