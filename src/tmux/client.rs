@@ -326,23 +326,27 @@ impl TokioTmuxClient {
     /// the client redraws and the session's activity time is bumped.
     pub async fn make_client_latest(&self, tty: &str) -> Result<()> {
         check_client_tty(tty)?;
+        // Find the client's session from `list-clients`. Not
+        // `display-message -c <tty> '#{client_session}'`: over a
+        // control connection the `client_*` formats resolve against the
+        // control client itself (`__bosun_monitor`), and switching the
+        // GUI's client there would be exactly wrong.
         let out = self
             .run(
-                &["display-message", "-p", "-c", tty, "#{client_session}"],
+                &["list-clients", "-F", "#{client_tty}|||#{client_session}"],
                 Retry::Safe,
             )
             .await?;
-        let session = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !out.success || session.is_empty() {
-            return Err(BosunError::Tmux(format!(
-                "no tmux client on {tty}{}",
-                if out.stderr.trim().is_empty() {
-                    String::new()
-                } else {
-                    format!(": {}", out.stderr.trim())
-                }
-            )));
-        }
+        let listing = String::from_utf8_lossy(&out.stdout).into_owned();
+        let session = listing
+            .lines()
+            .filter_map(|l| l.split_once("|||"))
+            .find(|(t, _)| *t == tty)
+            .map(|(_, s)| s.to_string())
+            .filter(|s| !s.is_empty());
+        let Some(session) = session else {
+            return Err(BosunError::Tmux(format!("no tmux client on {tty}")));
+        };
         let target = format!("={session}:");
         let out = self
             .run(&["switch-client", "-c", tty, "-t", &target], Retry::Safe)

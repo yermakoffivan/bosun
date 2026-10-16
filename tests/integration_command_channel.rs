@@ -233,6 +233,161 @@ async fn falls_back_to_exec_and_reconnects() {
     assert!(client.command_channel().stats().connects >= 2);
 }
 
+/// A real `tmux attach` client in a pty of the given size. The reader
+/// thread drains output so tmux never blocks on it.
+struct PtyClient {
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    _master: Box<dyn portable_pty::MasterPty + Send>,
+}
+
+impl PtyClient {
+    fn attach(sock: &str, session: &str, rows: u16, cols: u16) -> Self {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("tmux");
+        cmd.args(["-L", sock, "attach-session", "-t", session]);
+        cmd.env("TERM", "xterm-256color");
+        cmd.env_remove("TMUX");
+        let child = pair.slave.spawn_command(cmd).unwrap();
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while matches!(reader.read(&mut buf), Ok(n) if n > 0) {}
+        });
+        Self {
+            child,
+            _master: pair.master,
+        }
+    }
+}
+
+impl Drop for PtyClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+    }
+}
+
+use std::io::Read;
+
+fn window_size(sock: &str) -> String {
+    let out = tmux(
+        sock,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            "=bosun-gui:",
+            "#{window_width}x#{window_height}",
+        ],
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+async fn wait_size(sock: &str, want: &str) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let got = window_size(sock);
+        if got == want {
+            return;
+        }
+        assert!(Instant::now() < deadline, "window {got}, wanted {want}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_flags_and_make_latest_drive_window_size() {
+    let server = start_server("latest");
+    let sock = &server.0;
+    tmux(
+        sock,
+        &[
+            "new-session",
+            "-d",
+            "-s",
+            "bosun-gui",
+            "-x",
+            "50",
+            "-y",
+            "20",
+        ],
+    );
+    tmux(sock, &["set-option", "-g", "window-size", "latest"]);
+    let client = TokioTmuxClient::with_socket(sock.clone());
+    wait_up(&client).await;
+
+    // Two GUI-like clients of different sizes; B attaches last, so the
+    // window follows B (status line takes one row).
+    let _a = PtyClient::attach(sock, "=bosun-gui", 30, 120);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _b = PtyClient::attach(sock, "=bosun-gui", 20, 90);
+    wait_size(sock, "90x19").await;
+    let ttys = String::from_utf8(
+        tmux(
+            sock,
+            &[
+                "list-clients",
+                "-t",
+                "=bosun-gui",
+                "-F",
+                "#{client_width} #{client_tty}",
+            ],
+        )
+        .stdout,
+    )
+    .unwrap();
+    let tty_of = |w: &str| {
+        ttys.lines()
+            .find(|l| l.starts_with(w))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .unwrap()
+            .to_string()
+    };
+    let (tty_a, tty_b) = (tty_of("120 "), tty_of("90 "));
+
+    // make_latest hands the size to A, then back to B.
+    client.make_client_latest(&tty_a).await.expect("latest A");
+    wait_size(sock, "120x29").await;
+    client.make_client_latest(&tty_b).await.expect("latest B");
+    wait_size(sock, "90x19").await;
+
+    // ignore-size on the latest client hands sizing to the other one.
+    client
+        .set_client_ignore_size(&tty_b, true)
+        .await
+        .expect("ignore B");
+    wait_size(sock, "120x29").await;
+    let flags = tmux(
+        sock,
+        &["display-message", "-p", "-c", &tty_b, "#{client_flags}"],
+    );
+    assert!(String::from_utf8_lossy(&flags.stdout).contains("ignore-size"));
+    client
+        .set_client_ignore_size(&tty_b, false)
+        .await
+        .expect("clear B");
+    let flags = tmux(
+        sock,
+        &["display-message", "-p", "-c", &tty_b, "#{client_flags}"],
+    );
+    assert!(!String::from_utf8_lossy(&flags.stdout).contains("ignore-size"));
+
+    // Bad targets are errors, not silent no-ops.
+    assert!(client.make_client_latest("/dev/ttys999").await.is_err());
+    assert!(client
+        .set_client_ignore_size("not-a-tty", true)
+        .await
+        .is_err());
+    assert!(client.make_client_latest("=bosun-gui").await.is_err());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn never_starts_a_server_and_never_sizes_the_monitor() {
     // No server at all: reads stay on exec, and nothing gets started.
