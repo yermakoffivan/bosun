@@ -19,13 +19,40 @@ public enum ThemeMap {
         "ayu-light": "Ayu Light",
     ]
 
-    /// Ghostty config lines that colour the terminal like `theme`: a Ghostty theme when there is a
-    /// counterpart (and it exists in `available`), otherwise a palette generated from the Bosun colours.
-    public static func configLines(for theme: ThemePalette, available: Set<String>) -> [String] {
-        if let g = ghosttyNames[theme.name], available.contains(g) {
-            return ["theme = \(g)"]
+    /// Ghostty config lines that colour the terminal like `theme`: the colours of its Ghostty counterpart when
+    /// there is one (in `available`, read with `read`), otherwise a palette generated from the Bosun colours.
+    ///
+    /// The counterpart's colours are written out rather than as `theme = Name`: Ghostty applies a theme beneath
+    /// every colour set explicitly in the user's config, so a `background` or `palette` line there would win.
+    public static func configLines(for theme: ThemePalette, available: Set<String>,
+                                   read: (String) -> String? = bundledTheme) -> [String] {
+        if let g = ghosttyNames[theme.name], available.contains(g), let text = read(g) {
+            let lines = colorLines(text)
+            if !lines.isEmpty { return lines }
         }
         return generated(theme)
+    }
+
+    /// The colour settings of a Ghostty theme file, one `key = value` per line (comments and other keys dropped).
+    public static func colorLines(_ text: String) -> [String] {
+        text.split(whereSeparator: \.isNewline).compactMap { raw in
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard !line.hasPrefix("#"), let eq = line.firstIndex(of: "=") else { return nil }
+            let key = line[..<eq].trimmingCharacters(in: .whitespaces)
+            let value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            guard colorKeys.contains(key), !value.isEmpty else { return nil }
+            return "\(key) = \(value)"
+        }
+    }
+
+    static let colorKeys: Set<String> = [
+        "palette", "background", "foreground", "cursor-color", "cursor-text", "selection-background", "selection-foreground",
+    ]
+
+    /// A Ghostty theme file from the app bundle (Resources/ghostty/themes).
+    public static func bundledTheme(_ name: String) -> String? {
+        guard let dir = Bundle.main.resourceURL?.appendingPathComponent("ghostty/themes") else { return nil }
+        return try? String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8)
     }
 
     public static func generated(_ t: ThemePalette) -> [String] {

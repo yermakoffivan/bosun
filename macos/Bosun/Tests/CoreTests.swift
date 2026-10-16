@@ -669,7 +669,12 @@ final class MiscCoreTests: XCTestCase {
         var p = ThemePalette.fallback
         XCTAssertEqual(ThemeMap.configLines(for: p, available: ["TokyoNight"]).first, "background = #0a0a0a")
         p.name = "tokyonight"
-        XCTAssertEqual(ThemeMap.configLines(for: p, available: ["TokyoNight"]), ["theme = TokyoNight"])
+        // A counterpart's colours are written out, so they beat colours set in the user's Ghostty config.
+        let file = "# TokyoNight\npalette = 0=#15161e\nbackground = #1a1b26\nforeground=#c0caf5\nfont-size = 14\n\n"
+        XCTAssertEqual(ThemeMap.configLines(for: p, available: ["TokyoNight"]) { $0 == "TokyoNight" ? file : nil },
+                       ["palette = 0=#15161e", "background = #1a1b26", "foreground = #c0caf5"])
+        // Unreadable or not bundled: a generated palette.
+        XCTAssertEqual(ThemeMap.configLines(for: p, available: ["TokyoNight"]) { _ in nil }.count, 21)
         XCTAssertEqual(ThemeMap.configLines(for: p, available: []).count, 21)
         XCTAssertEqual(ThemeMap.generated(p).filter { $0.hasPrefix("palette = ") }.count, 16)
     }
