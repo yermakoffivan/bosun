@@ -20,5 +20,6 @@ __pycache__/
 
 # Mac app build output and generated Xcode projects
 macos/**/build/
+macos/**/build-*/
 macos/**/*.xcodeproj/
 macos/**/DerivedData/

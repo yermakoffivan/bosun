@@ -4,7 +4,7 @@
 # tmux socket, and the app connects only to that daemon's socket (BOSUN_SERVE_SOCKET).
 #
 #   ./dev.sh up                      start the test daemon and create the fixture sessions
-#   ./dev.sh run [app args]          launch build/Bosun.app against it (e.g. --selftest, --focustest)
+#   ./dev.sh run [app args]          launch $BOSUN_BUILD_DIR/Bosun.app (default build/) against it (e.g. --selftest, --focustest)
 #   ./dev.sh status SESSION STATE [DETAIL]   set a fixture's hook status (running|waiting|done|idle)
 #   ./dev.sh tmux ARGS...            run tmux against the test socket (e.g. capture-pane -p -t =api:)
 #   ./dev.sh env                     print the variables the app needs, for running it yourself
@@ -13,7 +13,8 @@
 #
 # Settings (env): BOSUN_DEV_HOME (default /tmp/bosun-mac-dev-$USER; kept short because Unix socket
 # paths max out at 104 bytes), BOSUN_DEV_TMUX (tmux socket name, default bosun-mac-dev),
-# BOSUN_DEV_BIN (the bosun binary; default: built from this checkout into build/cargo-target).
+# BOSUN_DEV_BIN (the bosun binary; default: built from this checkout into build/cargo-target),
+# BOSUN_BUILD_DIR (where build.sh put the Bosun.app that `run` launches; default build).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
@@ -28,6 +29,8 @@ esac
 # Always build the dev bosun once per run: cargo is a quick no-op when nothing
 # changed, and a stale binary silently runs an old daemon against new code.
 DEV_TARGET="$HERE/build/cargo-target"
+APP_DIR="${BOSUN_BUILD_DIR:-build}"
+[[ "$APP_DIR" == /* ]] || APP_DIR="$HERE/$APP_DIR"
 if [[ -z "${BOSUN_DEV_BIN:-}" ]]; then
   (cd "$REPO" && CARGO_TARGET_DIR="$DEV_TARGET" cargo build --release --locked --quiet >&2) || exit 1
 fi
@@ -109,7 +112,7 @@ case "${1:-}" in
   run)
     shift
     exec env -u TMUX -u TMUX_PANE BOSUN_SERVE_SOCKET="$(sock)" BOSUN_BIN="$(bin)" \
-      "$HERE/build/Bosun.app/Contents/MacOS/Bosun" -ApplePersistenceIgnoreState YES "$@" ;;
+      "$APP_DIR/Bosun.app/Contents/MacOS/Bosun" -ApplePersistenceIgnoreState YES "$@" ;;
   status)
     [[ $# -ge 3 ]] || { echo "usage: $0 status SESSION running|waiting|done|idle [DETAIL]" >&2; exit 1; }
     name="$2"; state="$3"; detail="${4:-}"
@@ -121,5 +124,5 @@ case "${1:-}" in
       set-option -p -t "=$internal:" @bosun_state_detail "$detail"
     ;;
   tmux) shift; exec "$TMUX_BIN" -L "$TMUX_SOCK" "$@" ;;
-  *) sed -n '2,17p' "$0"; exit 1 ;;
+  *) sed -n '2,18p' "$0"; exit 1 ;;
 esac
