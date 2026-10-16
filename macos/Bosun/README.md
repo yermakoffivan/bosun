@@ -1,6 +1,8 @@
 # Bosun for Mac
 
-A native macOS front end for Bosun: a sidebar of your Bosun sessions and live terminals (libghostty) attached to them, side by side in split tiles. It is a client of `bosun serve` and doesn't replace the TUI; both can run at once against the same daemon.
+A native macOS front end for Bosun: a sidebar of your Bosun sessions and live terminals (libghostty) attached to them. It is a client of `bosun serve` and doesn't replace the TUI; both can run at once against the same daemon.
+
+Each sidebar row is a workspace, and the row's tabs are its panes. Selecting a row replaces the whole main area with that row's own split layout, so one row can hold an agent, a test watcher and a shell for the same project side by side, while another row is a single agent. In the TUI a row's tabs hide each other; here they sit next to each other.
 
 macOS 15 or later, Apple Silicon.
 
@@ -21,7 +23,10 @@ Then, from `macos/Bosun`:
 ```sh
 ./build.sh          # Release build into build/Bosun.app
 ./build.sh test     # unit tests (BosunCoreTests), log in build/test.log
+BOSUN_BUILD_DIR=build-mine ./build.sh   # the same into build-mine/, leaving build/Bosun.app alone
 ```
+
+`BOSUN_BUILD_DIR` (relative to this directory, or absolute) moves the app, DerivedData and the test log. Use it for a second build while a copy of the app is running from `build/`: a build replaces `Bosun.app` in its directory, which kills a copy running from there.
 
 `build.sh` regenerates `Bosun.xcodeproj` from `project.yml` each time, so edit `project.yml`, not the project.
 
@@ -35,7 +40,7 @@ Environment variables:
 - `BOSUN_BIN=<path>` picks the `bosun` binary.
 - `BOSUN_DEBUG_KEYS=1` prints every key event and where it was routed.
 
-The window paints the sidebar and the last layout from a cached snapshot before the daemon answers, then switches to live data.
+The window paints the sidebar and the last shown row from a cached snapshot before the daemon answers, then switches to live data.
 
 ## Developing against a test daemon
 
@@ -43,7 +48,7 @@ Never point a development build at your real Bosun setup. `dev.sh` runs a throwa
 
 ```sh
 ./dev.sh up                 # start the test daemon and the fixture sessions
-./dev.sh run                # launch build/Bosun.app against it
+./dev.sh run                # launch build/Bosun.app against it ($BOSUN_BUILD_DIR/Bosun.app when that's set)
 ./dev.sh status api waiting "needs input"   # set a fixture's hook status
 ./dev.sh tmux list-clients  # tmux, on the test socket
 ./dev.sh down               # stop the test daemon and kill only the test tmux server
@@ -52,7 +57,7 @@ Never point a development build at your real Bosun setup. `dev.sh` runs a throwa
 
 `BOSUN_DEV_HOME` (default `/tmp/bosun-mac-dev-$USER`, short because Unix socket paths max out at 104 bytes), `BOSUN_DEV_TMUX` and `BOSUN_DEV_BIN` change where it lives, the tmux socket name and the `bosun` binary. Without `BOSUN_DEV_BIN` it builds `bosun` from this checkout into `build/cargo-target`.
 
-The fixture: `api` and `docs` ungrouped; a Work section with `parser`, `ticker` (prints a line a second) and `web` (two tabs: `web`, `web tests`); a Reviews section with `review-1`, `review-2` and `shell` (a plain shell, which reads as idle).
+The fixture: `api` and `docs` ungrouped; a Work section with `parser`, `ticker` (prints a line a second) and `web` (three tabs, so three panes: `web`, `web tests` and `web shell`, a plain shell); a Reviews section with `review-1`, `review-2` and `shell` (a plain shell, which reads as idle).
 
 ## Test modes
 
@@ -63,11 +68,11 @@ Both run inside the app against the fixture (`./dev.sh up` first) and drive it t
 ./dev.sh run --selftest --results /some/file.txt
 ```
 
-`--no-activate` opens the window without activating the app, so a test run never takes the keyboard from what you're doing. `--focustest --only sheet,empty,tiledrag,sidebardrag,shortcuts` runs just those sections. Test modes never save their window frame.
+`--no-activate` opens the window without activating the app, so a test run never takes the keyboard from what you're doing. `--focustest --only rows,panes,newpanes,clientmoves,sheet,empty,tiledrag,sidebardrag,shortcuts` runs just those sections. Test modes never save their window frame.
 
-`--focustest` checks the focus model end to end: where keys land after sidebar clicks, rename, the palette and the sheet; splits and tile focus; focus following the mouse and its guards; drops on tiles, dividers and sidebar rows; every app shortcut and the `[keybindings]` nav keys (and that they never reach tmux's Shift+arrow bindings); create and kill, with nothing but the launch command typed into a new session; themes; the tmux status line (no TUI hints, and no line at all on a session only the app shows); tiles following a tmux client that something moved (Bosun's `prefix 1-9` typed inside a terminal), moving it back when its new session is in another tile or the view is hidden, and attaching again after a detach (`Ctrl+q`); and that no tmux client is left on another session than its tile says. Then layout and dragging: every control in the new-session sheet lies inside it, with 1, 2 and 4 tiles and in the smallest window; empty tiles keep their text inside at every width; tiles dragged by their header to each edge and swapped, cancelled with Esc or by letting go outside, with the same terminal views and the keyboard following the dragged tile; sidebar rows, sections and tabs dragged through AppKit's own table tracking (a test hook keeps the drag session from the window server, so it never follows the real mouse) and dropped through the outline's own drop code; and the keyboard shortcuts panel. It saves screenshots of the main states when `--shots` is given.
+`--focustest` checks the focus model end to end: where keys land after sidebar clicks, rename, the palette and the sheet. Rows as workspaces: a three-tab row opens as three panes; switching to a single-pane row replaces them all (the views stay warm and hidden); switching back brings the same views back with the keyboard in the pane that was active; Cmd+1…9, Shift+Up/Down and Cmd+K switch whole rows; clicking a tab under a row activates its pane. Panes: Shift+Left/Right walk them in tab order, Cmd+Option+arrows move by position. New and closed panes: Cmd+D and Cmd+Shift+D add a terminal tab to the row (checked in the daemon's sidebar) as a split beside the active pane, and typing reaches it; Cmd+W on a shell at its prompt closes without asking and the tab ends, Cmd+W on a busy pane or a row's last pane asks; Cmd+T opens the sheet for a tab of the row in its directory and the result opens as a split; a tab created behind the app's back appears as a pane, and loses it when it ends. Then focus following the mouse and its guards; drops on panes, dividers and sidebar rows; every app shortcut and the `[keybindings]` nav keys (and that they never reach tmux's Shift+arrow bindings); create and kill, with nothing but the launch command typed into a new session; an exited row's placeholder; themes; the tmux status line (no TUI hints, and no line at all on a session only the app shows); tmux clients that something moved (Bosun's `prefix 1-9` typed inside a terminal, or `switch-client`) going back to their own tab while the app shows the target's row or pane; attaching again after a detach (`Ctrl+q`); and that no tmux client is left on another session than its pane says. Then layout and dragging: every control in the new-session sheet lies inside it, with 1, 3 and 4 panes and in the smallest window; the exited-row and no-rows placeholders keep their text inside at every width; panes dragged by their header to each edge and swapped, cancelled with Esc or by letting go outside, with the same terminal views and the keyboard following the dragged pane; sidebar rows, sections and tabs dragged through AppKit's own table tracking (a test hook keeps the drag session from the window server, so it never follows the real mouse) and dropped through the outline's own drop code; and the keyboard shortcuts panel. It saves screenshots of the main states when `--shots` is given.
 
-`--selftest` reports p50/p90/p99 for warm switch, cold attach, status change to badge, daemon round trip, divider drag layout, launch to sidebar painted and launch to first live terminal (from ten fresh processes), plus idle CPU and memory, against the budgets in the design doc.
+`--selftest` reports p50/p90/p99 for warm switch, warm row switch (a three-pane row: the main-thread swap, and every pane's first frame), cold attach, status change to badge, daemon round trip, divider drag layout, launch to sidebar painted and launch to first live terminal (from ten fresh processes), plus idle CPU and memory, against the budgets in the design doc.
 
 The intervals are also emitted as signposts (subsystem `dev.yetidevworks.bosun-mac`), so Instruments' os_signpost track shows them in a normal run.
 
@@ -77,22 +82,32 @@ The terminal keeps the keyboard. Only the rename field, the palette and the new-
 
 | Keys | Action |
 | --- | --- |
-| Cmd+K | Go to session (fuzzy palette) |
-| Cmd+Shift+N | New session |
+| Cmd+K | Go to session (fuzzy palette): shows its row, with that tab's pane active |
+| Cmd+Shift+N | New session (a new row) |
 | Cmd+Shift+U | Oldest waiting session |
 | Cmd+1…9 | Sidebar row 1…9 |
-| Cmd+D / Cmd+Shift+D | Split right / down |
-| Cmd+Option+arrows | Focus the tile in that direction |
-| Cmd+W | Close tile |
-| Drag a tile's header | Move it beside another tile (near an edge) or swap the two (the middle) |
+| Cmd+D / Cmd+Shift+D | New terminal tab in this row, split right / down of the active pane |
+| Cmd+T | New tab (the new-session sheet, for an agent), split right |
+| Cmd+Option+arrows | Focus the pane in that direction |
+| Cmd+W | Close the active pane and end its tab |
+| Drag a pane's header | Move it beside another pane (near an edge) or swap the two (the middle) |
 | Cmd+/ | Keyboard shortcuts |
-| Shift+Up / Shift+Down | Previous / next session (from `[keybindings]`) |
-| Shift+Left / Shift+Right | Previous / next tab (from `[keybindings]`) |
+| Shift+Up / Shift+Down | Previous / next row (from `[keybindings]`) |
+| Shift+Left / Shift+Right | Previous / next pane, in tab order (from `[keybindings]`) |
 | Ctrl+v | Send the next key to the terminal as is (from `[keybindings]`) |
 
 Help → Keyboard Shortcuts (Cmd+/) lists all of these, and every key is also on its menu item. The nav keys follow the `[keybindings]` table in Bosun's config.toml and update live when it changes. Everything else goes to the terminal; Ghostty's own bindings that would clash with these are removed.
 
-Bosun's tmux bindings for the TUI and Moshi still work inside a terminal (`prefix 1-9` jumps, `Ctrl+q` detaches). The app follows them: when a terminal's tmux client is moved to another session, its tile shows that session (header, sidebar and all), or, if another tile already shows it, the client goes back and that tile becomes active. After a detach the tile attaches again.
+## Rows and panes
+
+- **Selecting a row** (a click, Cmd+1…9, Shift+Up/Down, Cmd+K) replaces the whole main area with that row's panes, as you left them, and the keyboard goes to the pane that was active there. The sidebar highlights the row; when it has several tabs, the active pane's tab is marked under it, and clicking a tab activates its pane.
+- **A row seen for the first time** lays its tabs out by splitting the biggest pane in half along its longer side, so two tabs sit side by side, three make a column and a stack, and four make a 2×2 grid. A tab created elsewhere (the TUI, or `bosun serve`'s `create` with the row's `container_id`) gets a pane the same way, without taking the keyboard.
+- **Cmd+D / Cmd+Shift+D** create a plain terminal tab in the row, in the active pane's directory, straight away and with no sheet, and split the active pane for it. Its name is the row's own (its first tab's), which the daemon makes unique the way the TUI does ("web" becomes "web 2"). Cmd+T opens the new-session sheet for a tab of the row instead, for when the pane should run an agent. At 9 panes these beep.
+- **Cmd+W** closes the active pane and kills that tab's session. It asks first unless the pane's foreground command is a shell at its prompt (zsh, bash, fish, sh and the other shells Bosun knows, with or without a login shell's leading `-`). Closing a row's last pane always asks, since it kills the row's session. The closed pane's space and the keyboard go to its sibling.
+- **A tab that ends** (killed in the TUI, or its program exits) loses its pane, and its sibling takes the space. A row whose tabs have all ended shows its exited state, with Restart and Resume.
+- **Layouts are the app's own:** each row's split tree and active pane are kept in `~/Library/Application Support/dev.yetidevworks.bosun-mac/rows-<daemon>.json`, keyed by container id. The daemon's idea of a row's active tab (what the TUI shows) is updated when you leave a row and when the app quits, not on every pane change.
+
+Bosun's tmux bindings for the TUI and Moshi still work inside a terminal (`prefix 1-9` jumps, `Ctrl+q` detaches). The app follows them, and every pane keeps showing its own tab: when a terminal's tmux client is moved to another session, the client is put back, and the app activates that session's pane if it's a tab of the same row, or shows its row if it's in another. A pooled terminal that isn't on screen is just put back. After a detach the pane attaches again.
 
 ## tmux's status line
 
@@ -100,10 +115,10 @@ The app's terminals attach to tmux as `xterm-ghostty-bosun`, a copy of Ghostty's
 
 ## Settings
 
-Bosun → Settings (Cmd+,): focus follows the mouse (on by default, only with two or more tiles), match the terminal to the Bosun theme (off by default), and the number of terminals kept attached in the background (8). The chrome follows Bosun's theme; View → Theme changes it for every client.
+Bosun → Settings (Cmd+,): focus follows the mouse (on by default, only with two or more panes), match the terminal to the Bosun theme (off by default), and the number of terminal views kept attached (12, from 4 to 27). The warm pool counts views, not rows: the shown row's panes count, and a row's panes are used together, so recently shown rows stay warm as a whole and switch back in one frame. 12 holds the shown row plus two or three more rows of three panes; each view costs about 13–14 MB. The chrome follows Bosun's theme; View → Theme changes it for every client.
 
 ## Layout of the code
 
-- `Core/` (BosunCore, no AppKit): protocol types and decoding, the state store, sidebar operations, the split tree, key chords, the focus state machine, the done rule, shell escaping. Unit tested in `Tests/`.
-- `Sources/`: the app. `DaemonClient` (socket, framing, reconnect, snapshot cache), `Ghostty` and `TerminalView` (libghostty), `TerminalPool` (warm pool), `Workspace` (tiles, dividers, drops, moving tiles), `Sidebar`, `NewSessionSheet`, `ShortcutsPanel`, `AppController` (menus, commands, key routing), `Tests` and `LayoutTests` (the test modes).
+- `Core/` (BosunCore, no AppKit): protocol types and decoding, the state store, sidebar operations, the split tree and each row's layout (`RowLayout`: reconciling panes with tabs, placing new ones, closing, tab-order steps, persistence), key chords, the focus state machine, the done rule, shell escaping. Unit tested in `Tests/`.
+- `Sources/`: the app. `DaemonClient` (socket, framing, reconnect, snapshot cache), `Ghostty` and `TerminalView` (libghostty), `TerminalPool` (warm pool), `Workspace` (rows and their panes, dividers, drops, moving panes), `Sidebar`, `NewSessionSheet`, `ShortcutsPanel`, `AppController` (menus, commands, key routing), `Tests` and `LayoutTests` (the test modes).
 - `fixture/`: the fake agent and the fixture builder used by `dev.sh`.
