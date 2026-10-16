@@ -165,8 +165,11 @@ Link libghostty statically, keep dependencies near zero, and target Apple Silico
 
 State is already pushed, so these are nearly free:
 
-- When an agent goes from working to waiting while the app isn't focused, post a macOS notification and set the dock badge to the number waiting.
-- A tile whose agent is waiting shows it in its header strip (section 7b; borders are reserved for the active ring). Cmd+Shift+U jumps to the oldest waiting session.
+- **When:** an agent starts waiting on you (permission or question, with the detail) or finishes a turn (a new hook `done_at`), and you can't see it: Bosun isn't the active app, the window is hidden, or the session isn't in the row on screen. Once per wait and once per finished turn, nothing for what was already waiting or done when the app connected, and a session's notifications are taken back once you see it, type into it, or its state moves on.
+- **Click:** brings the app forward on that row with the keyboard in that pane.
+- **Dock badge:** the number of sessions waiting on you. Done isn't counted, because a done session stays done until you type into it.
+- **Settings:** Notify When Waiting, Notify When Done and Show Dock Badge, all on by default.
+- A pane whose agent is waiting shows it in its header strip (section 7b; borders are reserved for the active ring). Cmd+Shift+U jumps to the oldest waiting session.
 
 ## 11. Measuring
 
