@@ -179,6 +179,9 @@ pub enum ServerMsg {
         seq: u64,
         session: String,
         state: StatusWire,
+        source: StatusSourceWire,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     Sidebar {
         seq: u64,
@@ -220,7 +223,7 @@ pub struct Snapshot {
     pub seq: u64,
     pub server: ServerInfo,
     pub sessions: Vec<SessionWire>,
-    pub statuses: BTreeMap<String, StatusWire>,
+    pub statuses: BTreeMap<String, StatusInfo>,
     pub sidebar: SidebarWire,
     pub recents: Vec<RecentWire>,
     pub config: ConfigWire,
@@ -302,6 +305,26 @@ pub enum StatusWire {
     Idle,
     Error,
     Unknown,
+}
+
+/// Where a status came from: the agent's own hook, or Bosun's guess
+/// from the pane title and contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusSourceWire {
+    Hook,
+    Detector,
+}
+
+/// One session's status in the snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusInfo {
+    pub state: StatusWire,
+    pub source: StatusSourceWire,
+    /// What a hook-reported state is about, e.g. `permission: Bash`
+    /// while waiting. Only sent with `source: hook`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -486,6 +509,25 @@ pub enum ThemeSource {
 }
 
 // ── conversions ────────────────────────────────────────────────────
+
+impl From<crate::agent_hooks::StatusSource> for StatusSourceWire {
+    fn from(s: crate::agent_hooks::StatusSource) -> Self {
+        match s {
+            crate::agent_hooks::StatusSource::Hook => Self::Hook,
+            crate::agent_hooks::StatusSource::Detector => Self::Detector,
+        }
+    }
+}
+
+impl From<&crate::tmux::session::SessionView> for StatusInfo {
+    fn from(v: &crate::tmux::session::SessionView) -> Self {
+        Self {
+            state: v.status.into(),
+            source: v.status_source.into(),
+            detail: v.status_detail.clone(),
+        }
+    }
+}
 
 impl From<Status> for StatusWire {
     fn from(s: Status) -> Self {
@@ -1046,7 +1088,14 @@ mod tests {
         };
         let theme = ThemeWire::from(&crate::ui::Theme::default_opencode());
         let mut statuses = BTreeMap::new();
-        statuses.insert(session.name.clone(), StatusWire::Waiting);
+        statuses.insert(
+            session.name.clone(),
+            StatusInfo {
+                state: StatusWire::Waiting,
+                source: StatusSourceWire::Hook,
+                detail: Some("permission: Bash".into()),
+            },
+        );
         let sidebar = SidebarWire {
             ungrouped: vec![ContainerWire {
                 id: "con-1".into(),
@@ -1113,6 +1162,8 @@ mod tests {
             seq: 3,
             session: "s".into(),
             state: StatusWire::Running,
+            source: StatusSourceWire::Detector,
+            detail: None,
         });
         round_trip_server(ServerMsg::Sidebar { seq: 4, sidebar });
         round_trip_server(ServerMsg::Recents { seq: 5, recents });

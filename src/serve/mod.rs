@@ -42,7 +42,7 @@ use crate::ui::Theme;
 
 use protocol::{
     Ack, ClientMsg, CmdEnvelope, CmdOp, ConfigWire, PendingLaunchWire, RecentWire, ServerInfo,
-    ServerMsg, SessionWire, SettingWire, SidebarWire, Snapshot, SpecWire, StatusWire, ThemeEntry,
+    ServerMsg, SessionWire, SettingWire, SidebarWire, Snapshot, SpecWire, StatusInfo, ThemeEntry,
     ThemeSource, ThemeWire, PROTOCOL_VERSION,
 };
 
@@ -226,7 +226,7 @@ fn is_error_message(m: &str) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 struct Published {
     sessions: Vec<SessionWire>,
-    statuses: BTreeMap<String, StatusWire>,
+    statuses: BTreeMap<String, StatusInfo>,
     sidebar: SidebarWire,
     recents: Vec<RecentWire>,
     config: ConfigWire,
@@ -272,6 +272,7 @@ struct Daemon {
     cmd_tx: mpsc::UnboundedSender<Command>,
     theme: Theme,
     embed_enabled: bool,
+    agent_hooks: bool,
     seq: u64,
     published: Option<Published>,
     clients: HashMap<u64, ClientConn>,
@@ -313,6 +314,7 @@ impl Daemon {
         Self {
             app,
             embed_enabled: config.embed_enabled,
+            agent_hooks: config.agent_hooks,
             file_config: config.clone(),
             config,
             store,
@@ -412,7 +414,7 @@ impl Daemon {
             .app
             .sessions
             .iter()
-            .map(|v| (v.name().to_string(), StatusWire::from(v.status)))
+            .map(|v| (v.name().to_string(), StatusInfo::from(v)))
             .collect();
         let live: std::collections::HashSet<&str> =
             self.app.sessions.iter().map(|v| v.name()).collect();
@@ -487,6 +489,7 @@ impl Daemon {
                 None,
             ),
             row("embed_enabled", self.embed_enabled.into(), None),
+            row("agent_hooks", self.agent_hooks.into(), None),
         ];
         let install = |key: &str, value: serde_json::Value, var: &str| SettingWire {
             key: key.to_string(),
@@ -564,12 +567,14 @@ impl Daemon {
             };
             self.broadcast(&msg);
         }
-        for (name, state) in &cur.statuses {
-            if prev.statuses.get(name) != Some(state) {
+        for (name, info) in &cur.statuses {
+            if prev.statuses.get(name) != Some(info) {
                 let msg = ServerMsg::Status {
                     seq: self.next_seq(),
                     session: name.clone(),
-                    state: *state,
+                    state: info.state,
+                    source: info.source,
+                    detail: info.detail.clone(),
                 };
                 self.broadcast(&msg);
             }
@@ -957,6 +962,7 @@ impl Daemon {
             "hide_single_tab_strip" => SettingChange::HideSingleTabStrip(as_bool()?),
             "remove_dead_sessions" => SettingChange::RemoveDeadSessions(as_bool()?),
             "embed_enabled" => SettingChange::EmbedEnabled(as_bool()?),
+            "agent_hooks" => SettingChange::AgentHooks(as_bool()?),
             "session_prefix" | "tmux_socket" => {
                 return Err(format!("{key} is set by editing config.toml"))
             }
@@ -995,6 +1001,13 @@ impl Daemon {
             SettingChange::EmbedEnabled(on) => {
                 self.embed_enabled = on;
                 crate::config::write_embed_enabled(on)
+            }
+            SettingChange::AgentHooks(on) => {
+                // The actor owns launching and status, so it rebuilds
+                // its hook files and starts or stops honoring hook state.
+                self.agent_hooks = on;
+                let _ = self.cmd_tx.send(Command::SetAgentHooks(on));
+                crate::config::write_agent_hooks(on)
             }
         };
         // Our own write isn't an outside edit; don't reload it.
@@ -1212,6 +1225,10 @@ impl Daemon {
         }
         if new.embed_enabled != old.embed_enabled {
             self.embed_enabled = new.embed_enabled;
+        }
+        if new.agent_hooks != old.agent_hooks {
+            self.agent_hooks = new.agent_hooks;
+            let _ = self.cmd_tx.send(Command::SetAgentHooks(new.agent_hooks));
         }
         if new.sidebar != old.sidebar && new.sidebar != self.app.sidebar {
             self.app.sidebar = new.sidebar.clone();
