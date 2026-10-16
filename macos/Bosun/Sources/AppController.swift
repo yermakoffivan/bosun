@@ -1042,6 +1042,13 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         _ = item("Rename") { [weak self] in self?.startRename(s) }
         if let c = container {
             _ = item("New Tab in This Row…") { [weak self] in self?.newTab(in: c.id) }
+            if case .tab = rowItem?.kind {
+                _ = item("Move to Own Row") { [weak self] in self?.moveTabToOwnRow(s) }
+            } else if let merge = mergeMenu(from: c) {
+                let i = NSMenuItem(title: "Merge into", action: nil, keyEquivalent: "")
+                i.submenu = merge
+                m.addItem(i)
+            }
         }
         m.addItem(.separator())
         if alive {
@@ -1057,6 +1064,41 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         }
         return m
     }
+
+    /// The other rows, under their section names, for "Merge into".
+    private func mergeMenu(from row: Container) -> NSMenu? {
+        let sb = daemon.state.sidebar
+        let m = NSMenu()
+        func add(_ rows: [Container]) {
+            for c in rows where c.id != row.id {
+                m.addItem(ClosureMenuItem(title: rowLabel(c)) { [weak self] in self?.mergeRow(row.id, into: c.id) })
+            }
+        }
+        add(sb.ungrouped)
+        for sec in sb.sections where sec.members.contains(where: { $0.id != row.id }) {
+            if m.numberOfItems > 0 { m.addItem(.separator()) }
+            m.addItem(.sectionHeader(title: sec.name))
+            add(sec.members)
+        }
+        return m.numberOfItems > 0 ? m : nil
+    }
+
+    /// Merge row `from` into row `into`: its tabs become `into`'s tabs (and panes). Nothing restarts.
+    func mergeRow(_ from: String, into: String) {
+        guard from != into else { return }
+        daemon.command(.mergeRows(from: from, into: into)) { [weak self] ack in
+            self?.report(ack)
+        }
+    }
+
+    /// Move one tab into row `into`, or out into a row of its own with nil.
+    func moveTab(_ session: String, into: String?) {
+        daemon.command(.moveTab(session: session, container: into, index: nil)) { [weak self] ack in
+            self?.report(ack)
+        }
+    }
+
+    func moveTabToOwnRow(_ session: String) { moveTab(session, into: nil) }
 
     func sectionMenu(for id: String) -> NSMenu {
         let m = NSMenu()

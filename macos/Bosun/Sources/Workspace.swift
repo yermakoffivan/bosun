@@ -205,6 +205,9 @@ final class Workspace {
         let sb = st.sidebar
         let order = sb.allRows.map(\.id)
         closing = closing.filter { app.isAlive($0) }
+        // The shown row's active session, read before rows that went are dropped: if its row was merged
+        // into another, the screen follows the session there.
+        let shownActive = layout.active
         if st.live {
             let ids = Set(order)
             rows = rows.filter { ids.contains($0.key) }
@@ -221,7 +224,10 @@ final class Workspace {
             target = c.id
             legacyActive = nil
         }
-        if let t = target, !order.contains(t), st.live {
+        if let t = target, !order.contains(t), st.live, let s = shownActive, let moved = sb.container(holding: s) {
+            target = moved.id
+            activateWhenPlaced[moved.id] = s
+        } else if let t = target, !order.contains(t), st.live {
             let i = lastRowOrder.firstIndex(of: t) ?? 0
             let later = lastRowOrder.dropFirst(i + 1).first { order.contains($0) }
             let earlier = lastRowOrder.prefix(i).last { order.contains($0) }

@@ -509,8 +509,26 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             let row = outlineView.row(forItem: item)
             return row >= 0 && pointerY > outlineView.rect(ofRow: row).midY
         }
+        /// The row under the pointer while it's over the middle of that row (or of one of its tabs), which
+        /// means "merge into it"; nearer a row's top or bottom edge means "put it here" as before.
+        func mergeTarget() -> SidebarItem? {
+            let p = outlineView.convert(info.draggingLocation, from: nil)
+            let r = outlineView.row(at: p)
+            guard r >= 0, let under = outlineView.item(atRow: r) as? SidebarItem else { return nil }
+            let rect = outlineView.rect(ofRow: r)
+            guard abs(p.y - rect.midY) < rect.height * 0.3 else { return nil }
+            switch under.kind {
+            case .row: return under
+            case .tab: return under.parent
+            case .section: return nil
+            }
+        }
         switch dragged.kind {
         case .row:
+            if let m = mergeTarget(), m !== dragged {
+                outlineView.setDropItem(m, dropChildIndex: NSOutlineViewDropOnItemIndex)
+                return .move
+            }
             // Over a multi-tab row or one of its tabs (the outline proposes dropping inside it): drop beside
             // that row in its own list instead, above or below by the pointer.
             var over = target
@@ -552,7 +570,18 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             if index < ungroupedCount { outlineView.setDropItem(nil, dropChildIndex: ungroupedCount) }
             return .move
         case .tab:
-            guard let target, target === dragged.parent, index != NSOutlineViewDropOnItemIndex else { return [] }
+            guard let row = dragged.parent else { return [] }
+            if let m = mergeTarget(), m !== row {
+                outlineView.setDropItem(m, dropChildIndex: NSOutlineViewDropOnItemIndex)
+                return .move
+            }
+            if let target, target === row {
+                return index == NSOutlineViewDropOnItemIndex ? [] : .move
+            }
+            // Out of its row: it becomes a row of its own, which goes right after the old one, so show the gap there.
+            let list = row.parent?.children ?? roots
+            guard let i = list.firstIndex(where: { $0 === row }) else { return [] }
+            outlineView.setDropItem(row.parent, dropChildIndex: i + 1)
             return .move
         }
     }
@@ -562,6 +591,19 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard let dragged = draggedItem(info) else {
             guard let target, let s = session(for: target) else { return false }
             app.dropOnSidebar(session: s, pasteboard: info.draggingPasteboard)
+            return true
+        }
+        // Merges and moves out of a row go to the daemon, which owns the tmux side of them too.
+        if index == NSOutlineViewDropOnItemIndex, let target, case .row(let into) = target.kind {
+            switch dragged.kind {
+            case .row(let from): DispatchQueue.main.async { [app] in MainActor.assumeIsolated { app.mergeRow(from, into: into) } }
+            case .tab(let s): DispatchQueue.main.async { [app] in MainActor.assumeIsolated { app.moveTab(s, into: into) } }
+            case .section: return false
+            }
+            return true
+        }
+        if case .tab(let s) = dragged.kind, target !== dragged.parent {
+            DispatchQueue.main.async { [app] in MainActor.assumeIsolated { app.moveTabToOwnRow(s) } }
             return true
         }
         var sb = app.daemon.state.sidebar

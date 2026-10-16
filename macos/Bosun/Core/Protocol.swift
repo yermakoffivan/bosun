@@ -694,6 +694,10 @@ public enum Command: Equatable, Sendable {
     case applySetting(key: String, value: JSONValue)
     case clientFlags(tty: String, ignoreSize: Bool)
     case makeLatest(tty: String)
+    /// Move one tab into row `container` (at `index` among its tabs), or into a new row of its own with nil.
+    case moveTab(session: String, container: String?, index: Int?)
+    /// Move every tab of row `from` to the end of row `into`.
+    case mergeRows(from: String, into: String)
 
     public var op: String {
         switch self {
@@ -714,6 +718,8 @@ public enum Command: Equatable, Sendable {
         case .applySetting: "apply_setting"
         case .clientFlags: "client_flags"
         case .makeLatest: "make_latest"
+        case .moveTab: "move_tab"
+        case .mergeRows: "merge_rows"
         }
     }
 }
@@ -801,6 +807,12 @@ public enum ClientMessage: Sendable {
                     try put("tty", t); try put("ignore_size", i)
                 case .makeLatest(let t):
                     try put("tty", t)
+                case .moveTab(let s, let container, let index):
+                    try put("session", s)
+                    if let container { try put("container_id", container) } else { try c.encodeNil(forKey: AnyKey("container_id")) }
+                    if let index { try put("index", index) }
+                case .mergeRows(let from, let into):
+                    try put("from", from); try put("into", into)
                 }
             }
         }
