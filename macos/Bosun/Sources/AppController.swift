@@ -149,7 +149,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
 
     func windowDidChangeOcclusionState(_ notification: Notification) {
-        let visible = window.occlusionState.contains(.visible)
+        // The test modes run with the screen locked, where the window counts as occluded.
+        let visible = assumeKeyForTests || window.occlusionState.contains(.visible)
         for s in workspace.visibleSessions { workspace.pool.view(for: s)?.setRendererVisible(visible) }
     }
 
@@ -380,6 +381,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 touched.insert(name)
                 chrome = chrome || workspace.visibleSessions.contains(name)
             case .sidebar:
+                for name in st.sessionOrder { formerNames[name] = displayName(name) }
                 structure = true
                 chrome = true
             case .theme:
@@ -388,7 +390,15 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 nav = NavBindings(st.keybindings)
                 for e in nav.errors { log.error("keybindings: \(e, privacy: .public)") }
             case .notice(let m):
-                root.band.flash(m)
+                let shown = readableNotice(m)
+                root.band.flash(shown)
+                // "created X" comes before X's session delta, so name it again once that lands.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        self.root.band.replaceNote(shown, with: self.readableNotice(m))
+                    }
+                }
             case .recents, .config, .themes:
                 break
             }
@@ -433,6 +443,21 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     // MARK: Lookups used by views
 
     func isAlive(_ s: String) -> Bool { daemon.state.isAlive(s) }
+
+    var noticeText: String { root.band.noteText }
+
+    /// Display names of sessions seen this run, so a notice about one that is already gone still reads well.
+    private var formerNames: [String: String] = [:]
+
+    /// Daemon notices name sessions by their tmux name; show the sidebar name instead.
+    func readableNotice(_ m: String) -> String {
+        var out = m
+        for name in daemon.state.sessionOrder { formerNames[name] = displayName(name) }
+        for (name, display) in formerNames where display != name && out.contains(name) {
+            out = out.replacingOccurrences(of: name, with: display)
+        }
+        return out
+    }
 
     func displayName(_ s: String) -> String {
         if let d = daemon.state.sessions[s]?.display { return d }

@@ -126,6 +126,15 @@ final class TitleBand: NSView {
         needsLayout = true
     }
 
+    var noteText: String { note.stringValue }
+
+    /// Change the current notice's text without restarting its timer, if it is still showing `old`.
+    func replaceNote(_ old: String, with new: String) {
+        guard note.stringValue == old, old != new else { return }
+        note.stringValue = new
+        needsLayout = true
+    }
+
     /// A transient message (a daemon notice, "next key goes to the terminal"). nil clears it.
     func flash(_ text: String?, color: NSColor? = nil, seconds: TimeInterval = 4) {
         noteTimer?.invalidate()
