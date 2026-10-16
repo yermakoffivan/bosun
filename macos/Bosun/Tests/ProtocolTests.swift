@@ -14,6 +14,7 @@ final class ProtocolTests: XCTestCase {
                   "container_id":"con-1","worktree_path":"/w/api/.worktrees/feat","branch":"feat",
                   "pane_title":"✳ Fix the flaky test","pane_command":"2_1_220"}],
      "statuses":{"bosun-api-1a2b3c4d":{"state":"waiting","source":"hook","detail":"permission: Bash"},
+                 "bosun-web-9c0d1e2f":{"state":"idle","source":"hook","done_at":1760000123456},
                  "bosun-docs-5e6f7a8b":{"state":"idle","source":"detector"}},
      "sidebar":{"ungrouped":[
         {"id":"con-1","name":"api","active":"bosun-api-1a2b3c4d",
@@ -43,6 +44,9 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(s.statuses["bosun-api-1a2b3c4d"]?.state, .waiting)
         XCTAssertEqual(s.statuses["bosun-api-1a2b3c4d"]?.detail, "permission: Bash")
         XCTAssertEqual(s.statuses["bosun-docs-5e6f7a8b"]?.source, "detector")
+        XCTAssertNil(s.statuses["bosun-docs-5e6f7a8b"]?.doneAt)
+        XCTAssertEqual(s.statuses["bosun-web-9c0d1e2f"]?.doneAt, 1_760_000_123_456)
+        XCTAssertEqual(s.statuses["bosun-web-9c0d1e2f"]?.isHook, true)
         XCTAssertEqual(s.sidebar.ungrouped.first?.tabs.count, 2)
         XCTAssertEqual(s.sidebar.ungrouped.first?.tabs[1].alive, false)
         XCTAssertEqual(s.sidebar.sections.first?.bannerFont, "metalix")
@@ -76,6 +80,8 @@ final class ProtocolTests: XCTestCase {
             XCTAssertEqual(q, 5)
             XCTAssertEqual(sb.sections.first?.collapsed, false)
         } else { XCTFail() }
+        XCTAssertEqual(try decode(#"{"t":"status","seq":7,"session":"s","state":"idle","source":"hook","done_at":1760000123456}"#),
+                       .status(seq: 7, session: "s", info: StatusInfo(state: .idle, source: "hook", doneAt: 1_760_000_123_456)))
         // A future state word decodes as unknown rather than failing.
         if case .status(_, _, let info) = try decode(#"{"t":"status","seq":6,"session":"s","state":"thinking","source":"hook"}"#) {
             XCTAssertEqual(info.state, .unknown)

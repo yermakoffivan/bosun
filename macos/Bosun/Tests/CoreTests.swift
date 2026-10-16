@@ -420,6 +420,103 @@ final class SeenTrackerTests: XCTestCase {
         XCTAssertEqual(t.display("a", state: .idle), .done)
         XCTAssertEqual(t.display("a", state: .waiting), .waiting)
     }
+
+    // Hook rule: done while the hook's done_at is newer than the user's last input.
+
+    private func hookDone(_ at: UInt64) -> StatusInfo { StatusInfo(state: .idle, source: "hook", doneAt: at) }
+    private let hookRunning = StatusInfo(state: .running, source: "hook")
+
+    func testHookDoneAfterATurnWhileVisible() {
+        var t = SeenTracker()
+        t.setViewed(["a"])
+        t.observe("a", status: hookRunning, title: "⠋ work")
+        t.observe("a", status: hookDone(1_000), title: "✳ work")
+        XCTAssertEqual(t.display("a", state: .idle), .done)
+        // Looking at it, or it staying on screen, doesn't clear it.
+        t.markSeen("a")
+        t.setViewed(["a"])
+        XCTAssertEqual(t.display("a", state: .idle), .done)
+        // Off screen too.
+        t.setViewed([])
+        XCTAssertEqual(t.display("a", state: .idle), .done)
+    }
+
+    func testHookDoneClearedByInput() {
+        var t = SeenTracker()
+        t.setViewed(["a"])
+        t.observe("a", status: hookDone(1_000), title: nil)
+        XCTAssertEqual(t.display("a", state: .idle), .done)
+        // Input from before the turn finished doesn't count.
+        t.noteInput("a", at: 900)
+        XCTAssertEqual(t.display("a", state: .idle), .done)
+        t.noteInput("a", at: 1_500)
+        XCTAssertEqual(t.display("a", state: .idle), .idle)
+        // Another session's input is its own.
+        t.observe("b", status: hookDone(1_000), title: nil)
+        XCTAssertEqual(t.display("b", state: .idle), .done)
+    }
+
+    func testHookDoneClearedByRunning() {
+        var t = SeenTracker()
+        t.observe("a", status: hookDone(1_000), title: nil)
+        XCTAssertEqual(t.display("a", state: .idle), .done)
+        t.observe("a", status: hookRunning, title: nil)
+        XCTAssertEqual(t.display("a", state: .running), .running)
+        // A status arriving late with the old done_at doesn't bring it back.
+        t.observe("a", status: hookDone(1_000), title: nil)
+        XCTAssertEqual(t.display("a", state: .idle), .idle)
+        // A newer non-done hook state (idle without done_at) isn't done either.
+        t.observe("b", status: hookDone(1_000), title: nil)
+        t.observe("b", status: StatusInfo(state: .idle, source: "hook"), title: nil)
+        XCTAssertEqual(t.display("b", state: .idle), .idle)
+        // Nor a hook waiting state.
+        t.observe("c", status: hookDone(1_000), title: nil)
+        t.observe("c", status: StatusInfo(state: .waiting, source: "hook", detail: "permission: Bash"), title: nil)
+        XCTAssertEqual(t.display("c", state: .waiting), .waiting)
+    }
+
+    func testSecondTurnAfterInputShowsDoneAgain() {
+        var t = SeenTracker()
+        t.setViewed(["a"])
+        t.observe("a", status: hookDone(1_000), title: nil)
+        t.noteInput("a", at: 1_200)
+        XCTAssertEqual(t.display("a", state: .idle), .idle)
+        t.observe("a", status: hookRunning, title: nil)
+        t.observe("a", status: hookDone(2_000), title: nil)
+        XCTAssertEqual(t.display("a", state: .idle), .done)
+        // Even when the poll missed the running state in between.
+        t.noteInput("a", at: 2_100)
+        t.observe("a", status: hookDone(3_000), title: nil)
+        XCTAssertEqual(t.display("a", state: .idle), .done)
+        // Forgetting the session drops its input time.
+        t.forget("a")
+        t.observe("a", status: hookDone(3_000), title: nil)
+        XCTAssertEqual(t.display("a", state: .idle), .done)
+    }
+
+    func testDetectorSessionsKeepTheSeenRule() {
+        var t = SeenTracker()
+        let idle = StatusInfo(state: .idle, source: "detector")
+        let running = StatusInfo(state: .running, source: "detector")
+        // On screen: never done, whatever the input.
+        t.setViewed(["a"])
+        t.observe("a", status: idle, title: nil)
+        t.observe("a", status: running, title: nil)
+        t.observe("a", status: idle, title: nil)
+        XCTAssertEqual(t.display("a", state: .idle), .idle)
+        // Off screen: ran and changed is done, and input doesn't clear it; looking does.
+        t.setViewed([])
+        t.observe("a", status: running, title: nil)
+        t.observe("a", status: idle, title: nil)
+        t.noteInput("a", at: UInt64.max)
+        XCTAssertEqual(t.display("a", state: .idle), .done)
+        t.setViewed(["a"])
+        XCTAssertEqual(t.display("a", state: .idle), .idle)
+        // A session that falls back from its hook to the detectors (the agent exited) goes back to this rule.
+        t.observe("b", status: hookDone(1_000), title: nil)
+        t.observe("b", status: idle, title: nil)
+        XCTAssertEqual(t.display("b", state: .idle), .idle)
+    }
 }
 
 final class FocusModelTests: XCTestCase {

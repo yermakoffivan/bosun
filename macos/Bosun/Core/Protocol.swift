@@ -105,12 +105,22 @@ public struct StatusInfo: Codable, Equatable, Sendable {
     public var state: AgentState
     public var source: String
     public var detail: String?
+    /// When the agent's hook reported that it finished its turn, Unix ms (hook states only; `state` is idle then).
+    public var doneAt: UInt64?
 
-    public init(state: AgentState, source: String = "detector", detail: String? = nil) {
+    enum CodingKeys: String, CodingKey {
+        case state, source, detail
+        case doneAt = "done_at"
+    }
+
+    public init(state: AgentState, source: String = "detector", detail: String? = nil, doneAt: UInt64? = nil) {
         self.state = state
         self.source = source
         self.detail = detail
+        self.doneAt = doneAt
     }
+
+    public var isHook: Bool { source == "hook" }
 }
 
 public struct Tab: Codable, Equatable, Sendable {
@@ -591,6 +601,12 @@ public enum ServerMessage: Equatable, Sendable {
         let state: AgentState
         let source: String?
         let detail: String?
+        let doneAt: UInt64?
+
+        enum CodingKeys: String, CodingKey {
+            case seq, session, state, source, detail
+            case doneAt = "done_at"
+        }
     }
     private struct Body<T: Decodable>: Decodable {
         let seq: UInt64
@@ -630,7 +646,8 @@ public enum ServerMessage: Equatable, Sendable {
             return .sessions(seq: b.seq, upsert: b.upsert ?? [], removed: b.removed ?? [])
         case "status":
             let b = try plain.decode(StatusBody.self, from: data)
-            return .status(seq: b.seq, session: b.session, info: StatusInfo(state: b.state, source: b.source ?? "detector", detail: b.detail))
+            return .status(seq: b.seq, session: b.session, info: StatusInfo(state: b.state, source: b.source ?? "detector", detail: b.detail,
+                                                                                      doneAt: b.doneAt))
         case "sidebar":
             let (q, v) = try field(Sidebar.self, "sidebar")
             return .sidebar(seq: q, v)
