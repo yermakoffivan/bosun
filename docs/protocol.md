@@ -29,7 +29,7 @@ Every message, in both directions, is one frame: a 4-byte big-endian unsigned le
 
 ```
 → {"t":"hello","protocol":1,"client":"bosun-mac/0.1"}
-← {"t":"snapshot","seq":1,"server":{…},"sessions":[…],"statuses":{…},"sidebar":{…},"recents":[…],"config":{…},"theme":{…},"themes":[…]}
+← {"t":"snapshot","seq":1,"server":{…},"sessions":[…],"statuses":{…},"sidebar":{…},"recents":[…],"config":{…},"theme":{…},"themes":[…],"keybindings":{…}}
 ← {"t":"status","seq":2,"session":"bosun-api-1a2b3c4d","state":"running","source":"hook"}
 → {"t":"cmd","id":7,"op":"restart","session":"bosun-api-1a2b3c4d","resume":true}
 ← {"t":"notice","seq":3,"message":"restarted api"}
@@ -266,7 +266,8 @@ What the new-session form collects:
 ```json
 {"t":"snapshot","seq":1,
  "server":{"version":"2.1.16","protocol":1,"tmux_socket":"bosun"},
- "sessions":[…],"statuses":{…},"sidebar":{…},"recents":[…],"config":{…},"theme":{…},"themes":[…]}
+ "sessions":[…],"statuses":{…},"sidebar":{…},"recents":[…],"config":{…},"theme":{…},"themes":[…],
+ "keybindings":{…}}
 ```
 
 The whole state. `server.tmux_socket` is the `-L` socket name terminal views attach with (`tmux -L <socket> attach -t =<session>`); it's absent when Bosun uses tmux's default socket.
@@ -347,6 +348,14 @@ Every color slot of the active theme as `#rrggbb`: backgrounds (`bg` the deepest
 
 Every theme `set_theme` accepts, in picker order. `user` themes are `.toml` files in Bosun's `themes` config directory; one with a bundled name replaces the bundled theme.
 
+#### Keybindings
+
+```json
+{"previous_tab":"Shift+Left","next_tab":"Shift+Right","previous_session":"Shift+Up","next_session":"Shift+Down","send_next_key":"Ctrl+v"}
+```
+
+The TUI's navigation shortcuts from the `[keybindings]` table in `config.toml`, so a remap applies to the TUI and the app alike. Each value is written the way a user writes it in that table: the modifiers `Ctrl`, `Alt` and `Shift` (in that order) joined to the key with `+`, where the key is `Left`, `Right`, `Up`, `Down`, `F1` to `F12`, or a lowercase letter (a letter always comes with `Ctrl` or `Alt`). A disabled action is `null`, and every field is always present. When the table is invalid the TUI falls back to the defaults shown above, and so does this. `send_next_key` is the TUI's key for passing the next key straight through to the agent.
+
 ### Deltas
 
 Each delta replaces one part of the snapshot.
@@ -359,18 +368,19 @@ Each delta replaces one part of the snapshot.
 {"t":"config","seq":7,"config":{…whole config…}}
 {"t":"theme","seq":8,"theme":{…whole palette…}}
 {"t":"themes","seq":9,"themes":[…whole list…]}
+{"t":"keybindings","seq":10,"keybindings":{…whole object…}}
 ```
 
 - `sessions`: `upsert` holds full rows that are new or changed, `removed` the names of sessions that are gone (their statuses go with them). Either may be absent. Row order follows tmux's; a client that cares about order uses the sidebar.
-- `status`: one session's state, source or detail changed. The fields are the same as one entry in the snapshot's `statuses`.
-- The others replace that part of the snapshot whole. These are small and change rarely (on a command, a reconcile, or an edit to `config.toml`).
+- `status`: one session's state, source or detail changed. The fields are the same as one entry in the snapshot's `statuses`. A state an agent reports through its hook goes out within about 250 ms: the daemon re-reads every session's hook state, pane title and command four times a second over its control-mode connection. States the detectors work out from the pane's contents follow the once-a-second refresh, as in the TUI. (If the control-mode connection is down, hook states fall back to the once-a-second refresh too.)
+- The others replace that part of the snapshot whole. These are small and change rarely (on a command, a reconcile, or an edit to `config.toml`). `keybindings` is sent when an edit to `config.toml` changes what the shortcuts resolve to.
 
 The daemon picks up changes to `config.toml` made elsewhere (the TUI's theme picker or settings panel, a text editor) within a second and sends the matching deltas, so a theme change in either the TUI or the app shows in both.
 
 ### `notice`
 
 ```json
-{"t":"notice","seq":10,"message":"created bosun-api-1a2b3c4d"}
+{"t":"notice","seq":11,"message":"created bosun-api-1a2b3c4d"}
 ```
 
 A message for a person, the same text the TUI shows in its status bar: confirmations and errors from Bosun's own work. Show it as a toast or ignore it. Messages caused by a command are also listed in that command's `ack`.
