@@ -72,6 +72,7 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
                     MainActor.assumeIsolated {
                         guard let self else { return }
                         self.contentsCount += 1
+                        if debugFrames { print(String(format: "frame %.3f %@", CACurrentMediaTime(), self.session)) }
                         self.onContents?(self)
                     }
                 }
@@ -127,6 +128,7 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
     func setRendererVisible(_ visible: Bool) {
         guard let surface, visible != rendererVisible else { return }
         rendererVisible = visible
+        if debugFrames { print(String(format: "visible %.3f %@ %@", CACurrentMediaTime(), session, visible ? "true" : "false")) }
         // The bool means "visible", not "occluded" (see Ghostty's BaseTerminalController).
         ghostty_surface_set_occlusion(surface, visible)
     }
@@ -335,6 +337,7 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
         let f = isResponder && windowKey
         guard let surface, f != hasTerminalFocus else { return }
         hasTerminalFocus = f
+        if debugFrames { print(String(format: "focus %.3f %@ %@", CACurrentMediaTime(), session, f ? "true" : "false")) }
         ghostty_surface_set_focus(surface, f)
     }
 

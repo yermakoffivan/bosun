@@ -41,6 +41,7 @@ Environment variables:
 - `BOSUN_SERVE_SOCKET=<path>` connects to that socket only and never starts a daemon. Use this for development.
 - `BOSUN_BIN=<path>` picks the `bosun` binary.
 - `BOSUN_DEBUG_KEYS=1` prints every key event and where it was routed.
+- `BOSUN_DEBUG_FRAMES=1` prints every frame a terminal draws, and every focus and occlusion change the app gives libghostty, with timestamps. Use it to find out what keeps an idle pane drawing.
 
 The window paints the sidebar and the last shown row from a cached snapshot before the daemon answers, then switches to live data.
 

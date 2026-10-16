@@ -9,6 +9,8 @@ let log = Logger(subsystem: appSubsystem, category: "app")
 
 /// BOSUN_DEBUG_KEYS=1 logs every key routing decision to stdout.
 let debugKeys = ProcessInfo.processInfo.environment["BOSUN_DEBUG_KEYS"] != nil
+/// BOSUN_DEBUG_FRAMES=1 logs every frame a terminal draws, and every focus and occlusion change it's given, to stdout.
+let debugFrames = ProcessInfo.processInfo.environment["BOSUN_DEBUG_FRAMES"] != nil
 /// A scripted test mode (--focustest, --selftest, --launchprobe) is running.
 let testMode = CommandLine.arguments.contains { ["--focustest", "--selftest", "--launchprobe"].contains($0) }
 /// --no-activate: open the window without activating the app, so a test run never takes the keyboard from whatever you're using.
