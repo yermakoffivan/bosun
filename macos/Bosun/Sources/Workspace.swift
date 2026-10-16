@@ -98,6 +98,8 @@ final class Workspace {
         }
         var first: Double?
         let before = v.contentsCount
+        // A pooled view can still be waiting for tmux's first paint (shown again before it drew).
+        let awaitingPaint = !v.hasPaintedContent
         v.onContents = { [weak self] view in
             let now = CACurrentMediaTime()
             if first == nil {
@@ -105,19 +107,19 @@ final class Workspace {
                 signposter.endInterval(label, sp)
                 if warm { self?.onShowMeasured?(session, true, first!, nil) }
             }
-            if !warm, view.contentsCount - before >= 1, view.hasPaintedContent {
+            if awaitingPaint, view.contentsCount - before >= 1, view.hasPaintedContent {
                 view.onContents = nil
                 view.layer?.opacity = 1
                 let painted = now - t0
                 signposter.emitEvent("AttachFirstPaint", "\(session, privacy: .public)")
-                self?.onShowMeasured?(session, false, first ?? painted, painted)
+                if !warm { self?.onShowMeasured?(session, false, first ?? painted, painted) }
                 self?.app.terminalPainted(session)
                 self?.launchIfPending(session)
-            } else if warm {
+            } else if !awaitingPaint {
                 view.onContents = nil
             }
         }
-        if warm { launchIfPending(session) }
+        if !awaitingPaint { launchIfPending(session) }
     }
 
     func expectLaunch(_ session: String, resume: Bool?) {
@@ -473,7 +475,7 @@ final class TileChromeView: NSView {
         } else {
             border.borderWidth = 0
         }
-        dim.backgroundColor = theme.bg.withAlphaComponent(0.36).cgColor
+        dim.backgroundColor = (GhosttyRuntime.shared.configColor("background") ?? theme.bg).withAlphaComponent(0.4).cgColor
         dim.isHidden = !(showRing && !active && hasTerminal)
         dropHighlight.backgroundColor = theme.accent.withAlphaComponent(0.12).cgColor
         dropHighlight.borderColor = theme.accent.cgColor
