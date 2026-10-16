@@ -288,6 +288,8 @@ final class Workspace {
     /// Create/remove chrome views to match the tree, then position everything.
     func syncChrome() {
         let ids = Set(layout.tiles)
+        // A tile closed mid-drag (Cmd+W with the header held) never gets its mouse up.
+        if let d = tileDrag, !ids.contains(d.tile) { cancelTileDrag() }
         for (id, v) in chrome where !ids.contains(id) {
             v.removeFromSuperview()
             chrome[id] = nil
