@@ -95,15 +95,23 @@ This is the biggest speed lever.
 
 Rejected alternative: one client per tile with `switch-client` on every switch. It's simpler, but every switch costs a full tmux redraw, and it can't keep background tiles live.
 
-## 6. Main area layout
+## 6. Main area layout: each sidebar row is a workspace
 
-- **Model:** a split tree, `Node = leaf(session) | split(axis, ratio, [Node])`, the same structure as tmux and Ghostty splits. It's pure data, serializable, and unit-testable without any views.
-- **View:** a custom `NSView` container that computes child frames directly from the tree (O(n) arithmetic per layout) and sets them. No Auto Layout and no nested `NSSplitView` in the terminal area. Constraint solving is the usual cause of choppy divider drags. Dividers are thin hit-test views with a hover cursor.
-- **Modes:** *Single* (one tile fills the area) and *Grid* (the tree). **Zoom** (Cmd+Return) shows one tile fullscreen in the area without changing the tree, like tmux's `resize-pane -Z`.
-- **Live resize:** pixel frames follow the pointer at display rate. Grid-size changes (pty winsize → SIGWINCH → agent redraw) are throttled to about one every 100 ms during the drag, plus a final one on mouse-up. Ink-based agents like Claude Code redraw their whole screen on every SIGWINCH, so a resize for each frame would peg the CPU and flicker. Measure whether the throttle looks acceptable in the spike.
-- **Saved layouts:** named split trees ("review grid", "focus") stored in the app's own Application Support JSON. Layouts are GUI-only, so they stay out of the daemon and Bosun's SQLite.
-- **Tear-off:** dragging a tile out of the window makes a new `NSWindow` with its own tree. The same `TerminalView` instance is reparented, with no reattach, so a tear-off is instant.
-- **Practical ceiling:** 9 tiles per window is the supported maximum. Past that, the budgets aren't promised.
+A sidebar row (a Bosun container) owns its own split layout, and **the row's tabs are its panes**. In the TUI, tabs hide each other, so related work in one project ends up behind a tab strip you rarely look at. In the app, the tabs of a row sit side by side, so one row can hold an agent, a test watcher and a shell for the same project, all visible at once.
+
+- **Selecting a row replaces the whole main area** with that row's layout: one pane or several, exactly as you left it. Clicking a row, previous/next session, Cmd+1…9 and Cmd+K all switch whole workspaces. Nothing from the previous row stays on screen.
+- **Switching stays fast:** the warm pool (section 5) keeps the views of recently shown rows attached and occluded, so switching to a warm row with three panes is three view swaps in one frame. Prewarm on hover warms every pane of the hovered row, visible panes first.
+- **New pane = new tab:** Cmd+D (right) and Cmd+Shift+D (down) create a new tab in the current row as a plain terminal in the row's directory, instantly and with no sheet, and split the active pane for it. "New Tab…" (Cmd+T) opens the new-session sheet pre-filled with the row's directory and adds the result as a split the same way, for when the new pane should run an agent. Both send `create` with the row's `container_id`, so the TUI sees an ordinary new tab.
+- **Closing a pane ends its tab:** Cmd+W closes the active pane and kills that tab's session. If anything other than a shell at its prompt is running, it asks first, the way Terminal.app does. Closing the last pane of a row is a kill of the row and always asks. Killing a whole row stays a menu item with a confirmation.
+- **Tabs from elsewhere:** a tab created in the TUI, or a row that already has several tabs when the app first sees it, gets a pane automatically: split beside the last pane, alternating direction, so a row with four tabs and no saved layout opens as a 2×2 grid. A tab that ends (exited, or killed in the TUI) loses its pane and the space goes to its neighbour.
+- **Tab navigation becomes pane navigation:** previous/next tab (Shift+Left/Right by default, from `[keybindings]`) moves the active pane through the row's panes in tab order, and Cmd+Option+arrows moves spatially. Tab rows under a container in the sidebar stay, and clicking one activates that pane.
+- **Model:** each row has a split tree, `Node = leaf(session) | split(axis, ratio, [Node])`. It's pure data, serializable and unit-tested without views. Moving a pane (dragging its header onto another pane's edge, or onto its middle to swap) is a tree operation inside the row.
+- **Persistence:** the trees are GUI-only, so they're stored in the app's Application Support JSON keyed by container id, not in the daemon or Bosun's SQLite. Each row also remembers its active pane.
+- **View:** a custom `NSView` container computes child frames directly from the tree (O(n) arithmetic per layout) and sets them. No Auto Layout and no nested `NSSplitView` in the terminal area: constraint solving is the usual cause of choppy divider drags. Dividers are thin hit-test views with a hover cursor.
+- **Zoom** (Cmd+Return) shows one pane of the row full size without changing its tree, like tmux's `resize-pane -Z`.
+- **Live resize:** pixel frames follow the pointer at display rate. Grid-size changes (pty winsize → SIGWINCH → agent redraw) are throttled to about one every 100 ms during the drag, plus a final one on mouse-up, because ink-based agents like Claude Code redraw their whole screen on every SIGWINCH.
+- **Tear-off:** dragging a row out of the sidebar, or a pane out of the window, opens it in its own `NSWindow` with the same `TerminalView` instances reparented, no reattach.
+- **Practical ceiling:** 9 panes per row is the supported maximum. Past that, the budgets aren't promised.
 
 ## 7. Sidebar
 
@@ -125,7 +133,7 @@ The TUI's biggest daily annoyance is focus. The sidebar and the terminal take tu
 - **Switching tiles:** a single click on a tile activates it. That first click is consumed rather than passed to tmux, so activating a tile never clicks something in the agent's UI by accident. Cmd+Option+arrows move between tiles from the keyboard.
 - **Focus follows the mouse (on by default):** with two or more tiles, moving the pointer into a tile makes it active. To avoid surprises it only reacts to real pointer movement (not a tile moving under a still pointer after a layout change), never while a mouse button is held, never while rename, the palette or a sheet is open, and never when the window isn't key. It's a setting for people who prefer click-only.
 - **Drops go where the pointer is, never nowhere:** dropping files or images on a tile activates that tile and inserts the paths into it, whichever tile was active before. Dropping files on a sidebar session row shows that session in the active tile and inserts them there. A drop anywhere else (sidebar background, section headers) is refused with the standard no-drop cursor, so it's clear before you let go that nothing will happen.
-- **Session in another tile:** clicking a sidebar row for a session that's already visible in another tile activates that tile instead of moving the session, since a session lives in at most one tile.
+- **Selecting a row** shows that row's own panes (section 6), and the keyboard goes to the pane that was active when you last left the row.
 - **Status stays separate from focus:** a tile whose agent is waiting shows it in the tile's header strip (session name plus the status colour), never as a border, so "needs you" can't be confused with "active".
 
 ## 7a. Themes
@@ -183,8 +191,8 @@ The budgets are only real if they're measured.
 |---|---|---|
 | 0. Spike (≈2 days) | Xcode project, libghostty xcframework, hardcoded session list from `tmux list-sessions`, one view attaching, a 3-view pool swap | Open questions 1, 3 and 4 answered; warm swap ≤ 1 frame measured; typing feels like Ghostty |
 | 1. Daemon | Commands over the control channel (benefits the TUI too), `bosun serve`, protocol v1, snapshot/delta, hook-based agent state, TUI and app running side by side (sidebar reload, shared global bindings), tests | TUI unchanged and faster; `socat` session shows snapshot + deltas; Claude badges driven by hooks; CI green |
-| 2. MVP app | Sidebar from daemon with sections, drag and drop reordering and inline rename, the focus model (section 7b), Single mode plus basic splits (Cmd+D / Cmd+Shift+D, draggable dividers, Cmd+W) so the active ring, click and hover activation can be used for real, warm pool + prewarm, create/restart/kill/rename, TUI-style navigation keys, file and image drops into terminals, Bosun themes for the app chrome and optionally the terminals, Cmd+K, 250 ms status poll in the daemon | Daily-drivable; typing never lands anywhere but a terminal; all budgets in section 1 except layout ones met |
-| 3. Layout | Zoom, tuned resize throttling, saved layouts, tear-off | Divider drag at display rate with 4 busy agents |
+| 2. MVP app | Sidebar from daemon with sections, drag and drop reordering and inline rename, the focus model (section 7b), per-row workspaces where a row's tabs are its split panes (section 6: Cmd+D / Cmd+Shift+D new tab as a split, Cmd+W closes a pane and its tab, draggable dividers, dragging panes to rearrange), warm pool + prewarm, create/restart/kill/rename, TUI-style navigation keys, file and image drops into terminals, Bosun themes for the app chrome and optionally the terminals, Cmd+K, 250 ms status poll in the daemon | Daily-drivable; typing never lands anywhere but a terminal; all budgets in section 1 except layout ones met |
+| 3. Layout | Zoom, tuned resize throttling, tear-off | Divider drag at display rate with 4 busy agents |
 | 4. Polish + ship | Notifications, settings (via daemon, env-pinned rows read-only as in the TUI), signing + notarization, Homebrew cask in the existing tap | Notarized build installs via `brew install --cask` |
 
 **Repo:** a `macos/` directory inside the bosun repo, so the protocol and both ends change in the same commit. Add `macos/` to `exclude` in `Cargo.toml` so it stays out of the crates.io package.
