@@ -172,8 +172,11 @@ brew install yetidevworks/bosun/bosun
 ### From crates.io
 
 ```bash
-cargo install bosun-tmux
+cargo install --locked bosun-tmux
 ```
+
+> [!IMPORTANT]
+> Use `--locked`. Without it, cargo ignores Bosun's `Cargo.lock` and resolves dependencies fresh, and the build currently fails with `failed to select a version for the requirement zip = "^6.0.0"`. Bosun's font dependency, `retrofont`, requires `zip 6`, and the only `zip 6` release (6.0.0) has been yanked. `--locked` builds with the exact versions Bosun was tested with, which still work. This will go away once `retrofont` moves to a newer `zip`.
 
 (The crate is published as `bosun-tmux` because `bosun` is reserved on
 crates.io; the installed binary is still `bosun`.)
@@ -183,7 +186,7 @@ crates.io; the installed binary is still `bosun`.)
 ```bash
 git clone https://github.com/yetidevworks/bosun
 cd bosun
-cargo install --path .
+cargo install --locked --path .   # or: make install
 ```
 
 ### Pre-built binaries
