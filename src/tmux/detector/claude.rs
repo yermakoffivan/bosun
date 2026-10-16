@@ -148,9 +148,32 @@ fn looks_like_claude(plain: &str, bottom: &str, pane_command: Option<&str>) -> b
 /// then only digits and underscores, with at least one underscore — so
 /// a genuine binary named e.g. `node` or `zsh` can't be mistaken for it.
 fn is_claude_version_command(cmd: &str) -> bool {
+    // Older builds wrote `2_1_220`; 2.1.30x writes `2.1.301`.
     cmd.starts_with(|c: char| c.is_ascii_digit())
-        && cmd.contains('_')
-        && cmd.chars().all(|c| c.is_ascii_digit() || c == '_')
+        && cmd.contains(['_', '.'])
+        && cmd
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '_' || c == '.')
+}
+
+/// Claude is visibly working: its spinner line (`✶ Photosynthesizing…
+/// (1m 49s · ↓ 7.9k tokens)`) is in the bottom of the pane, or its title
+/// or a raw title in the pane carries a braille spinner frame. Used to
+/// cross-check a hook report (see `agent_hooks::resolve`).
+pub fn working_on_screen(ctx: &DetectContext<'_>) -> bool {
+    ctx.pane_title.is_some_and(title_is_working)
+        || has_thinking_marker(&bottom_region(ctx.plain))
+        || has_spinner_title(ctx.ansi)
+}
+
+/// Claude shows that the user interrupted the turn with Esc
+/// (`⎿  Interrupted · What should Claude do instead?`). Claude fires no
+/// hook for that, so this is how a `running` report gets retired.
+pub fn interrupted_on_screen(ctx: &DetectContext<'_>) -> bool {
+    bottom_region(ctx.plain).lines().any(|l| {
+        let l = l.trim_start().trim_start_matches('⎿').trim_start();
+        l.starts_with("Interrupted")
+    })
 }
 
 fn has_prompt_marker(region: &str) -> bool {
@@ -203,9 +226,29 @@ fn has_thinking_marker(region: &str) -> bool {
         "Considering",
         "Working",
     ];
-    VERBS
+    if VERBS
         .iter()
         .any(|v| region.contains(&format!("{}…", v)) || region.contains(&format!("{}...", v)))
+    {
+        return true;
+    }
+    // Claude picks from a long, growing list of whimsical verbs
+    // ("Photosynthesizing…", "Moseying…"), so also take the spinner
+    // line's form: an `-ing…` word followed by its elapsed time in
+    // parentheses, e.g. `Photosynthesizing… (1m 49s · ↓ 7.9k tokens)`.
+    region.lines().any(|l| {
+        l.match_indices('…').any(|(i, _)| {
+            let word = l[..i]
+                .rsplit(|c: char| !c.is_alphabetic())
+                .next()
+                .unwrap_or("");
+            let after = l[i + '…'.len_utf8()..].trim_start();
+            word.len() > 4
+                && word.ends_with("ing")
+                && after.starts_with('(')
+                && after[1..].starts_with(|c: char| c.is_ascii_digit())
+        })
+    })
 }
 
 fn has_spinner_title(ansi: &[u8]) -> bool {
@@ -487,6 +530,9 @@ Working
     fn version_command_shape_is_strict() {
         assert!(is_claude_version_command("2_1_220"));
         assert!(is_claude_version_command("2_1_0"));
+        assert!(is_claude_version_command("2.1.301"));
+        assert!(!is_claude_version_command("2"));
+        assert!(!is_claude_version_command("node"));
         assert!(!is_claude_version_command("zsh"));
         assert!(!is_claude_version_command("node"));
         assert!(!is_claude_version_command("7zip"));
@@ -513,5 +559,56 @@ Working
             "expected Idle or Unknown, got {:?}",
             got
         );
+    }
+
+    /// The bottom of a Claude 2.1.301 pane mid-turn: a whimsical verb,
+    /// the `2.1.301` process name, no box corners and a ✳ title.
+    const WORKING_2_1_301: &str = "\
+● I've reviewed the house style and the comparison post.
+
+✶ Photosynthesizing… (1m 49s · ↓ 7.9k tokens)
+
+──────────────────────────────────────── grav ─
+❯
+────────────────────────────────────────────────
+  Opus 5.5 2.1.301 ~/Projects/grav/grav ⎇ develop 9%
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+";
+
+    #[test]
+    fn claude_2_1_301_working_reads_running() {
+        let ctx = ctx_with(WORKING_2_1_301, Some("✳ grav"), Some("2.1.301"));
+        assert_eq!(ClaudeDetector.detect(&ctx), Status::Running);
+        assert!(working_on_screen(&ctx));
+        assert!(!interrupted_on_screen(&ctx));
+    }
+
+    #[test]
+    fn claude_2_1_301_at_rest_reads_idle() {
+        let rest = WORKING_2_1_301.replace("✶ Photosynthesizing… (1m 49s · ↓ 7.9k tokens)", "");
+        let ctx = ctx_with(&rest, Some("✳ grav"), Some("2.1.301"));
+        assert_eq!(ClaudeDetector.detect(&ctx), Status::Idle);
+        assert!(!working_on_screen(&ctx));
+    }
+
+    #[test]
+    fn spinner_line_needs_an_ing_word_and_elapsed_time() {
+        assert!(has_thinking_marker("✻ Moseying… (12s · esc to interrupt)"));
+        assert!(has_thinking_marker(
+            "· Photosynthesizing… (2m 3s · ↑ 1.2k tokens)"
+        ));
+        assert!(!has_thinking_marker("Loading… (see the docs)"));
+        assert!(!has_thinking_marker("and so on… (1 of 3)"));
+        assert!(!has_thinking_marker("Something… happened"));
+    }
+
+    #[test]
+    fn esc_interrupt_is_recognised() {
+        let s = "> fix the parser\n  ⎿  Interrupted · What should Claude do instead?\n❯\n";
+        let ctx = ctx_with(s, Some("✳ task"), Some("2.1.301"));
+        assert!(interrupted_on_screen(&ctx));
+        let s = "● Interrupted the parser earlier, see notes\n❯\n";
+        let ctx = ctx_with(s, Some("✳ task"), Some("2.1.301"));
+        assert!(!interrupted_on_screen(&ctx));
     }
 }

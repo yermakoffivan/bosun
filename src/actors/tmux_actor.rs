@@ -1769,9 +1769,9 @@ async fn refresh_focused(
     );
     let detected = registry.detect(&ctx);
     let smoother = refresh_state.smoothers.entry(s.name.clone()).or_default();
-    let prompt = claude_prompt_on_screen(config, &s, &ctx);
+    let screen = claude_screen(config, &s, &ctx);
     let (smoothed, source, detail, done_at) =
-        settle_status(config, &s, detected, prompt, now, smoother);
+        settle_status(config, &s, detected, screen, now, smoother);
     let publish = if smoothed == Status::Unknown {
         Status::Idle
     } else {
@@ -1987,9 +1987,9 @@ async fn refresh_all(
         );
         let detected = registry.detect(&ctx);
         let smoother = state.smoothers.entry(s.name.clone()).or_default();
-        let prompt = claude_prompt_on_screen(config, &s, &ctx);
+        let screen = claude_screen(config, &s, &ctx);
         let (smoothed, status_source, status_detail, done_at) =
-            settle_status(config, &s, detected, prompt, now, smoother);
+            settle_status(config, &s, detected, screen, now, smoother);
 
         // Only hold onto the preview buffer for the focused session — the
         // others get None so we don't keep megabytes of pane history alive.
@@ -2033,6 +2033,36 @@ fn claude_prompt_on_screen(
         && crate::tmux::detector::claude::ClaudeDetector.detect(ctx) == Status::Waiting
 }
 
+/// What Claude's own UI shows in a capture, for cross-checking its hook
+/// report (see `agent_hooks::resolve`). All false for other agents, or
+/// with hooks off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ClaudeScreen {
+    /// A permission or question prompt (only looked for while the hook
+    /// says `running`).
+    prompt: bool,
+    /// The spinner line or a spinner title: Claude is working.
+    working: bool,
+    /// The Esc interrupt line.
+    interrupted: bool,
+}
+
+fn claude_screen(
+    config: &Config,
+    s: &crate::tmux::TmuxSession,
+    ctx: &DetectContext<'_>,
+) -> ClaudeScreen {
+    use crate::tmux::detector::claude;
+    if !config.agent_hooks || s.agent.as_deref() != Some("claude") || s.hook.is_none() {
+        return ClaudeScreen::default();
+    }
+    ClaudeScreen {
+        prompt: claude_prompt_on_screen(config, s, ctx),
+        working: claude::working_on_screen(ctx),
+        interrupted: claude::interrupted_on_screen(ctx),
+    }
+}
+
 /// Combine the detector's answer with what the agent reported through
 /// its hooks (see `agent_hooks::resolve`). A hook state that wins skips
 /// the smoother: the agent said so, there's nothing to debounce. The
@@ -2048,11 +2078,11 @@ fn settle_status(
     config: &Config,
     s: &crate::tmux::TmuxSession,
     detected: Status,
-    prompt_on_screen: bool,
+    screen: ClaudeScreen,
     now: SystemTime,
     smoother: &mut Smoother,
 ) -> Settled {
-    match hook_status(config, s, prompt_on_screen, now) {
+    match hook_status(config, s, screen, now) {
         Some((publish, detail, done_at)) => {
             smoother.force(publish);
             (publish, StatusSource::Hook, detail, done_at)
@@ -2074,7 +2104,7 @@ fn settle_status(
 fn hook_status(
     config: &Config,
     s: &crate::tmux::TmuxSession,
-    prompt_on_screen: bool,
+    screen: ClaudeScreen,
     now: SystemTime,
 ) -> Option<(Status, Option<String>, Option<u64>)> {
     if !config.agent_hooks {
@@ -2091,7 +2121,9 @@ fn hook_status(
         agent: s.agent.as_deref(),
         pane_title: s.pane_title.as_deref(),
         pane_command: s.pane_command.as_deref(),
-        prompt_on_screen,
+        prompt_on_screen: screen.prompt,
+        working_on_screen: screen.working,
+        interrupted_on_screen: screen.interrupted,
         quiet_ms,
         now_ms,
     };
@@ -2169,11 +2201,11 @@ fn poll_one(
     state.inputs.insert(s.name.clone(), inputs);
 
     let hook_at = s.hook.as_ref().map(|h| h.at_ms)?;
-    let prompt = state
+    let screen = state
         .captures
         .get(&s.name)
         .filter(|c| epoch_ms(c.taken_at) >= hook_at)
-        .is_some_and(|c| {
+        .map_or(ClaudeScreen::default(), |c| {
             let prev = state.smoothers.get(&s.name).map(|sm| sm.current());
             let ctx = DetectContext::from_parts(
                 &c.ansi,
@@ -2185,9 +2217,9 @@ fn poll_one(
                 s.pane_title.as_deref(),
                 s.pane_command.as_deref(),
             );
-            claude_prompt_on_screen(config, s, &ctx)
+            claude_screen(config, s, &ctx)
         });
-    let (status, detail, done_at) = hook_status(config, s, prompt, now)?;
+    let (status, detail, done_at) = hook_status(config, s, screen, now)?;
     let settled = (status, StatusSource::Hook, detail, done_at);
     if state.sent.get(&s.name) == Some(&settled) {
         return None;
@@ -2589,7 +2621,14 @@ mod build_cmd_tests {
             now,
         );
         assert_eq!(
-            settle_status(&config, &s, Status::Idle, false, now, &mut sm),
+            settle_status(
+                &config,
+                &s,
+                Status::Idle,
+                ClaudeScreen::default(),
+                now,
+                &mut sm
+            ),
             (
                 Status::Waiting,
                 StatusSource::Hook,
@@ -2605,7 +2644,14 @@ mod build_cmd_tests {
         let mut sm = Smoother::new();
         sm.observe(Status::Running);
         assert_eq!(
-            settle_status(&config, &s, Status::Running, false, now, &mut sm),
+            settle_status(
+                &config,
+                &s,
+                Status::Running,
+                ClaudeScreen::default(),
+                now,
+                &mut sm
+            ),
             (Status::Idle, StatusSource::Hook, None, Some(done_at))
         );
     }
@@ -2796,23 +2842,27 @@ mod build_cmd_tests {
     fn rejected_hook_state_goes_through_the_smoother() {
         let config = Config::default();
         let now = SystemTime::now();
-        // Esc: Running reported 30s ago, title no longer spinning.
+        // Esc: Running reported 30s ago, Claude shows its interrupt line.
         let s = hook_session(
             Some(hook_at(Status::Running, now, Duration::from_secs(30), None)),
             "✳ task",
-            "2_1_301",
+            "2.1.301",
             Duration::from_secs(1),
             now,
         );
+        let esc = ClaudeScreen {
+            interrupted: true,
+            ..Default::default()
+        };
         let mut sm = Smoother::new();
         sm.observe(Status::Running);
         // First Idle poll is held by hysteresis, second lands.
         assert_eq!(
-            settle_status(&config, &s, Status::Idle, false, now, &mut sm).0,
+            settle_status(&config, &s, Status::Idle, esc, now, &mut sm).0,
             Status::Running
         );
         assert_eq!(
-            settle_status(&config, &s, Status::Idle, false, now, &mut sm),
+            settle_status(&config, &s, Status::Idle, esc, now, &mut sm),
             (Status::Idle, StatusSource::Detector, None, None)
         );
         // Agent exited to the shell: hook ignored.
@@ -2829,7 +2879,15 @@ mod build_cmd_tests {
             now,
         );
         assert_eq!(
-            settle_status(&config, &s, Status::Idle, false, now, &mut Smoother::new()).1,
+            settle_status(
+                &config,
+                &s,
+                Status::Idle,
+                ClaudeScreen::default(),
+                now,
+                &mut Smoother::new()
+            )
+            .1,
             StatusSource::Detector
         );
     }
@@ -2865,7 +2923,10 @@ mod build_cmd_tests {
                 &config,
                 &s,
                 Status::Waiting,
-                true,
+                ClaudeScreen {
+                    prompt: true,
+                    ..Default::default()
+                },
                 now,
                 &mut Smoother::new()
             ),
@@ -2883,7 +2944,7 @@ mod build_cmd_tests {
                 &config,
                 &s,
                 Status::Waiting,
-                false,
+                ClaudeScreen::default(),
                 now,
                 &mut Smoother::new()
             )
@@ -2907,7 +2968,14 @@ mod build_cmd_tests {
             now,
         );
         assert_eq!(
-            settle_status(&config, &s, Status::Idle, false, now, &mut Smoother::new()),
+            settle_status(
+                &config,
+                &s,
+                Status::Idle,
+                ClaudeScreen::default(),
+                now,
+                &mut Smoother::new()
+            ),
             (Status::Idle, StatusSource::Detector, None, None)
         );
     }

@@ -386,6 +386,13 @@ pub struct ResolveInput<'a> {
     /// bottom of the pane right now. Only Claude's: the generic
     /// detector's Waiting just means the pane has been quiet a while.
     pub prompt_on_screen: bool,
+    /// Claude's spinner line (`✶ Photosynthesizing… (1m 49s …)`) or a
+    /// spinner title is on screen, in a capture taken after the hook
+    /// report. Claude-only, like `prompt_on_screen`.
+    pub working_on_screen: bool,
+    /// Claude shows the Esc interrupt line (`⎿ Interrupted · …`), in a
+    /// capture taken after the hook report.
+    pub interrupted_on_screen: bool,
     /// Milliseconds since the pane last produced output.
     pub quiet_ms: u64,
     pub now_ms: u64,
@@ -399,9 +406,14 @@ pub struct ResolveInput<'a> {
 ///
 ///   * The agent exited to a shell: whatever it last reported is stale.
 ///   * Claude fires no hook when you interrupt it with Esc, so a
-///     `running` state can outlive the turn. Claude's pane title drops
-///     its braille spinner when it stops, so once the grace period is
-///     over a non-working title hands the row back to the detector.
+///     `running` state can outlive the turn. Its interrupt line on
+///     screen (with no spinner line under it) hands the row back to
+///     the detector. The pane title can't be used for this: Claude
+///     2.1.30x keeps its ✳ title while it works.
+///   * A `done` or `idle` report while Claude's spinner line is on
+///     screen is stale: another Stop hook (the user's own) can make
+///     Claude carry on after Bosun's Stop hook said done, with no
+///     prompt-submit hook to say it started again.
 ///   * A `running` pane that has been quiet for a minute is stale for
 ///     the same kind of reason (an API error or crash with no hook).
 ///   * Parallel tool calls can fire `PreToolUse` for one tool while
@@ -416,10 +428,11 @@ pub fn resolve(hook: Option<&HookState>, input: &ResolveInput<'_>) -> Option<Sta
     if input.pane_command.is_some_and(is_shell_command) {
         return None;
     }
-    // Only Claude's title is known to carry a working/not-working
-    // spinner, so only Claude sessions get the title cross-check.
+    // The screen cross-checks read Claude's own UI, so only Claude
+    // sessions get them.
     let claude = input.agent == Some("claude");
     let title_signal = if claude { input.pane_title } else { None };
+    let working = claude && input.working_on_screen;
     let age = input.now_ms.saturating_sub(hook.at_ms);
     match hook.status {
         Status::Running => {
@@ -429,33 +442,27 @@ pub fn resolve(hook: Option<&HookState>, input: &ResolveInput<'_>) -> Option<Sta
             if input.quiet_ms >= RUNNING_QUIET_STALE_MS {
                 return None;
             }
-            if age >= RUNNING_TITLE_GRACE_MS && title_signal.is_some_and(title_shows_idle) {
+            if claude && input.interrupted_on_screen && !working {
                 return None;
             }
             Some(Status::Running)
         }
         Status::Waiting => {
-            if age >= RUNNING_TITLE_GRACE_MS && title_signal.is_some_and(title_is_working) {
+            if age >= RUNNING_TITLE_GRACE_MS
+                && (working || title_signal.is_some_and(title_is_working))
+            {
                 return None;
             }
             Some(Status::Waiting)
         }
-        Status::Done | Status::Idle => Some(hook.status),
+        Status::Done | Status::Idle => {
+            if working {
+                return None;
+            }
+            Some(hook.status)
+        }
         Status::Error | Status::Unknown => None,
     }
-}
-
-/// Claude's title positively says it isn't working: it leads with one
-/// of its star glyphs (`✳ Fix the parser bug`) rather than a braille
-/// spinner frame. A title that is neither (a hostname, an older Claude
-/// that sets none) says nothing either way, so it doesn't overrule a
-/// hook.
-fn title_shows_idle(title: &str) -> bool {
-    title
-        .trim_start()
-        .chars()
-        .next()
-        .is_some_and(|c| ('\u{2722}'..='\u{273f}').contains(&c))
 }
 
 /// A login shell, i.e. the agent has exited back to the prompt.
@@ -690,6 +697,8 @@ mod tests {
             pane_title: title,
             pane_command: cmd,
             prompt_on_screen: detected == Status::Waiting,
+            working_on_screen: detected == Status::Running,
+            interrupted_on_screen: false,
             quiet_ms: 0,
             now_ms: 100_000,
         }
@@ -732,39 +741,54 @@ mod tests {
     }
 
     #[test]
-    fn esc_interrupt_running_with_idle_title_falls_back() {
-        // Running written 10s ago, Claude's title has dropped its
-        // spinner: the user hit Esc and no Stop hook fired.
+    fn esc_interrupt_line_retires_running() {
+        // Running written 10s ago; the user hit Esc (no Stop hook fires)
+        // and Claude shows its interrupt line.
         let h = hook(Status::Running, 90_000);
-        assert_eq!(
-            resolve(
-                Some(&h),
-                &input(Some("✳ task"), Some("2_1_301"), Status::Idle)
-            ),
-            None
-        );
-        // Same state while the title still spins: trust the hook.
-        assert_eq!(
-            resolve(
-                Some(&h),
-                &input(Some("⠙ task"), Some("2_1_301"), Status::Running)
-            ),
-            Some(Status::Running)
-        );
+        let mut i = input(Some("✳ task"), Some("2.1.301"), Status::Idle);
+        i.interrupted_on_screen = true;
+        assert_eq!(resolve(Some(&h), &i), None);
+        // A new turn's spinner under an old interrupt line: still running.
+        i.working_on_screen = true;
+        assert_eq!(resolve(Some(&h), &i), Some(Status::Running));
     }
 
     #[test]
-    fn only_a_positive_idle_title_overrules_running() {
+    fn a_resting_title_doesnt_retire_running() {
+        // Claude 2.1.30x keeps its ✳ title while it works, so the title
+        // says nothing about a turn ending.
         let h = hook(Status::Running, 90_000);
-        for title in ["hades-2.local", "claude", ""] {
+        for title in ["✳ grav", "hades-2.local", "claude", ""] {
             assert_eq!(
-                resolve(Some(&h), &input(Some(title), Some("2_1_301"), Status::Idle)),
+                resolve(Some(&h), &input(Some(title), Some("2.1.301"), Status::Idle)),
                 Some(Status::Running),
                 "{title:?}"
             );
         }
-        assert!(title_shows_idle("✳ Fix the parser bug"));
-        assert!(!title_shows_idle("⠙ Fix the parser bug"));
+    }
+
+    #[test]
+    fn done_with_the_spinner_line_on_screen_is_stale() {
+        // The user's own Stop hook made Claude carry on after Bosun's
+        // Stop hook reported done; no hook says it started again.
+        for state in [Status::Done, Status::Idle] {
+            let h = hook(state, 50_000);
+            assert_eq!(
+                resolve(
+                    Some(&h),
+                    &input(Some("✳ grav"), Some("2.1.301"), Status::Running)
+                ),
+                None,
+                "{state:?}"
+            );
+            assert_eq!(
+                resolve(
+                    Some(&h),
+                    &input(Some("✳ grav"), Some("2.1.301"), Status::Idle)
+                ),
+                Some(state)
+            );
+        }
     }
 
     #[test]
