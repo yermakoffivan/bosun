@@ -1,0 +1,7 @@
+build/
+DerivedData/
+*.xcodeproj/
+*.xcframework
+results/ghostty-build.log
+results/window-id.txt
+results/sigwinch.log

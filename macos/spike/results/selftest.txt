@@ -1,0 +1,26 @@
+# Bosun spike selftest  2026-10-16 05:02:09 +0000
+display refresh: 60 Hz max, backing scale 2.0
+ghostty config: font-size=15.0 background=#21252b scrollback-limit=? diagnostics=0
+
+## Warm swaps (single tile, pool of 4: bosun-spike-1, bosun-spike-2, bosun-spike-3, bosun-spike-4)
+pool misses (should be 0): 0
+warm swap -> first frame committed to layer: n=100  p50=4.20 ms  p90=8.41 ms  p99=9.81 ms  min=2.79 ms  max=11.17 ms
+warm swap -> frame with session's status line: n=100  p50=4.20 ms  p90=8.41 ms  p99=9.81 ms  min=2.79 ms  max=11.17 ms
+
+## Cold attaches (new libghostty view + `tmux attach` spawn)
+cold attach -> first frame committed to layer: n=20  p50=12.26 ms  p90=14.19 ms  p99=14.71 ms  min=8.87 ms  max=14.71 ms
+cold attach -> first frame showing tmux's paint (status line): n=20  p50=59.18 ms  p90=68.17 ms  p99=72.68 ms  min=44.18 ms  max=72.68 ms
+ghostty_surface_free (detach) on main thread: n=22  p50=12.47 ms  p90=13.60 ms  p99=14.01 ms  min=11.54 ms  max=14.01 ms
+ghostty_surface_free after `detach-client` + child exit: n=6  p50=1.44 ms  p90=2.71 ms  p99=2.71 ms  min=1.30 ms  max=2.71 ms
+
+## Divider drag: left tile = bosun-spike-5 (SIGWINCH full-redraw stand-in), right = bosun-spike-3 (ticker)
+drag 1  throttle=100ms  steps=61 over 1017 ms  nominal frame=16.67 ms  late intervals(>1.5x)=1  max interval=33.29 ms  step cost p50=0.07 ms p99=0.17 ms
+        SIGWINCH received by reflow script: 5   ghostty_surface_set_size calls: 11   tmux %layout-change (window resizes) seen by a control client: 10   left view frames committed during drag: 83   cols 64 -> 32
+drag 2  throttle=off  steps=61 over 1017 ms  nominal frame=16.67 ms  late intervals(>1.5x)=1  max interval=33.28 ms  step cost p50=0.08 ms p99=0.17 ms
+        SIGWINCH received by reflow script: 5   ghostty_surface_set_size calls: 60   tmux %layout-change (window resizes) seen by a control client: 29   left view frames committed during drag: 108   cols 64 -> 32
+drag 3  throttle=100ms  steps=61 over 1017 ms  nominal frame=16.67 ms  late intervals(>1.5x)=1  max interval=33.30 ms  step cost p50=0.09 ms p99=0.19 ms
+        SIGWINCH received by reflow script: 5   ghostty_surface_set_size calls: 11   tmux %layout-change (window resizes) seen by a control client: 10   left view frames committed during drag: 85   cols 64 -> 32
+drag 4  throttle=off  steps=61 over 1017 ms  nominal frame=16.67 ms  late intervals(>1.5x)=1  max interval=33.26 ms  step cost p50=0.07 ms p99=0.19 ms
+        SIGWINCH received by reflow script: 5   ghostty_surface_set_size calls: 60   tmux %layout-change (window resizes) seen by a control client: 29   left view frames committed during drag: 108   cols 64 -> 32
+
+tmux window size of bosun-spike-5 after drags: 32x41  view grid: 32x42

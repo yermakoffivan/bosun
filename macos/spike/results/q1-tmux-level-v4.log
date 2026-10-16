@@ -1,0 +1,9 @@
+== tmux-level check v4: does a client resize count as activity? sole ignore-size client after the other detaches?
+  [A(140x40) then B(100x30) attached: B latest] window=100x29 | 140x40 - act=1792127085;100x30 - act=1792127086;
+  [A resized its pty to 120x35 (no input)] window=120x34 | 120x35 - act=1792127085;100x30 - act=1792127086;
+  [A typed] window=120x34 | 120x35 - act=1792127089;100x30 - act=1792127086;
+  [A ignore-size] window=100x29 | 120x35 ignore-size act=1792127089;100x30 - act=1792127086;
+  [B detached; A (ignore-size) is the sole client] window=120x34 | 120x35 ignore-size act=1792127089;
+  [sole ignore-size client A resized to 90x25] window=90x24 | 90x25 ignore-size act=1792127089;
+  [sole ignore-size client A typed] window=90x24 | 90x25 ignore-size act=1792127093;
+  [A cleared] window=90x24 | 90x25 - act=1792127093;

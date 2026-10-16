@@ -1,0 +1,13 @@
+# Subscriptions from a control client attached to __bosun_monitor; panes %0..%5 live in OTHER sessions.
+ctl refresh-client -B 'other_pane:%0:#{session_name}|#{pane_title}|#{pane_current_command}'
+ctl refresh-client -B 'other_pane6:%5:#{session_name}|#{pane_title}|#{pane_current_command}'
+ctl refresh-client -B 'own_all:%*:#{session_name}|#{pane_title}|#{pane_current_command}'
+ctl refresh-client -B 'other_window:@1:#{session_name}|#{window_name}'
+ctl refresh-client -B 'loop_all::#{S:#{session_name}[#{W:#{P:#{pane_id}=#{pane_title}/#{pane_current_command};}}] }'
+sleep 2.5
+sh tmux -L bosun-spike select-pane -t %0 -T TITLE_CHANGED_IN_SESSION_1
+sleep 2.5
+sh tmux -L bosun-spike send-keys -t %5 'sleep 3' Enter
+sleep 5
+sh tmux -L bosun-spike select-pane -t %0 -T '⠋ braille working'
+sleep 2.5

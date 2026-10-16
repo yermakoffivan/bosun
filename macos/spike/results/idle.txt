@@ -1,0 +1,12 @@
+# Idle CPU, 4 views attached (2 shown in split tiles, 2 hidden in the pool): bosun-spike-1, bosun-spike-6, bosun-spike-5, bosun-spike-7
+A. focused tile (cursor blink on): app CPU 0.429% of one core over 31 s (getrusage user+sys 0.132 s)
+    bosun-spike-1 (shown)  frames committed: 3
+    bosun-spike-5 (hidden) frames committed: 0
+    bosun-spike-6 (shown)  frames committed: 53
+    bosun-spike-7 (hidden) frames committed: 0
+B. no focused terminal: app CPU 0.224% of one core over 30 s (getrusage user+sys 0.068 s)
+    bosun-spike-1 (shown)  frames committed: 0
+    bosun-spike-5 (hidden) frames committed: 0
+    bosun-spike-6 (shown)  frames committed: 2
+    bosun-spike-7 (hidden) frames committed: 0
+footprint: 122.9 MB

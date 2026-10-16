@@ -1,0 +1,4 @@
+ctl send-keys -t =bosun-spike-6: 'echo from-monitor' Enter
+ctl display -p -t =bosun-spike-6: 'monitor sees window=#{window_width}x#{window_height}'
+sleep 1
+sh tmux -L bosun-spike display -p -t =bosun-spike-6: 'after monitor commands window=#{window_width}x#{window_height}'

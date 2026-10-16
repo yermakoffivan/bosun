@@ -1,0 +1,30 @@
+[  0.007] < %begin 1792125431 373 0
+[  0.007] < %end 1792125431 373 0
+[  0.007] < %session-changed $6 __bosun_monitor
+[  0.307] > refresh-client -B 'other_pane:%0:#{session_name}|#{pane_title}|#{pane_current_command}'
+[  0.307] > refresh-client -B 'other_pane6:%5:#{session_name}|#{pane_title}|#{pane_current_command}'
+[  0.307] > refresh-client -B 'own_all:%*:#{session_name}|#{pane_title}|#{pane_current_command}'
+[  0.307] > refresh-client -B 'other_window:@1:#{session_name}|#{window_name}'
+[  0.307] > refresh-client -B 'loop_all::#{S:#{session_name}[#{W:#{P:#{pane_id}=#{pane_title}/#{pane_current_command};}}] }'
+[  0.307] < %begin 1792125431 375 1
+[  0.307] < %end 1792125431 375 1
+[  0.307] < %begin 1792125431 376 1
+[  0.307] < %end 1792125431 376 1
+[  0.307] < %begin 1792125431 377 1
+[  0.307] < %end 1792125431 377 1
+[  0.307] < %begin 1792125431 378 1
+[  0.307] < %end 1792125431 378 1
+[  0.307] < %begin 1792125431 379 1
+[  0.307] < %end 1792125431 379 1
+[  1.308] < %subscription-changed loop_all $6 - - - : bosun-spike-1[%0=⠋ braille working/zsh;] bosun-spike-2[%1=hades-2.local/bash;] bosun-spike-3[%2=hades-2.local/bash;] bosun-spike-4[%3=hades-2.local/top;] bosun-spike-5[%4=hades-2.local/Python;] bosun-spike-6[%5=hades-2.local/bash;] __bosun_monitor[%6=hades-2.local/zsh;] 
+[  1.308] < %subscription-changed own_all $6 @6 0 %6 : __bosun_monitor|hades-2.local|zsh
+[  2.812] $ tmux -L bosun-spike select-pane -t %0 -T TITLE_CHANGED_IN_SESSION_1
+[  3.310] < %subscription-changed loop_all $6 - - - : bosun-spike-1[%0=TITLE_CHANGED_IN_SESSION_1/zsh;] bosun-spike-2[%1=hades-2.local/bash;] bosun-spike-3[%2=hades-2.local/bash;] bosun-spike-4[%3=hades-2.local/top;] bosun-spike-5[%4=hades-2.local/Python;] bosun-spike-6[%5=hades-2.local/bash;] __bosun_monitor[%6=hades-2.local/zsh;] 
+[  5.324] $ tmux -L bosun-spike send-keys -t %5 'sleep 3' Enter
+[  5.837] < %unlinked-window-renamed @5 sleep
+[  6.313] < %subscription-changed loop_all $6 - - - : bosun-spike-1[%0=TITLE_CHANGED_IN_SESSION_1/zsh;] bosun-spike-2[%1=hades-2.local/bash;] bosun-spike-3[%2=hades-2.local/bash;] bosun-spike-4[%3=hades-2.local/top;] bosun-spike-5[%4=hades-2.local/Python;] bosun-spike-6[%5=hades-2.local/sleep;] __bosun_monitor[%6=hades-2.local/zsh;] 
+[  8.340] < %unlinked-window-renamed @5 bash
+[  9.316] < %subscription-changed loop_all $6 - - - : bosun-spike-1[%0=TITLE_CHANGED_IN_SESSION_1/zsh;] bosun-spike-2[%1=hades-2.local/bash;] bosun-spike-3[%2=hades-2.local/bash;] bosun-spike-4[%3=hades-2.local/top;] bosun-spike-5[%4=hades-2.local/Python;] bosun-spike-6[%5=hades-2.local/bash;] __bosun_monitor[%6=hades-2.local/zsh;] 
+[ 10.340] $ tmux -L bosun-spike select-pane -t %0 -T '⠋ braille working'
+[ 11.318] < %subscription-changed loop_all $6 - - - : bosun-spike-1[%0=⠋ braille working/zsh;] bosun-spike-2[%1=hades-2.local/bash;] bosun-spike-3[%2=hades-2.local/bash;] bosun-spike-4[%3=hades-2.local/top;] bosun-spike-5[%4=hades-2.local/Python;] bosun-spike-6[%5=hades-2.local/bash;] __bosun_monitor[%6=hades-2.local/zsh;] 
+[ 15.015] < %exit

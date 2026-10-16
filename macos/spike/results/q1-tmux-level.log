@@ -1,0 +1,18 @@
+== tmux-level check v2: two plain pty clients on bosun-spike-1 (window-size latest). A=140x40, B=100x30
+  [A attached] window=140x39 | /dev/ttys026 140x40 flags=UTF-8 act=1792125785;
+  [B attached, nobody typed (attach alone makes B latest?)] window=100x29 | /dev/ttys026 140x40 flags=UTF-8 act=1792125785;/dev/ttys027 100x30 flags=UTF-8 act=1792125786;
+  [A typed (t=3)] window=140x39 | /dev/ttys026 140x40 flags=UTF-8 act=1792125788;/dev/ttys027 100x30 flags=UTF-8 act=1792125786;
+  [B typed (t=6 of B)] window=100x29 | /dev/ttys026 140x40 flags=UTF-8 act=1792125788;/dev/ttys027 100x30 flags=UTF-8 act=1792125792;
+  A=/dev/ttys026 B=/dev/ttys027
+  [plain 'refresh-client -t A' (no flags): does it bump A's activity?] window=100x29 | /dev/ttys026 140x40 flags=UTF-8 act=1792125788;/dev/ttys027 100x30 flags=UTF-8 act=1792125792;
+  [A -f ignore-size (A hidden): expect B size] window=100x29 | /dev/ttys026 140x40 flags=ignore-size act=1792125788;/dev/ttys027 100x30 flags=UTF-8 act=1792125792;
+  [A -f !ignore-size (A shown): expect A size (flag change bumps activity?)] window=100x29 | /dev/ttys026 140x40 flags=UTF-8 act=1792125788;/dev/ttys027 100x30 flags=UTF-8 act=1792125792;
+  [both ignore-size: size frozen?] window=100x29 | /dev/ttys026 140x40 flags=ignore-size act=1792125788;/dev/ttys027 100x30 flags=ignore-size act=1792125792;
+  [B detached while A has ignore-size (A is sole client)] window=140x39 | /dev/ttys026 140x40 flags=ignore-size act=1792125788;
+  [A cleared] window=140x39 | /dev/ttys026 140x40 flags=UTF-8 act=1792125788;
+== tmux-level check v3: A latest, then hidden with ignore-size while B present; focus report as a 'make latest' primitive
+  [B attached first, then A attached and typed: A latest] window=140x39 | /dev/ttys026 100x30 flags=UTF-8 act=1792125825;/dev/ttys027 140x40 flags=UTF-8 act=1792125828;
+  [hide A: -f ignore-size -> expect B's 100x29] window=100x29 | /dev/ttys026 100x30 flags=UTF-8 act=1792125825;/dev/ttys027 140x40 flags=ignore-size,UTF-8 act=1792125828;
+  [show A: -f !ignore-size -> A still latest by activity -> expect 140x39] window=140x39 | /dev/ttys026 100x30 flags=UTF-8 act=1792125825;/dev/ttys027 140x40 flags=UTF-8 act=1792125828;
+  [B sent focus-in report at its t=9 (focus-events off) -> B latest?] window=100x29 | /dev/ttys026 100x30 flags=UTF-8 act=1792125834;/dev/ttys027 140x40 flags=UTF-8 act=1792125828;
+  [focus-events on; A flag cycled] window=100x29 | /dev/ttys026 100x30 flags=UTF-8 act=1792125834;/dev/ttys027 140x40 flags=UTF-8 act=1792125828;

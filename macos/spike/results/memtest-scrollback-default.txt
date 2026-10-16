@@ -1,0 +1,10 @@
+# Memory per attached view (scrollback-default); scrollback-limit=?
+baseline (window + sidebar, no views): 28.1 MB
++ bosun-spike-1 (grid 130x42)  footprint 291.6 MB  delta +263.5 MB
++ bosun-spike-2 (grid 130x42)  footprint 306.8 MB  delta +15.2 MB
++ bosun-spike-3 (grid 130x42)  footprint 323.1 MB  delta +16.3 MB
++ bosun-spike-4 (grid 130x42)  footprint 338.8 MB  delta +15.6 MB
++ bosun-spike-5 (grid 130x42)  footprint 347.2 MB  delta +8.5 MB
++ bosun-spike-6 (grid 130x42)  footprint 361.8 MB  delta +14.6 MB
+views attached: 6  total 333.7 MB  mean per view 55.6 MB  (first view 263.5 MB includes one-time renderer/font setup)
+mean per additional view (excluding first): 14.0 MB

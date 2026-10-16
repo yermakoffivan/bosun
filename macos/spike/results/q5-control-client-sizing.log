@@ -1,0 +1,58 @@
+== Q5: control client vs window-size negotiation (session bosun-spike-6, window-size latest)
+  [before] bosun-spike-6 window=100x29
+  [pty client A 100x30 attached] bosun-spike-6 window=100x29
+[  0.007] < %begin 1792125503 420 0
+[  0.007] < %end 1792125503 420 0
+[  0.007] < %session-changed $5 bosun-spike-6
+[  0.310] > list-panes -a -F '#{pane_id} #{pane_title}'
+[  0.310] < %begin 1792125503 422 1
+[  0.310] < %6 hades-2.local
+[  0.310] < %0 ⠋ braille working
+[  0.310] < %1 hades-2.local
+[  0.310] < %2 hades-2.local
+[  0.310] < %3 hades-2.local
+[  0.310] < %4 hades-2.local
+[  0.310] < %5 hades-2.local
+[  0.310] < %end 1792125503 422 1
+[  0.812] > send-keys -t =bosun-spike-6: 'echo from-control-client' Enter
+[  0.812] < %begin 1792125504 423 1
+[  0.812] < %end 1792125504 423 1
+[  1.315] > display -p -t =bosun-spike-6: '#{window_width}x#{window_height}'
+[  1.315] < %begin 1792125504 424 1
+[  1.315] < 100x29
+[  1.315] < %end 1792125504 424 1
+[  1.819] > list-clients -F '#{client_name} pid=#{client_pid} flags=#{client_flags} size=#{client_width}x#{client_height} session=#{session_name}'
+[  1.819] < %begin 1792125505 425 1
+[  1.819] < /dev/ttys026 pid=41610 flags=attached,focused,UTF-8 size=100x30 session=bosun-spike-6
+[  1.819] < client-41845 pid=41845 flags=attached,focused,control-mode,UTF-8 size=80x session=bosun-spike-6
+[  1.819] < %end 1792125505 425 1
+[  2.823] $ tmux -L bosun-spike display -p -t =bosun-spike-6: 'during-ctl-commands window=#{window_width}x#{window_height}'
+[  2.837]   during-ctl-commands window=100x29
+[  2.837] > refresh-client -C 200x50
+[  2.838] < %begin 1792125506 428 1
+[  2.838] < %end 1792125506 428 1
+[  2.838] < %layout-change @5 aca2,200x50,0,0,5 aca2,200x50,0,0,5 *
+[  3.842] $ tmux -L bosun-spike display -p -t =bosun-spike-6: 'after-refresh-C-200x50 window=#{window_width}x#{window_height}'
+[  3.860]   after-refresh-C-200x50 window=200x50
+[  3.860] > list-clients -F '#{client_name} pid=#{client_pid} flags=#{client_flags} size=#{client_width}x#{client_height} session=#{session_name}'
+[  3.860] < %begin 1792125507 431 1
+[  3.860] < /dev/ttys026 pid=41610 flags=attached,focused,UTF-8 size=100x30 session=bosun-spike-6
+[  3.860] < client-41845 pid=41845 flags=attached,focused,control-mode,UTF-8 size=200x session=bosun-spike-6
+[  3.860] < %end 1792125507 431 1
+[  7.035] < %exit
+  [after control client detached] bosun-spike-6 window=100x29
+-- monitor control client on __bosun_monitor sending commands at other sessions
+[  0.006] < %begin 1792125510 434 0
+[  0.006] < %end 1792125510 434 0
+[  0.006] < %session-changed $6 __bosun_monitor
+[  0.305] > send-keys -t =bosun-spike-6: 'echo from-monitor' Enter
+[  0.306] > display -p -t =bosun-spike-6: 'monitor sees window=#{window_width}x#{window_height}'
+[  0.306] < %begin 1792125511 436 1
+[  0.306] < %end 1792125511 436 1
+[  0.306] < %begin 1792125511 437 1
+[  0.306] < monitor sees window=100x29
+[  0.306] < %end 1792125511 437 1
+[  1.306] $ tmux -L bosun-spike display -p -t =bosun-spike-6: 'after monitor commands window=#{window_width}x#{window_height}'
+[  1.326]   after monitor commands window=100x29
+[  2.540] < %exit
+  [all clients gone] bosun-spike-6 window=100x29

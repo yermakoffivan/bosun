@@ -1,0 +1,15 @@
+# Control client attached directly to bosun-spike-6 while also carrying commands.
+ctl list-panes -a -F '#{pane_id} #{pane_title}'
+sleep 0.5
+ctl send-keys -t =bosun-spike-6: 'echo from-control-client' Enter
+sleep 0.5
+ctl display -p -t =bosun-spike-6: '#{window_width}x#{window_height}'
+sleep 0.5
+ctl list-clients -F '#{client_name} pid=#{client_pid} flags=#{client_flags} size=#{client_width}x#{client_height} session=#{session_name}'
+sleep 1
+sh tmux -L bosun-spike display -p -t =bosun-spike-6: 'during-ctl-commands window=#{window_width}x#{window_height}'
+ctl refresh-client -C 200x50
+sleep 1
+sh tmux -L bosun-spike display -p -t =bosun-spike-6: 'after-refresh-C-200x50 window=#{window_width}x#{window_height}'
+ctl list-clients -F '#{client_name} pid=#{client_pid} flags=#{client_flags} size=#{client_width}x#{client_height} session=#{session_name}'
+sleep 1

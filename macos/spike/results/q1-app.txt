@@ -1,0 +1,99 @@
+# Q1: hidden-client sizing, app views + an external client, window-size latest  2026-10-16 05:04:05 +0000
+tmux tmux 3.8; window-size(bosun-spike-6)=latest; focus-events=off
+
+## Mapping a view to its tmux client
+ghostty_surface_tty_name = /dev/ttys026
+ghostty_surface_foreground_pid = 33311
+list-clients -t =bosun-spike-6 -F '#{client_tty} #{client_pid}':
+    /dev/ttys026 33330
+tty_name matches a client_tty: true   foreground_pid matches client_pid: false
+display -p -c /dev/ttys026 '#{client_pid} #{session_name}' -> 33330 bosun-spike-6
+processes (ghostty foreground pid, tmux client_pid):
+      PID  PPID  PGID TTY      COMMAND
+    33311 33254 33311 ttys026  /usr/bin/login -flp rhuk /bin/bash --noprofile --norc -c exec -l tmux -L bosun-spike attach -t =bosun-spike-6
+    33330 33311 33311 ttys026  -tmux -L bosun-spike attach -t =bosun-spike-6
+
+## A. Plain window-size latest, no ignore-size toggling
+[A1 bosun-spike-6 shown in the single tile (sole client)]
+    bosun-spike-6 window=130x41   app view grid=130x42 (shown, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 130x42 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127045
+[A2 bosun-spike-6 hidden in the warm pool (still sole client)]
+    bosun-spike-6 window=130x41   app view grid=130x42 (hidden, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 130x42 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127045
+[A3 external 100x30 client attached to bosun-spike-6 (attach makes it latest)]
+    bosun-spike-6 window=100x29   app view grid=130x42 (hidden, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 130x42 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127045
+    client: /dev/ttys028 pid=33809 100x30 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127048
+[A4 bosun-spike-6 shown again in the app (no input yet)]
+    bosun-spike-6 window=100x29   app view grid=130x42 (shown, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 130x42 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127045
+    client: /dev/ttys028 pid=33809 100x30 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127048
+[A5 app view wrote a focus-in report (ESC[I) to its tmux client (text: binding action)]
+    bosun-spike-6 window=130x41   app view grid=130x42 (shown, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 130x42 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127050
+    client: /dev/ttys028 pid=33809 100x30 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127048
+[A6 external client typed (it is latest now) while bosun-spike-6 is shown in the app]
+    bosun-spike-6 window=100x29   app view grid=130x42 (shown, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 130x42 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127050
+    client: /dev/ttys028 pid=33809 100x30 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127051
+[A7 bosun-spike-6 hidden; hidden app client then became latest (wrote ESC[I) - the external client now sees the app's size]
+    bosun-spike-6 window=130x41   app view grid=130x42 (hidden, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 130x42 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127052
+    client: /dev/ttys028 pid=33809 100x30 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127051
+
+## B. ignore-size on hide / cleared on show
+[B1 bosun-spike-6 shown (cleared ignore-size) and app client made latest]
+    bosun-spike-6 window=130x41   app view grid=130x42 (shown, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 130x42 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127052
+    client: /dev/ttys028 pid=33809 100x30 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127051
+[B2 bosun-spike-6 hidden -> refresh-client -f ignore-size on the app client]
+    bosun-spike-6 window=100x29   app view grid=130x42 (hidden, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 130x42 session=bosun-spike-6 flags=attached,focused,ignore-size,UTF-8 activity=1792127052
+    client: /dev/ttys028 pid=33809 100x30 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127051
+[B3 external client typed while app view hidden]
+    bosun-spike-6 window=100x29   app view grid=130x42 (hidden, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 130x42 session=bosun-spike-6 flags=attached,focused,ignore-size,UTF-8 activity=1792127052
+    client: /dev/ttys028 pid=33809 100x30 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127054
+[B4 hidden+ignore-size app client wrote input (becomes latest by activity) - still ignored?]
+    bosun-spike-6 window=100x29   app view grid=130x42 (hidden, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 130x42 session=bosun-spike-6 flags=attached,focused,ignore-size,UTF-8 activity=1792127055
+    client: /dev/ttys028 pid=33809 100x30 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127054
+[B5 bosun-spike-6 shown into the right half tile (different size): ignore-size cleared + view resized, no input]
+    bosun-spike-6 window=64x41   app view grid=64x42 (shown, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 64x42 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127055
+    client: /dev/ttys028 pid=33809 100x30 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127054
+[B6 external client typed while bosun-spike-6 is shown in the app]
+    bosun-spike-6 window=100x29   app view grid=64x42 (shown, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 64x42 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127055
+    client: /dev/ttys028 pid=33809 100x30 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127056
+[B7 app view sends focus-in report (what a focus event would send with focus-events on)]
+    bosun-spike-6 window=64x41   app view grid=64x42 (shown, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 64x42 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127057
+    client: /dev/ttys028 pid=33809 100x30 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127056
+[B8 bosun-spike-6 hidden again (ignore-size)]
+    bosun-spike-6 window=100x29   app view grid=64x42 (hidden, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 64x42 session=bosun-spike-6 flags=attached,focused,ignore-size,UTF-8 activity=1792127057
+    client: /dev/ttys028 pid=33809 100x30 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127056
+[B9 external client resized to 160x45 while app view hidden]
+    bosun-spike-6 window=160x44   app view grid=64x42 (hidden, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 64x42 session=bosun-spike-6 flags=attached,focused,ignore-size,UTF-8 activity=1792127057
+    client: /dev/ttys028 pid=33809 160x45 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127056
+[B10 external client detached; hidden ignore-size app client is the sole client]
+    bosun-spike-6 window=160x44   app view grid=64x42 (hidden, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 64x42 session=bosun-spike-6 flags=attached,focused,ignore-size,UTF-8 activity=1792127057
+[B11 app window resized while bosun-spike-6 hidden (hidden views keep their frame)]
+    bosun-spike-6 window=160x44   app view grid=64x42 (hidden, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 64x42 session=bosun-spike-6 flags=attached,focused,ignore-size,UTF-8 activity=1792127057
+[B12 bosun-spike-6 shown in the (smaller) single tile: ignore-size cleared + resize]
+    bosun-spike-6 window=108x36   app view grid=108x37 (shown, tty /dev/ttys026)
+    client: /dev/ttys026 pid=33330 108x37 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127057
+
+## C. focus-events on: Ghostty emits ESC[I itself on ghostty_surface_set_focus(true)
+[C1 fresh app view of bosun-spike-6 (attached with focus-events on) + external 100x30 client attached after it]
+    bosun-spike-6 window=100x29   app view grid=108x37 (shown, tty /dev/ttys026)
+    client: /dev/ttys026 pid=35764 108x37 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127063
+    client: /dev/ttys028 pid=35903 100x30 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127065
+[C2 ghostty_surface_set_focus(false) then (true) on the app view]
+    bosun-spike-6 window=108x36   app view grid=108x37 (shown, tty /dev/ttys026)
+    client: /dev/ttys026 pid=35764 108x37 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127066
+    client: /dev/ttys028 pid=35903 100x30 session=bosun-spike-6 flags=attached,focused,UTF-8 activity=1792127065
