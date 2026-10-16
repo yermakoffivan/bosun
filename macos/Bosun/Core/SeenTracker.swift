@@ -80,6 +80,19 @@ public struct SeenTracker: Equatable, Sendable {
         entries[session] = e
     }
 
+    /// The last input time of every session that has one, Unix ms (saved across launches).
+    public var inputTimes: [String: UInt64] { lastInput }
+
+    /// Input times saved by an earlier run. A newer time already noted wins.
+    public mutating func restoreInputs(_ times: [String: UInt64]) {
+        for (s, t) in times { lastInput[s] = max(lastInput[s] ?? 0, t) }
+    }
+
+    /// Drop the input times of sessions that no longer exist.
+    public mutating func pruneInputs(keeping sessions: Set<String>) {
+        lastInput = lastInput.filter { sessions.contains($0.key) }
+    }
+
     public mutating func forget(_ session: String) {
         entries[session] = nil
         lastInput[session] = nil
@@ -94,5 +107,25 @@ public struct SeenTracker: Equatable, Sendable {
         }
         guard e.ran, e.changed, !viewed.contains(session) else { return state }
         return .done
+    }
+}
+
+/// The done rule's input times on disk (`inputs-<daemon>.json` in the app's Application Support folder), so a
+/// relaunch doesn't show every finished session as done again.
+public struct SavedInputs: Codable, Equatable, Sendable {
+    public var version = 1
+    public var inputs: [String: UInt64]
+
+    public init(_ inputs: [String: UInt64]) { self.inputs = inputs }
+
+    public func encoded() -> Data? {
+        let e = JSONEncoder()
+        e.outputFormatting = [.sortedKeys]
+        return try? e.encode(self)
+    }
+
+    public static func decode(_ data: Data) -> SavedInputs? {
+        guard let s = try? JSONDecoder().decode(SavedInputs.self, from: data), s.version == 1 else { return nil }
+        return s
     }
 }
