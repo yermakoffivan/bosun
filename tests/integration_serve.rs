@@ -511,6 +511,113 @@ fn serve_hook_state_reaches_clients_within_the_poll() {
     c.until("kill ack", |v| is_ack(v, 2));
 }
 
+/// Run `bosun hook claude <event>` as Claude Code would from inside
+/// `session`'s pane, with `payload` on stdin.
+fn run_claude_hook(fx: &Fixture, session: &str, event: &str, payload: Value) {
+    let display = |format: &str| {
+        let out = fx.tmux(&["display", "-p", "-t", session, format]);
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let mut hook = Command::new(BIN)
+        .args(["hook", "claude", event])
+        .env("TMUX", display("#{socket_path},#{pid},0"))
+        .env("TMUX_PANE", display("#{pane_id}"))
+        .env_remove("BOSUN_HOOK_LOG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn bosun hook");
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    assert!(hook.wait().unwrap().success());
+}
+
+#[test]
+fn serve_hook_done_carries_done_at_until_the_next_prompt() {
+    let mut fx = fixture();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    assert_eq!(c.recv().expect("snapshot")["t"], "snapshot");
+
+    // A non-shell foreground process, as in the latency test above.
+    c.send(json!({
+        "t": "cmd", "id": 1, "op": "create", "defer_launch": true,
+        "spec": {"name": "turns", "path": "/tmp", "agent": "terminal"}
+    }));
+    let seen = c.until("create ack", |v| is_ack(v, 1));
+    let ack = seen.last().unwrap();
+    assert_eq!(ack["ok"], true, "{ack}");
+    let name = ack["session"].as_str().unwrap().to_string();
+    fx.tmux(&["send-keys", "-t", &name, "exec sleep 600", "Enter"]);
+    let running_sleep = |v: &Value| {
+        v["t"] == "sessions"
+            && v["upsert"].as_array().is_some_and(|u| {
+                u.iter()
+                    .any(|s| s["name"] == name.as_str() && s["pane_command"] == "sleep")
+            })
+    };
+    if !seen.iter().any(running_sleep) {
+        c.until("sleep in the pane", running_sleep);
+    }
+    let pane_at = || {
+        let out = fx.tmux(&["show-options", "-pqv", "-t", &name, "@bosun_state_at"]);
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .trim()
+            .parse::<u64>()
+            .expect("@bosun_state_at")
+    };
+    let done_delta = |v: &Value| {
+        v["t"] == "status"
+            && v["session"] == name.as_str()
+            && v["source"] == "hook"
+            && v["done_at"].is_u64()
+    };
+
+    // The turn finishes: `idle` from the hook, with `done_at` set to the
+    // hook's own timestamp.
+    run_claude_hook(&fx, &name, "Stop", json!({"stop_hook_active": false}));
+    let first_at = pane_at();
+    let seen = c.until("status with done_at", done_delta);
+    let first = seen.last().unwrap();
+    assert_eq!(first["state"], "idle", "{first}");
+    assert_eq!(first["done_at"].as_u64(), Some(first_at), "{first}");
+
+    // A snapshot taken now has it too.
+    let mut c2 = Conn::connect(&path);
+    c2.send(json!({"t": "hello", "protocol": 1}));
+    let snap = c2.recv().expect("snapshot");
+    assert_eq!(snap["statuses"][&name]["done_at"].as_u64(), Some(first_at));
+    drop(c2);
+
+    // The next prompt clears it.
+    run_claude_hook(&fx, &name, "UserPromptSubmit", json!({"prompt": "go on"}));
+    let seen = c.until("running from the hook", |v| {
+        v["t"] == "status" && v["session"] == name.as_str() && v["state"] == "running"
+    });
+    let running = seen.last().unwrap();
+    assert_eq!(running["source"], "hook", "{running}");
+    assert!(running.get("done_at").is_none(), "{running}");
+
+    // A second turn finishing gives a newer `done_at`.
+    std::thread::sleep(Duration::from_millis(20));
+    run_claude_hook(&fx, &name, "Stop", json!({"stop_hook_active": false}));
+    let second_at = pane_at();
+    assert!(second_at > first_at);
+    let seen = c.until("second done_at", |v| {
+        done_delta(v) && v["done_at"].as_u64() == Some(second_at)
+    });
+    assert_eq!(seen.last().unwrap()["state"], "idle");
+
+    c.send(json!({"t": "cmd", "id": 2, "op": "kill", "session": name}));
+    c.until("kill ack", |v| is_ack(v, 2));
+}
+
 /// Create a `terminal` session through the daemon and return its tmux
 /// name. `args` is the command typed into its shell (empty: none).
 fn create_terminal(c: &mut Conn, id: u64, name: &str, args: &str) -> String {
