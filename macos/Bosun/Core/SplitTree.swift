@@ -86,6 +86,7 @@ public indirect enum SplitNode: Codable, Equatable, Sendable {
     public struct Layout: Equatable, Sendable {
         public var tiles: [TileID: CGRect] = [:]
         public var dividers: [Divider] = []
+        public init() {}
     }
 
     /// Frames for every tile and divider inside `rect`. `gap` is the divider thickness.
