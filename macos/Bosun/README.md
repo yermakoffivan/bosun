@@ -32,6 +32,8 @@ BOSUN_BUILD_DIR=build-mine ./build.sh   # the same into build-mine/, leaving bui
 
 ## Running
 
+To use it day to day, run `make install-mac` from the repo root. It builds into `build-release/` (so it never replaces a dev copy running from `build/`) and installs `~/Applications/Bosun.app`. Quit the installed app first.
+
 Launched normally, the app looks for `bosun` in `$BOSUN_BIN`, `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`, connects to the daemon's socket (`bosun serve --print-socket`), and starts `bosun serve` itself if nothing answers. The daemon outlives the app.
 
 Environment variables:
