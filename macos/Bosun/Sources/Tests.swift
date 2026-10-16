@@ -666,8 +666,13 @@ final class FocusTest: TestKit {
     }
 
     /// Prefix 1 (Bosun's jump to the first session, for the TUI), typed inside the app's terminals.
+    /// The tmux prefix (whatever ~/.tmux.conf sets, C-b by default), then 1.
     private func typePrefixJump() async {
-        await key(11, "\u{02}", [.control], ignoring: "b")
+        let prefix = tmuxOut(["show", "-gv", "prefix"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        var letter: Character = "b"
+        if prefix.hasPrefix("C-"), prefix.count == 3, let c = prefix.last, c.isLetter { letter = Character(c.lowercased()) }
+        let ctrl = String(UnicodeScalar(UInt8(letter.asciiValue! - 96)))
+        await key(TestKit.keyCodes[letter] ?? 11, ctrl, [.control], ignoring: String(letter))
         await key(18, "1")
     }
 
