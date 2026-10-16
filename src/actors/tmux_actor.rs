@@ -643,9 +643,9 @@ pub fn spawn(
                     // mode for this one launch (`None` = use the stored
                     // mode for a fresh create, `Some(b)` = the restart's
                     // one-shot choice). `restart_in_place` waits for the
-                    // shell, types the command, and bursts a redraw. A
-                    // `terminal` session has an empty command and is left
-                    // as a plain shell.
+                    // shell and types the command, and the refreshes
+                    // below pick up the agent. A `terminal` session has
+                    // an empty command and is left as a plain shell.
                     match client.get_session_metadata(&internal).await {
                         Ok(Some(meta)) => {
                             let spec = metadata_to_spec(meta);

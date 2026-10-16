@@ -762,13 +762,14 @@ impl TmuxClient for TokioTmuxClient {
         //   3. send-keys -l <command> + Enter to launch the new agent.
         //   4. Poll again until pane_current_command leaves the shell
         //      — i.e. the agent process is actually the foreground
-        //      process. Only then send C-l. Sending C-l while still
-        //      at the shell (the old behavior's failure mode) just
-        //      clears the shell screen, which is exactly the empty
-        //      starship prompt we'd see in failed restarts.
-        //   5. The C-l forces alt-screen TUIs (claude, codex) to fully
-        //      repaint, which capture-pane then picks up cleanly for
-        //      the sidebar preview.
+        //      process — and re-send if a slow shell dropped it.
+        //
+        // Nothing else is typed. An earlier version sent a trailing C-l
+        // to force a repaint for capture-pane, from before launches
+        // waited for an attached client (issue #2). It landed before
+        // the agent had switched its terminal to raw mode, so the tty
+        // echoed a literal `^L` into the agent's prompt; the agent
+        // paints its own screen on start, so the C-l bought nothing.
         use std::time::Duration;
         use tokio::time::Instant;
 
@@ -917,22 +918,12 @@ impl TmuxClient for TokioTmuxClient {
         }
         if !agent_up {
             tracing::warn!(
-                "restart_in_place: agent never appeared on {} after {} attempt(s); skipping C-l",
+                "restart_in_place: agent never appeared on {} after {} attempt(s)",
                 session,
                 LAUNCH_ATTEMPTS
             );
         }
         let _ = at_shell;
-
-        // ── Phase 5: force a redraw inside the new agent ─────────────
-        // Only send C-l once we've confirmed the foreground process is
-        // no longer a shell — otherwise C-l would clear the shell's
-        // screen and capture-pane would snapshot an empty prompt.
-        if agent_up {
-            // Let the TUI claim the alt-screen before nudging it.
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            self.send_keys_logged(session, &["C-l"]).await;
-        }
 
         Ok(())
     }

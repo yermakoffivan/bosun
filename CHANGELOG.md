@@ -17,6 +17,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **No stray `^L` after a launch.** Starting or restarting an agent used to send a Ctrl-L a moment after the agent appeared, to force a repaint. It often arrived before the agent was ready to read keys, so the terminal echoed a literal `^L` into the agent's prompt. Bosun now types only the launch command.
 - **Two Bosun processes on one tmux server no longer undo each other.** A Bosun that's still running now picks up section changes made by another one instead of reverting them on its next save, and quitting one no longer removes the shared tmux key bindings (C-q, Shift+Left/Right, M-O, prefix 1–9) while another is still running.
 
 ## [2.1.16] — 2026-10-05
