@@ -52,7 +52,7 @@ Never point a development build at your real Bosun setup. `dev.sh` runs a throwa
 
 `BOSUN_DEV_HOME` (default `/tmp/bosun-mac-dev-$USER`, short because Unix socket paths max out at 104 bytes), `BOSUN_DEV_TMUX` and `BOSUN_DEV_BIN` change where it lives, the tmux socket name and the `bosun` binary. Without `BOSUN_DEV_BIN` it builds `bosun` from this checkout into `build/cargo-target`.
 
-The fixture: `api` and `docs` ungrouped; a Work section with `parser`, `ticker` (prints a line a second) and `web` (two tabs: `web`, `web tests`); a Reviews section with `review-1`, `review-2` and `shell` (left waiting by the generic detector).
+The fixture: `api` and `docs` ungrouped; a Work section with `parser`, `ticker` (prints a line a second) and `web` (two tabs: `web`, `web tests`); a Reviews section with `review-1`, `review-2` and `shell` (a plain shell, which reads as idle).
 
 ## Test modes
 
@@ -63,7 +63,7 @@ Both run inside the app against the fixture (`./dev.sh up` first) and drive it t
 ./dev.sh run --selftest --results /some/file.txt
 ```
 
-`--focustest` checks the focus model end to end: where keys land after sidebar clicks, rename, the palette and the sheet; splits and tile focus; focus following the mouse and its guards; drops on tiles, dividers and sidebar rows; every app shortcut and the `[keybindings]` nav keys; create and kill; themes; and that no tmux client was moved to another session along the way. It saves screenshots of the main states when `--shots` is given.
+`--focustest` checks the focus model end to end: where keys land after sidebar clicks, rename, the palette and the sheet; splits and tile focus; focus following the mouse and its guards; drops on tiles, dividers and sidebar rows; every app shortcut and the `[keybindings]` nav keys (and that they never reach tmux's Shift+arrow bindings); create and kill, with nothing but the launch command typed into a new session; themes; the tmux status line (no TUI hints, and no line at all on a session only the app shows); tiles following a tmux client that something moved (Bosun's `prefix 1-9` typed inside a terminal), moving it back when its new session is in another tile or the view is hidden, and attaching again after a detach (`Ctrl+q`); and that no tmux client is left on another session than its tile says. It saves screenshots of the main states when `--shots` is given.
 
 `--selftest` reports p50/p90/p99 for warm switch, cold attach, status change to badge, daemon round trip, divider drag layout, launch to sidebar painted and launch to first live terminal (from ten fresh processes), plus idle CPU and memory, against the budgets in the design doc.
 
@@ -87,6 +87,12 @@ The terminal keeps the keyboard. Only the rename field, the palette and the new-
 | Ctrl+v | Send the next key to the terminal as is (from `[keybindings]`) |
 
 The nav keys follow the `[keybindings]` table in Bosun's config.toml and update live when it changes. Everything else goes to the terminal; Ghostty's own bindings that would clash with these are removed.
+
+Bosun's tmux bindings for the TUI and Moshi still work inside a terminal (`prefix 1-9` jumps, `Ctrl+q` detaches). The app follows them: when a terminal's tmux client is moved to another session, its tile shows that session (header, sidebar and all), or, if another tile already shows it, the client goes back and that tile becomes active. After a detach the tile attaches again.
+
+## tmux's status line
+
+The app's terminals attach to tmux as `xterm-ghostty-bosun`, a copy of Ghostty's terminfo entry under its own name that the build puts in the bundle. That's how Bosun tells them from other tmux clients: they get none of the TUI's key hints, and a session that only the app is showing has no status line at all, so the terminal gets that row back. tmux has no per-client status line, so while the TUI's preview, Moshi or another `tmux attach` also shows a session, its status line is on and the app's terminal has an empty last row.
 
 ## Settings
 

@@ -58,7 +58,7 @@ up() {
     if [[ -z "$ok" ]]; then echo "bosun serve didn't start:" >&2; tail -5 "$DEV_HOME/serve.log" >&2; exit 1; fi
   fi
   python3 "$HERE/fixture/devctl.py" "$s" fixture "$HERE/fixture/fake_agent.py"
-  # The generic detector reads any quiet pane as waiting; start the fixtures idle via their hook state.
+  # The generic detector reads a quiet agent's pane (the fake agents) as waiting; start them idle via their hook state.
   local now; now="$(python3 -c 'import time; print(int(time.time()*1000))')"
   for name in $("$TMUX_BIN" -L "$TMUX_SOCK" list-sessions -F '#{session_name}' | grep '^bosun-'); do
     "$TMUX_BIN" -L "$TMUX_SOCK" set-option -p -t "=$name:" @bosun_state idle \; set-option -p -t "=$name:" @bosun_state_at "$now"

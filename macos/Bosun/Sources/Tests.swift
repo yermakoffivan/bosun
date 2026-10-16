@@ -102,6 +102,20 @@ class TestKit {
         TmuxCLI.run(socket: tmuxSocket, args)
     }
 
+    /// A tmux command's output, on the test daemon's socket.
+    func tmuxOut(_ args: [String]) -> String {
+        ShellEnv.run(Paths.tmux, (tmuxSocket.map { ["-L", $0] } ?? []) + args, timeout: 2) ?? ""
+    }
+
+    /// Pooled terminals whose tmux client is on another session than the view says.
+    func driftedClients() async -> [String] {
+        var drift: [String] = []
+        for (s, v) in ws.pool.views where !v.exited {
+            if let on = await clientSession(of: s), on != s { drift.append("\(app.displayName(s)) -> \(app.displayName(on))") }
+        }
+        return drift
+    }
+
     /// The session tmux has the given session's view's client on.
     func clientSession(of s: String) async -> String? {
         guard let tty = ws.pool.view(for: s)?.ttyName else { return nil }
@@ -286,6 +300,28 @@ final class FocusTest: TestKit {
         // Theme for screenshots: whatever the daemon has (opencode by default).
         await showOnly(api)
         r.check("start: the active terminal is first responder", firstResponderIsActiveTerminal)
+
+        // 0. Nothing typed into a session that the user didn't type: launching the fixture's agents
+        // used to leave a Ctrl-L behind, echoed as `^L` at the fake agent's prompt.
+        let strays = [api, docs, parser, review1, review2].filter { pane($0).contains("^L") }
+        r.check("no stray ^L in the fixture's panes after launch", strays.isEmpty, strays.map(app.displayName).joined(separator: ", "))
+
+        // 0b. tmux's status line: the app's clients attach as their own terminal type, get none of the
+        // TUI's key hints, and a session only the app shows has no status line, so the terminal gets the row.
+        let apiTTY = ws.activeTerminal?.ttyName ?? "?"
+        let clientRows = tmuxOut(["list-clients", "-F", "#{client_tty}|||#{client_termname}|||#{E:status-right}"])
+            .split(separator: "\n").map { $0.components(separatedBy: "|||") }
+        let mine = clientRows.first { $0.first == apiTTY }
+        r.check("the app's tmux clients attach as \(Paths.appTerm)", mine?[1] == Paths.appTerm, "\(mine ?? [])")
+        r.check("…and tmux shows them none of the TUI's key hints", mine?.count == 3 && mine?[2] == "", "\(mine ?? [])")
+        let statusOff = await waitUntil(3) { tmuxOut(["display", "-p", "-t", "=\(api):", "#{status}"]).hasPrefix("off") }
+        r.check("a session only the app shows has no tmux status line", statusOff,
+                tmuxOut(["display", "-p", "-t", "=\(api):", "#{status}"]).trimmingCharacters(in: .whitespacesAndNewlines))
+        let paneRows = await waitUntil(2) {
+            Int(tmuxOut(["display", "-p", "-t", "=\(api):", "#{pane_height}"]).trimmingCharacters(in: .whitespacesAndNewlines)) == ws.activeTerminal?.gridSize.rows
+        }
+        r.check("…so the pane uses every row of the terminal", paneRows,
+                "pane \(tmuxOut(["display", "-p", "-t", "=\(api):", "#{pane_height}"]).trimmingCharacters(in: .whitespacesAndNewlines)) rows, terminal \(ws.activeTerminal?.gridSize.rows ?? 0)")
         shot("01-single-tile")
 
         // 1. Click a sidebar row, then type.
@@ -353,6 +389,8 @@ final class FocusTest: TestKit {
         let sessionsShown = Set(ws.layout.tiles.compactMap { ws.layout.session(in: $0) })
         r.check("each new tile shows a different session", sessionsShown.count == 4, "\(sessionsShown.count) distinct")
         r.check("after splitting the keyboard is in the new active tile", firstResponderIsActiveTerminal)
+        // A cold attach paints with the session's status line, which goes a few ms later.
+        await sleep(300)
         shot("02-grid-2x2-ring")
 
         // 6. Focus follows the mouse: move into each tile, type, check that pane.
@@ -495,6 +533,10 @@ final class FocusTest: TestKit {
         r.check("…without the key reaching the terminal", !pane(api).contains("[1;2B"))
         await arrow(126, [.shift])
         r.check("Shift+Up goes back", ws.activeSession == api)
+        let navBound = tmuxOut(["list-keys", "-T", "root", "S-Down"]).contains("switch-client")
+        let navDrift = await driftedClients()
+        r.check("Shift+Up/Down never reach tmux's Shift+arrow switch-client bindings (no client moved)",
+                navBound && navDrift.isEmpty, navBound ? navDrift.joined(separator: ", ") : "Bosun's S-Down binding isn't installed")
         app.show(web)
         await waitUntil(2) { ws.activeTerminal?.hasPaintedContent == true }
         await arrow(124, [.shift])
@@ -504,6 +546,8 @@ final class FocusTest: TestKit {
         r.check("…and the row remembers its active tab", app.daemon.state.sidebar.container(holding: web)?.active == webTests)
         await arrow(123, [.shift])
         r.check("Shift+Left moves back", ws.activeSession == web)
+        let tabDrift = await driftedClients()
+        r.check("Shift+Left/Right never reach tmux's bindings either", tabDrift.isEmpty, tabDrift.joined(separator: ", "))
         await waitUntil(2) { ws.activeTerminal?.hasPaintedContent == true }
         await key(9, "\u{16}", [.control], ignoring: "v")
         await arrow(125, [.shift])
@@ -571,6 +615,8 @@ final class FocusTest: TestKit {
         r.check("create (deferred launch) shows the new session", temp != nil && ws.activeSession == temp)
         if let temp {
             r.check("the agent launches once the terminal is attached", await paneShows(temp, "fake agent · temp", timeout: 6))
+            await sleep(800)
+            r.check("…and nothing but the launch command is typed into it (no ^L)", !pane(temp).contains("^L"))
             let note = app.noticeText
             r.check("the created notice uses the display name (\(note))", !note.contains(temp) && note.contains("temp-focus"))
             app.daemon.command(.kill(session: temp))
@@ -595,17 +641,86 @@ final class FocusTest: TestKit {
         await waitUntil(3) { app.daemon.state.theme.name == original }
         for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
 
-        // Nothing above may have moved a tmux client to another session (Bosun's tmux bindings can).
-        var drift: [String] = []
-        for (s, v) in ws.pool.views where !v.exited {
-            if let on = await clientSession(of: s), on != s { drift.append("\(app.displayName(s)) -> \(app.displayName(on))") }
-        }
+        // 16. tmux moving a terminal's client (Bosun's TUI bindings typed inside it, or anything else).
+        await clientMoves(api: api, docs: docs, review1: review1)
+
+        // Nothing above may have left a tmux client on another session than its view says.
+        let drift = await driftedClients()
         r.check("every terminal's tmux client is still on its own session", drift.isEmpty, drift.joined(separator: ", "))
 
         r.say("")
         r.say("\(r.failures == 0 ? "ALL PASSED" : "\(r.failures) FAILED")")
         r.save()
         r.say("saved \(r.path)")
+    }
+
+    /// Prefix 1 (Bosun's jump to the first session, for the TUI), typed inside the app's terminals.
+    private func typePrefixJump() async {
+        await key(11, "\u{02}", [.control], ignoring: "b")
+        await key(18, "1")
+    }
+
+    private func clientMoves(api: String, docs: String, review1: String) async {
+        let jumpTarget = tmuxOut(["list-keys", "-T", "prefix", "1"]).components(separatedBy: " ").last?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard jumpTarget == api else {
+            r.check("prefix 1 jumps to api in the fixture", false, tmuxOut(["list-keys", "-T", "prefix", "1"]))
+            return
+        }
+        // a) The tile follows its client to a session no other tile shows.
+        await showOnly(docs)
+        let docsView = ws.activeTerminal
+        await typePrefixJump()
+        await waitUntil(3) { ws.activeSession == api }
+        r.check("prefix 1 inside a tile: the tile follows its client to the new session", ws.activeSession == api && ws.activeTerminal === docsView,
+                "tile shows \(ws.activeSession.map(app.displayName) ?? "-")")
+        let on = await clientSession(of: api)
+        let selected = (app.sidebar.outline.item(atRow: app.sidebar.outline.selectedRow) as? SidebarItem).flatMap { app.sidebar.session(for: $0) }
+        r.check("…its header, title and sidebar selection say so", on == api && ws.headerSession(ws.activeTile) == api && w.title.contains(app.displayName(api)) &&
+                selected == api, "client on \(on.map(app.displayName) ?? "-"), title \(w.title), sidebar \(selected.map(app.displayName) ?? "-")")
+        r.check("…and the warm pool keys the view by its new session", ws.pool.view(for: api) === docsView && ws.pool.view(for: docs) !== docsView)
+        await waitUntil(2) { ws.activeTerminal?.hasPaintedContent == true }
+        await type("followed\n")
+        r.check("…and typing reaches the session it now shows", await paneShows(api, "got: followed"))
+        shot("08-client-followed")
+
+        // b) A session another tile shows: the client goes back and that tile becomes active.
+        await showOnly(api)
+        await cmd("d")
+        await waitUntil(3) { ws.layout.tiles.allSatisfy { ws.terminal(in: $0)?.hasPaintedContent == true } }
+        let apiTile = ws.layout.tile(showing: api)
+        let second = ws.activeSession
+        await typePrefixJump()
+        await waitUntil(3) { ws.activeTile == apiTile }
+        let back = await waitUntil(3) { second.map { s in tmuxOut(["list-clients", "-F", "#{client_tty} #{session_name}"]).contains("\(ws.pool.view(for: s)?.ttyName ?? "?") \(s)") } ?? false }
+        r.check("prefix 1 toward a session in another tile: that tile becomes active", ws.activeTile == apiTile && ws.activeSession == api)
+        r.check("…and the client goes back to its own session", back && ws.layout.session(in: ws.layout.tiles.first { $0 != apiTile }!) == second,
+                "second tile shows \(second.map(app.displayName) ?? "-")")
+        for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
+
+        // c) A hidden pooled view's client is moved back at once.
+        await showOnly(review1)
+        await showOnly(api)
+        if let hidden = ws.pool.view(for: review1), hidden.isHidden, let tty = hidden.ttyName {
+            tmux(["switch-client", "-c", tty, "-t", "=\(docs)"])
+            let ok = await waitUntil(3) { tmuxOut(["list-clients", "-F", "#{client_tty} #{session_name}"]).contains("\(tty) \(review1)") }
+            r.check("a hidden pooled terminal's client moved elsewhere is put back", ok && ws.pool.view(for: review1) === hidden)
+        } else {
+            r.check("a hidden pooled terminal's client moved elsewhere is put back", false, "review-1 isn't pooled and hidden")
+        }
+
+        // d) Ctrl+q (Bosun's detach binding) inside a tile: the tile attaches again.
+        let before = ws.activeTerminal
+        await key(12, "\u{11}", [.control], ignoring: "q")
+        let reattached = await waitUntil(5) {
+            guard let t = ws.activeTerminal, t !== before, !t.exited, t.hasPaintedContent else { return false }
+            return true
+        }
+        let onAfter = await clientSession(of: api)
+        r.check("Ctrl+q (tmux detach) inside a tile: the tile attaches again", reattached && ws.activeSession == api && onAfter == api,
+                "client on \(onAfter.map(app.displayName) ?? "-")")
+        await waitUntil(1) { firstResponderIsActiveTerminal }
+        await type("after-detach\n")
+        r.check("…and typing reaches it", await paneShows(api, "got: after-detach"))
     }
 
     var fakeAgentPath: String {
