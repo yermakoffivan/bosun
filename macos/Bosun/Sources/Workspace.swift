@@ -559,6 +559,7 @@ final class Workspace {
 
     func windowKeyChanged(_ key: Bool) {
         windowKey = key
+        pool.windowKey = key
         updateChromeState()
     }
 

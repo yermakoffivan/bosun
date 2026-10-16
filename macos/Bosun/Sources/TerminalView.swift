@@ -22,7 +22,16 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
     private var contentsObs: NSKeyValueObservation?
 
     private(set) var rendererVisible = true
-    private(set) var hasTerminalFocus = false
+    /// What libghostty believes about this terminal's focus. It starts out true there (a new
+    /// terminal counts as focused), so `init` syncs it to false straight away: a focused terminal
+    /// runs the cursor blink timer, which redraws the whole frame every 600 ms.
+    private(set) var hasTerminalFocus = true
+    /// This view is the window's first responder (the app's active pane).
+    private(set) var isResponder = false
+    /// The window is key (or the test modes say it is). Set by the pool.
+    var windowKey = false {
+        didSet { syncFocus() }
+    }
     private(set) var exited = false
     /// Set while the app detaches this client itself, so the exit isn't reported as the session ending.
     private(set) var detaching = false
@@ -68,6 +77,7 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
                 }
             }
         }
+        syncFocus()
         updateTrackingAreas()
     }
 
@@ -302,17 +312,27 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
 
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()
-        if ok { setTerminalFocus(true) }
+        if ok { setResponder(true) }
         return ok
     }
 
     override func resignFirstResponder() -> Bool {
         let ok = super.resignFirstResponder()
-        if ok { setTerminalFocus(false) }
+        if ok { setResponder(false) }
         return ok
     }
 
-    func setTerminalFocus(_ f: Bool) {
+    func setResponder(_ r: Bool) {
+        isResponder = r
+        syncFocus()
+    }
+
+    /// libghostty's focus is the active pane of a key window, as in Ghostty's own app. Only a
+    /// focused terminal blinks its cursor, and every blink is a full frame, so every other pane
+    /// (and the active one while the window isn't key) is told it's unfocused and draws nothing
+    /// until its content changes.
+    private func syncFocus() {
+        let f = isResponder && windowKey
         guard let surface, f != hasTerminalFocus else { return }
         hasTerminalFocus = f
         ghostty_surface_set_focus(surface, f)

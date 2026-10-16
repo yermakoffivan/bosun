@@ -18,6 +18,10 @@ final class TerminalPool {
     var onExit: ((String) -> Void)?
     /// The user gave a terminal input (see `TerminalView.onInput`): its session.
     var onInput: ((String) -> Void)?
+    /// Whether the window is key; every view gets it, since libghostty's focus needs both it and the first responder.
+    var windowKey = false {
+        didSet { for v in views.values { v.windowKey = windowKey } }
+    }
     /// Views whose client currently has tmux's ignore-size flag set.
     private var ignoringSize: Set<String> = []
 
@@ -51,6 +55,7 @@ final class TerminalPool {
         if let dead = views.removeValue(forKey: session) { dead.destroy() }
         let v = TerminalView(session: session, command: attachCommand(for: session), frame: frame)
         v.isHidden = hidden
+        v.windowKey = windowKey
         if hidden { v.setRendererVisible(false) }
         v.onExit = { [weak self] view in
             guard let self, self.views[view.session] === view else { return }
@@ -70,6 +75,8 @@ final class TerminalPool {
         guard let v = views[session] else { return }
         v.isHidden = false
         v.setRendererVisible(true)
+        // `hide` took its focus; a view that stayed first responder meanwhile gets no new becomeFirstResponder.
+        if v.window?.firstResponder === v { v.setResponder(true) }
         if wasWarm {
             setIgnoreSize(session, false)
             withTTY(v) { [daemon] tty in daemon.command(.makeLatest(tty: tty)) }
@@ -110,7 +117,7 @@ final class TerminalPool {
         guard let v = views[session] else { return }
         v.isHidden = true
         v.setRendererVisible(false)
-        v.setTerminalFocus(false)
+        v.setResponder(false)
         setIgnoreSize(session, true)
     }
 
