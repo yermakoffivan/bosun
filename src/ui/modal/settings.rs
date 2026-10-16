@@ -39,6 +39,7 @@ pub enum Row {
     HideSingleTabStrip,
     RemoveDeadSessions,
     EmbedEnabled,
+    AgentHooks,
 }
 
 impl Row {
@@ -52,6 +53,7 @@ impl Row {
         Row::HideSingleTabStrip,
         Row::RemoveDeadSessions,
         Row::EmbedEnabled,
+        Row::AgentHooks,
     ];
 
     fn label(self) -> &'static str {
@@ -65,6 +67,7 @@ impl Row {
             Row::HideSingleTabStrip => "hide strip for one tab",
             Row::RemoveDeadSessions => "remove exited sessions",
             Row::EmbedEnabled => "live preview",
+            Row::AgentHooks => "agent status hooks",
         }
     }
 
@@ -81,6 +84,7 @@ impl Row {
             Row::ShowGroupInTitle => Some("show_group_in_title"),
             Row::HideSingleTabStrip => Some("hide_single_tab_strip"),
             Row::EmbedEnabled => Some("embed_enabled"),
+            Row::AgentHooks => Some("agent_hooks"),
             Row::BannerFont | Row::WorktreeLocation | Row::SingleWindow => None,
         }
     }
@@ -96,6 +100,7 @@ impl Row {
             Row::HideSingleTabStrip => "tab strip only for 2+ tabs; name moves to status bar",
             Row::RemoveDeadSessions => "drop a session's row when its tmux session ends",
             Row::EmbedEnabled => "live terminal in the preview pane, not polled snapshots",
+            Row::AgentHooks => "agents report their own status; applies on next launch",
         }
     }
 }
@@ -119,6 +124,7 @@ pub struct SettingsValues {
     pub hide_single_tab_strip: bool,
     pub remove_dead_sessions: bool,
     pub embed_enabled: bool,
+    pub agent_hooks: bool,
 }
 
 pub struct SettingsModal {
@@ -159,6 +165,7 @@ impl SettingsModal {
             Row::HideSingleTabStrip => on_off(self.values.hide_single_tab_strip),
             Row::RemoveDeadSessions => on_off(self.values.remove_dead_sessions),
             Row::EmbedEnabled => on_off(self.values.embed_enabled),
+            Row::AgentHooks => on_off(self.values.agent_hooks),
         }
     }
 
@@ -220,6 +227,10 @@ impl SettingsModal {
             Row::EmbedEnabled => {
                 self.values.embed_enabled = !self.values.embed_enabled;
                 SettingChange::EmbedEnabled(self.values.embed_enabled)
+            }
+            Row::AgentHooks => {
+                self.values.agent_hooks = !self.values.agent_hooks;
+                SettingChange::AgentHooks(self.values.agent_hooks)
             }
         };
         Some(change)
@@ -406,6 +417,7 @@ mod tests {
             hide_single_tab_strip: false,
             remove_dead_sessions: false,
             embed_enabled: true,
+            agent_hooks: true,
         }
     }
 
@@ -447,6 +459,24 @@ mod tests {
             Some(SettingChange::HideSingleTabStrip(true))
         );
         assert_eq!(m.value_of(Row::HideSingleTabStrip), "on");
+    }
+
+    #[test]
+    fn agent_hooks_row_toggles_and_respects_its_env_pin() {
+        let mut m = SettingsModal::new(values());
+        m.selected = Row::ALL.iter().position(|r| *r == Row::AgentHooks).unwrap();
+        assert_eq!(
+            change(&mut m, KeyCode::Right),
+            Some(SettingChange::AgentHooks(false))
+        );
+        assert_eq!(m.value_of(Row::AgentHooks), "off");
+
+        let mut v = values();
+        v.pins.insert("agent_hooks", "BOSUN_AGENT_HOOKS");
+        let mut m = SettingsModal::new(v);
+        m.selected = Row::ALL.iter().position(|r| *r == Row::AgentHooks).unwrap();
+        assert_eq!(change(&mut m, KeyCode::Right), None);
+        assert_eq!(m.value_of(Row::AgentHooks), "on");
     }
 
     #[test]

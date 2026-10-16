@@ -83,6 +83,14 @@ impl Smoother {
         self.current
     }
 
+    /// Jump straight to `status`, skipping the streak. For states the
+    /// agent reported itself (hooks), which need no debouncing.
+    pub fn force(&mut self, status: Status) {
+        self.current = status;
+        self.candidate = status;
+        self.streak = STREAK;
+    }
+
     pub fn current(&self) -> Status {
         self.current
     }

@@ -293,6 +293,14 @@ pub struct Config {
     /// File-only, like `[agents]`. Entries with an invalid name, a
     /// `BOSUN` key, or a non-scalar value are dropped with a warning.
     pub session_env: std::collections::BTreeMap<String, String>,
+    /// Let agents report their own state through hooks instead of
+    /// leaving it all to the pane-scraping detectors. Bosun installs the
+    /// hooks only through the launch command (for Claude Code, a
+    /// `--settings` file in Bosun's data dir), never by editing the
+    /// agent's own config, so it takes effect on a session's next launch
+    /// or restart. Default true. Set `agent_hooks = false` in
+    /// `config.toml` or `BOSUN_AGENT_HOOKS=0|false|off|no` to turn it off.
+    pub agent_hooks: bool,
 }
 
 impl Default for Config {
@@ -324,9 +332,14 @@ impl Default for Config {
             keybindings: crate::keybindings::KeyBindings::default(),
             agent_binaries: std::collections::HashMap::new(),
             session_env: std::collections::BTreeMap::new(),
+            agent_hooks: DEFAULT_AGENT_HOOKS,
         }
     }
 }
+
+/// Default for `Config::agent_hooks`: on, so hook-capable agents report
+/// their own state out of the box.
+pub const DEFAULT_AGENT_HOOKS: bool = true;
 
 /// Default frame-rate cap. 60fps bounds what a chatty pane can cost
 /// while staying under one refresh of a 60Hz display, so it reads as
@@ -440,6 +453,9 @@ struct ConfigFile {
     /// without quotes still loads instead of failing the whole file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     env: Option<std::collections::BTreeMap<String, toml::Value>>,
+    /// Hook-reported agent state. See `Config::agent_hooks`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_hooks: Option<bool>,
 }
 
 impl Config {
@@ -610,6 +626,15 @@ impl Config {
             });
         let agent_binaries = file.agents.unwrap_or_default();
         let session_env = session_env(file.env.unwrap_or_default());
+        // On by default, so it follows BOSUN_EMBED's idiom: only an
+        // explicit off value disables it.
+        let agent_hooks = match env::var("BOSUN_AGENT_HOOKS") {
+            Ok(s) => !matches!(
+                s.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            ),
+            Err(_) => file.agent_hooks.unwrap_or(DEFAULT_AGENT_HOOKS),
+        };
 
         Self {
             session_prefix,
@@ -634,6 +659,7 @@ impl Config {
             keybindings,
             agent_binaries,
             session_env,
+            agent_hooks,
         }
     }
 
@@ -740,6 +766,7 @@ pub fn env_pin(setting: &str) -> Option<&'static str> {
         "show_group_in_title" => "BOSUN_SHOW_GROUP_IN_TITLE",
         "hide_single_tab_strip" => "BOSUN_HIDE_SINGLE_TAB_STRIP",
         "embed_enabled" => "BOSUN_EMBED",
+        "agent_hooks" => "BOSUN_AGENT_HOOKS",
         _ => return None,
     };
     std::env::var(var).ok().map(|_| var)
@@ -797,6 +824,11 @@ pub fn write_hide_single_tab_strip(on: bool) -> std::io::Result<()> {
 /// Persist where `git worktree add` places new worktrees.
 pub fn write_worktree_location(loc: WorktreeLocation) -> std::io::Result<()> {
     update_config_file(|f| f.worktree_location = Some(loc))
+}
+
+/// Persist whether agents report their state through hooks.
+pub fn write_agent_hooks(on: bool) -> std::io::Result<()> {
+    update_config_file(|f| f.agent_hooks = Some(on))
 }
 
 /// Persist whether the preview embeds a live terminal.
@@ -1070,6 +1102,7 @@ mod tests {
             keybindings: crate::keybindings::KeyBindings::default(),
             agent_binaries: std::collections::HashMap::new(),
             session_env: std::collections::BTreeMap::new(),
+            agent_hooks: DEFAULT_AGENT_HOOKS,
         }
     }
 
@@ -1121,6 +1154,7 @@ mod tests {
             keybindings: crate::keybindings::KeyBindings::default(),
             agent_binaries: std::collections::HashMap::new(),
             session_env: std::collections::BTreeMap::new(),
+            agent_hooks: DEFAULT_AGENT_HOOKS,
         };
         assert!(!c.manages("bosun-mine-abc"));
         assert!(c.manages("bosun-other-xyz"));

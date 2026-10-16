@@ -157,6 +157,7 @@ pub enum SettingChange {
     HideSingleTabStrip(bool),
     RemoveDeadSessions(bool),
     EmbedEnabled(bool),
+    AgentHooks(bool),
 }
 
 /// Commands flow from the UI/app task into the tmux actor.
@@ -267,6 +268,9 @@ pub enum Command {
     /// config.toml. Intercepted by the app loop — never forwarded to
     /// the tmux actor.
     SaveSidebar(crate::sidebar::SidebarModel),
+    /// Settings panel toggled `agent_hooks`; the tmux actor rebuilds its
+    /// launch hooks and starts or stops honoring hook-reported state.
+    SetAgentHooks(bool),
     /// Persist the display_name → section_name history to config.toml.
     /// Intercepted by the app loop — never forwarded to the tmux actor.
     SaveSessionHistory(std::collections::HashMap<String, String>),

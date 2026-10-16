@@ -37,7 +37,13 @@ use crate::tmux::session::TmuxSession;
 /// - `pane_current_command` — the running process. Claude Code renames
 ///   itself to its version (`2_1_220`), so this separates a live agent
 ///   from a bare `zsh`.
-pub const LIST_SESSIONS_FORMAT: &str = "#{session_name}|||#{session_windows}|||#{session_attached}|||#{session_created}|||#{session_activity}|||#{session_path}|||#{@bosun_display}|||#{@bosun_agent}|||#{@bosun_path}|||#{@bosun_container_id}|||#{@bosun_worktree_path}|||#{@bosun_branch}|||#{pane_width}|||#{pane_title}|||#{pane_current_command}";
+///
+/// The last three are pane user options an agent's hooks write through
+/// `bosun hook` (see `agent_hooks`): the state it reported, when, and an
+/// optional detail. tmux resolves them against the session's active
+/// pane, the same pane `pane_title` describes. Empty when no hook has
+/// run.
+pub const LIST_SESSIONS_FORMAT: &str = "#{session_name}|||#{session_windows}|||#{session_attached}|||#{session_created}|||#{session_activity}|||#{session_path}|||#{@bosun_display}|||#{@bosun_agent}|||#{@bosun_path}|||#{@bosun_container_id}|||#{@bosun_worktree_path}|||#{@bosun_branch}|||#{pane_width}|||#{pane_title}|||#{pane_current_command}|||#{@bosun_state}|||#{@bosun_state_at}|||#{@bosun_state_detail}";
 
 const FIELD_SEP: &str = "|||";
 
@@ -105,6 +111,11 @@ fn parse_session_line(line: &str) -> std::result::Result<TmuxSession, String> {
     // reasons as the fields above.
     let pane_title_raw = parts.next().map(|s| s.to_string());
     let pane_command_raw = parts.next().map(|s| s.to_string());
+    // Agent-reported state from `bosun hook`. Optional trailing fields;
+    // empty (unset) on panes whose agent has no hooks.
+    let hook_state_raw = parts.next().unwrap_or("");
+    let hook_at_raw = parts.next().unwrap_or("");
+    let hook_detail_raw = parts.next().unwrap_or("");
 
     if parts.next().is_some() {
         return Err("unexpected extra field".into());
@@ -141,6 +152,7 @@ fn parse_session_line(line: &str) -> std::result::Result<TmuxSession, String> {
         pane_width,
         pane_title: pane_title_raw.filter(|s| !s.is_empty()),
         pane_command: pane_command_raw.filter(|s| !s.is_empty()),
+        hook: crate::agent_hooks::HookState::parse(hook_state_raw, hook_at_raw, hook_detail_raw),
     })
 }
 
@@ -209,6 +221,27 @@ mod tests {
             Some("⠐ Ensure forum-pro CSS works")
         );
         assert_eq!(s.pane_command.as_deref(), Some("2_1_220"));
+    }
+
+    #[test]
+    fn parses_hook_state_fields() {
+        let line = "bosun-a|||1|||0|||1700000000|||1700000100|||/tmp|||a|||claude|||/tmp|||c1|||||||||80|||✳ task|||2_1_301|||waiting|||1700000100123|||permission: Bash";
+        let s = &parse_list_sessions(line).unwrap()[0];
+        let hook = s.hook.as_ref().expect("hook state");
+        assert_eq!(hook.status, crate::tmux::detector::Status::Waiting);
+        assert_eq!(hook.at_ms, 1_700_000_100_123);
+        assert_eq!(hook.detail.as_deref(), Some("permission: Bash"));
+        assert_eq!(s.pane_command.as_deref(), Some("2_1_301"));
+    }
+
+    #[test]
+    fn unset_hook_options_are_no_hook_state() {
+        let line = "bosun-a|||1|||0|||1700000000|||1700000100|||/tmp|||a|||claude|||/tmp|||c1|||||||||80|||✳ task|||2_1_301|||||||||";
+        let s = &parse_list_sessions(line).unwrap()[0];
+        assert_eq!(s.hook, None);
+        // Older output without the trailing fields parses too.
+        let line = "bosun-a|||1|||0|||1700000000|||1700000100|||/tmp|||a|||claude|||/tmp|||c1|||||||||80|||✳ task|||2_1_301";
+        assert_eq!(parse_list_sessions(line).unwrap()[0].hook, None);
     }
 
     #[test]

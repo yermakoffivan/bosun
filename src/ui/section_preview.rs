@@ -177,6 +177,18 @@ fn session_rows(view: &SessionView, width: u16, theme: &Theme, lpad: &str) -> [L
             Style::default().fg(theme.text_muted),
         ),
         Span::styled(attached, Style::default().fg(theme.status_running)),
+        // What a waiting agent is waiting on, when its hook said (e.g.
+        // `permission: Bash`). Trails the line, so it never moves
+        // anything else.
+        Span::styled(
+            match view.status_detail.as_deref() {
+                Some(detail) if view.status == crate::tmux::detector::Status::Waiting => {
+                    format!("   {detail}")
+                }
+                _ => String::new(),
+            },
+            Style::default().fg(theme.status_waiting),
+        ),
     ]);
 
     let path = view

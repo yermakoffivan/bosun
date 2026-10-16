@@ -70,6 +70,11 @@ pub struct TmuxSession {
     /// detectors tell "agent up and idle" from "agent gone" without
     /// guessing from pane text. `None` when unknown.
     pub pane_command: Option<String>,
+    /// The state the pane's agent last reported through `bosun hook`
+    /// (the `@bosun_state*` pane options). `None` when the agent has no
+    /// hooks or hasn't fired one. Raw: whether it beats the detectors is
+    /// decided by `agent_hooks::resolve`.
+    pub hook: Option<crate::agent_hooks::HookState>,
 }
 
 impl TmuxSession {
@@ -105,6 +110,13 @@ pub struct SessionView {
     /// capture this tick" (empty / failed) and never counts as a
     /// change. Computed by the actor in `refresh_all`.
     pub content_hash: u64,
+    /// Whether `status` came from the agent's own hook or from the
+    /// detectors on this poll.
+    pub status_source: crate::agent_hooks::StatusSource,
+    /// Short note that goes with a hook-reported status, e.g.
+    /// `permission: Bash` while waiting. Only set when the hook state was
+    /// used (`status_source == Hook`).
+    pub status_detail: Option<String>,
 }
 
 impl SessionView {
@@ -114,6 +126,8 @@ impl SessionView {
             status,
             preview,
             content_hash: 0,
+            status_source: crate::agent_hooks::StatusSource::Detector,
+            status_detail: None,
         }
     }
 

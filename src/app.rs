@@ -288,6 +288,25 @@ pub struct SeenState {
     /// read. Without it, a session that merely redrew (and never did
     /// any work) would claim to have results waiting.
     pub ran: bool,
+    /// `@bosun_state_at` of the hook-reported `done` that was current
+    /// when the user last looked (0 if none). A `done` reported after
+    /// that is a finished turn they haven't seen, which sets `ran` even
+    /// if the poll never caught the session Running (a turn shorter than
+    /// the 1 Hz refresh). See [`hook_done_at`].
+    pub done_seen_at: u64,
+}
+
+/// When the session's agent reported `done` through its hook, if that is
+/// the state this poll used.
+fn hook_done_at(v: &SessionView) -> Option<u64> {
+    if v.status_source != crate::agent_hooks::StatusSource::Hook {
+        return None;
+    }
+    v.session
+        .hook
+        .as_ref()
+        .filter(|h| h.status == Status::Done)
+        .map(|h| h.at_ms)
 }
 
 /// Number of wheel events that must accumulate in one direction before
@@ -948,12 +967,16 @@ impl AppState {
                     // Independent of content: remember that this row did
                     // work while unattended, so a finished turn can be
                     // told from a session that merely redrew.
-                    let ran_now = v.status == Status::Running;
+                    // A hook-reported `done` newer than the one the user last
+                    // saw counts too: the agent says a turn finished.
+                    let done_at = hook_done_at(v);
+                    let ran_since = |seen: &SeenState| {
+                        v.status == Status::Running
+                            || done_at.is_some_and(|at| at > seen.done_seen_at)
+                    };
                     if v.content_hash == 0 {
-                        if ran_now {
-                            if let Some(seen) = self.seen_content.get_mut(v.name()) {
-                                seen.ran = true;
-                            }
+                        if let Some(seen) = self.seen_content.get_mut(v.name()) {
+                            seen.ran |= ran_since(seen);
                         }
                         continue;
                     }
@@ -966,7 +989,10 @@ impl AppState {
                                     width: v.width(),
                                     settle: 0,
                                     unread: false,
-                                    ran: ran_now,
+                                    ran: v.status == Status::Running,
+                                    // A turn that finished before we
+                                    // first saw the row isn't news.
+                                    done_seen_at: done_at.unwrap_or(0),
                                 },
                             );
                         }
@@ -974,16 +1000,16 @@ impl AppState {
                             seen.hash = v.content_hash;
                             seen.width = v.width();
                             seen.settle = REFLOW_SETTLE_TICKS;
-                            seen.ran |= ran_now;
+                            seen.ran |= ran_since(seen);
                         }
                         Some(seen) if seen.settle > 0 => {
                             seen.hash = v.content_hash;
                             seen.settle -= 1;
-                            seen.ran |= ran_now;
+                            seen.ran |= ran_since(seen);
                         }
                         Some(seen) => {
                             seen.unread |= seen.hash != v.content_hash;
-                            seen.ran |= ran_now;
+                            seen.ran |= ran_since(seen);
                         }
                     }
                 }
@@ -1305,10 +1331,15 @@ impl AppState {
         // Only request preview capture when a session is selected.
         // On a section header we keep the previous focus so switching
         // off/onto a header doesn't churn capture work.
-        let current = self
-            .selected_session()
-            .map(|v| (v.name().to_string(), v.content_hash, v.width()));
-        if let Some((name, hash, width)) = &current {
+        let current = self.selected_session().map(|v| {
+            (
+                v.name().to_string(),
+                v.content_hash,
+                v.width(),
+                hook_done_at(v).unwrap_or(0),
+            )
+        });
+        if let Some((name, hash, width, done_at)) = &current {
             // Landing the cursor on a session counts as viewing it —
             // in single-window mode the embed shows it live the moment
             // it's selected — so re-baseline its content to "now" and
@@ -1325,6 +1356,7 @@ impl AppState {
                         settle: 0,
                         unread: false,
                         ran: false,
+                        done_seen_at: *done_at,
                     },
                 );
             }
@@ -2269,6 +2301,9 @@ pub struct App {
     /// Sticky copy of `Config::embed_enabled`. `App::sync_embed`
     /// reads this on every iteration to decide whether to spawn.
     embed_enabled: bool,
+    /// Live copy of `Config::agent_hooks`, for the settings panel. The
+    /// tmux actor holds the copy that matters (`Command::SetAgentHooks`).
+    agent_hooks: bool,
     /// Deferred embed spawn while the user is moving through the
     /// sidebar quickly. `sync_embed` spawns immediately on an
     /// isolated selection change, but once changes arrive faster
@@ -2421,6 +2456,7 @@ impl App {
             input_handle: Some(input_handle),
             embed: None,
             embed_enabled: config.embed_enabled,
+            agent_hooks: config.agent_hooks,
             embed_focused: false,
             keybindings: config.keybindings,
             key_router: crate::keybindings::KeyRouter::default(),
@@ -3167,6 +3203,7 @@ impl App {
                             "show_group_in_title",
                             "hide_single_tab_strip",
                             "embed_enabled",
+                            "agent_hooks",
                         ] {
                             if let Some(var) = crate::config::env_pin(key) {
                                 pins.insert(key, var);
@@ -3187,6 +3224,7 @@ impl App {
                             hide_single_tab_strip: self.state.hide_single_tab_strip,
                             remove_dead_sessions: self.state.remove_dead_sessions,
                             embed_enabled: self.embed_enabled,
+                            agent_hooks: self.agent_hooks,
                         };
                         self.state.modals.push(Box::new(
                             crate::ui::modal::settings::SettingsModal::new(values),
@@ -4076,6 +4114,13 @@ impl App {
                 self.embed_enabled = on;
                 crate::config::write_embed_enabled(on)
             }
+            S::AgentHooks(on) => {
+                // The actor owns launching, so it rebuilds its hook
+                // files and starts or stops honoring hook state.
+                self.agent_hooks = on;
+                let _ = self.cmd_tx.send(Command::SetAgentHooks(on));
+                crate::config::write_agent_hooks(on)
+            }
         };
         if let Err(e) = result {
             self.state.warning = Some(format!("settings: failed to save: {e}"));
@@ -4266,6 +4311,7 @@ mod tests {
                 pane_width: 80,
                 pane_title: None,
                 pane_command: None,
+                hook: None,
             },
             status,
             None,
@@ -4808,6 +4854,53 @@ mod tests {
         s.apply(refreshed(vec![ses_h("a", 1), ses_hs("b", 3, Status::Idle)]));
         let b = s.session_by_name("b").unwrap().clone();
         assert_eq!(s.display_status(&b), Status::Done);
+    }
+
+    /// A session whose status came from its agent's hook reporting
+    /// `done` at `at_ms` (published as Idle, as the actor does).
+    fn ses_hook_done(name: &str, hash: u64, at_ms: u64) -> SessionView {
+        let mut v = ses_hs(name, hash, Status::Idle);
+        v.status_source = crate::agent_hooks::StatusSource::Hook;
+        v.session.hook = Some(crate::agent_hooks::HookState {
+            status: Status::Done,
+            at_ms,
+            detail: None,
+        });
+        v
+    }
+
+    #[test]
+    fn hook_done_reads_as_done_without_a_running_poll() {
+        // A turn shorter than the refresh: no poll ever saw Running, but
+        // the agent's Stop hook said it finished.
+        let mut s = state_with(vec![], 0);
+        s.apply(refreshed(vec![ses_h("a", 1), ses_h("b", 1)]));
+        s.apply(refreshed(vec![ses_h("a", 1), ses_hook_done("b", 2, 1_000)]));
+        let b = s.session_by_name("b").unwrap().clone();
+        assert_eq!(s.display_status(&b), Status::Done);
+
+        // Viewing it clears the badge, and the same report doesn't
+        // bring it back when the pane redraws later.
+        s.apply(AppMsg::Key(key(KeyCode::Down)));
+        s.apply(AppMsg::Key(key(KeyCode::Up)));
+        s.apply(refreshed(vec![ses_h("a", 1), ses_hook_done("b", 3, 1_000)]));
+        let b = s.session_by_name("b").unwrap().clone();
+        assert!(s.session_unread("b"));
+        assert_eq!(s.display_status(&b), Status::Idle);
+
+        // A later turn finishing is news again.
+        s.apply(refreshed(vec![ses_h("a", 1), ses_hook_done("b", 4, 2_000)]));
+        let b = s.session_by_name("b").unwrap().clone();
+        assert_eq!(s.display_status(&b), Status::Done);
+    }
+
+    #[test]
+    fn hook_done_already_there_at_first_sight_is_not_news() {
+        let mut s = state_with(vec![], 0);
+        s.apply(refreshed(vec![ses_h("a", 1), ses_hook_done("b", 1, 1_000)]));
+        s.apply(refreshed(vec![ses_h("a", 1), ses_hook_done("b", 2, 1_000)]));
+        let b = s.session_by_name("b").unwrap().clone();
+        assert_eq!(s.display_status(&b), Status::Idle);
     }
 
     #[test]

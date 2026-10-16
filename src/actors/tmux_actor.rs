@@ -41,6 +41,7 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 use tokio::time::{self, MissedTickBehavior};
 
+use crate::agent_hooks::{self, LaunchHooks, StatusSource};
 use crate::config::Config;
 use crate::events::{AppMsg, ClaudeSessionMode, Command, SessionSpec, SpecOptions};
 use crate::store::Store;
@@ -192,7 +193,7 @@ impl Drop for GlobalsGuard {
 pub fn spawn(
     client: Arc<dyn TmuxClient>,
     socket: Option<String>,
-    config: Config,
+    mut config: Config,
     store: Arc<Store>,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     evt_tx: mpsc::UnboundedSender<AppMsg>,
@@ -200,6 +201,10 @@ pub fn spawn(
     tokio::spawn(async move {
         let registry = DetectorRegistry::default_stack();
         let mut refresh_state = RefreshState::default();
+        // Hook files for agent launches. Written once here (and again if
+        // the setting is switched back on) so building a launch command
+        // never touches the disk.
+        let mut launch_hooks = prepare_launch_hooks(config.agent_hooks);
         let mut focused: Option<String> = None;
         // Set by `Command::EmbedActive`: a live embed is already
         // streaming the focused session's pane, so the fast preview
@@ -390,6 +395,14 @@ pub fn spawn(
                 Command::EmbedActive(active) => {
                     embed_active = active;
                 }
+                Command::SetAgentHooks(on) => {
+                    // Settings panel toggle. Applies to launches from
+                    // now on; running sessions keep the hooks they were
+                    // started with, but their reports are only honored
+                    // while the setting is on.
+                    config.agent_hooks = on;
+                    launch_hooks = prepare_launch_hooks(on);
+                }
                 Command::KillSession(internal) => {
                     match client.kill_session(&internal).await {
                         Ok(()) => {
@@ -579,10 +592,15 @@ pub fn spawn(
                                 &spec.name,
                                 resume.unwrap_or(spec.resume),
                                 &config.agent_binaries,
+                                &launch_hooks,
                             );
                             if command.is_empty() {
                                 continue;
                             }
+                            // Whatever the previous agent last reported
+                            // is stale now; the new one reports its own
+                            // state once its hooks fire.
+                            agent_hooks::clear_session_state(socket.as_deref(), &internal);
                             // prep_line = true: this call does the single
                             // C-u/Enter/C-u cleanup right before typing.
                             // kill_first = false: the pane is a known bare
@@ -663,7 +681,7 @@ pub fn spawn(
                     // agent probes (issue #2). With embeds off there's
                     // no responder anyway, so launch inline.
                     let defer_launch = config.embed_enabled;
-                    match create_session(&*client, &config, spec.clone(), defer_launch).await {
+                    match create_session(&*client, &config, &launch_hooks, spec.clone(), defer_launch).await {
                         Ok(internal_name) => {
                             focused = Some(internal_name.clone());
                             // Save the recent (on the resolved spec —
@@ -1146,6 +1164,7 @@ fn build_agent_command(
     args: &str,
     name: &str,
     bins: &HashMap<String, String>,
+    hooks: &LaunchHooks,
 ) -> String {
     let args = args.trim();
     let bin = agent_binary(bins, agent);
@@ -1159,6 +1178,19 @@ fn build_agent_command(
             }
             if options.claude.skip_permissions {
                 parts.push("--dangerously-skip-permissions".into());
+            }
+            // Bosun's hooks ride a settings file of their own, so the
+            // user's `~/.claude/settings.json` is never touched and their
+            // own hooks still run (Claude merges hook lists across
+            // settings sources). A `--settings` in the user's extra args
+            // wins: Claude takes one, so that session just goes without.
+            if let Some(path) = hooks.claude_settings.as_deref() {
+                if !agent_hooks::claude::args_set_settings(args) {
+                    parts.push(format!(
+                        "--settings {}",
+                        agent_hooks::shell_quote(&path.to_string_lossy())
+                    ));
+                }
             }
             let slug = slugify(name);
             if !slug.is_empty() && !args.contains("--name") {
@@ -1271,9 +1303,10 @@ fn build_launch_command(
     name: &str,
     resume: bool,
     bins: &HashMap<String, String>,
+    hooks: &LaunchHooks,
 ) -> String {
     if !resume {
-        return build_agent_command(agent, options, args, name, bins);
+        return build_agent_command(agent, options, args, name, bins, hooks);
     }
     let mut options = options.clone();
     match agent {
@@ -1284,12 +1317,26 @@ fn build_launch_command(
         "qwen" => options.qwen.session_mode = ClaudeSessionMode::Continue,
         _ => {}
     }
-    build_agent_command(agent, &options, args, name, bins)
+    build_agent_command(agent, &options, args, name, bins, hooks)
+}
+
+/// The hook files and flags for agent launches, or none when the
+/// `agent_hooks` setting is off or bosun can't find its own binary or
+/// data dir (the detectors still work either way).
+fn prepare_launch_hooks(enabled: bool) -> LaunchHooks {
+    if !enabled {
+        return LaunchHooks::none();
+    }
+    match (agent_hooks::hooks_dir(), agent_hooks::bosun_binary()) {
+        (Some(dir), Some(bin)) => LaunchHooks::prepare(&dir, &bin),
+        _ => LaunchHooks::none(),
+    }
 }
 
 async fn create_session(
     client: &dyn TmuxClient,
     config: &Config,
+    hooks: &LaunchHooks,
     spec: SessionSpec,
     defer_launch: bool,
 ) -> crate::error::Result<String> {
@@ -1348,6 +1395,7 @@ async fn create_session(
             &spec.name,
             spec.resume,
             &config.agent_binaries,
+            hooks,
         )
     };
     let metadata = Some(spec_to_metadata(&spec));
@@ -1569,11 +1617,8 @@ async fn refresh_focused(
         s.pane_command.as_deref(),
     );
     let detected = registry.detect(&ctx);
-    let smoothed = refresh_state
-        .smoothers
-        .entry(s.name.clone())
-        .or_default()
-        .observe(detected);
+    let smoother = refresh_state.smoothers.entry(s.name.clone()).or_default();
+    let (smoothed, _, _) = settle_status(config, &s, detected, now, smoother);
     let publish = if smoothed == Status::Unknown {
         Status::Idle
     } else {
@@ -1749,11 +1794,9 @@ async fn refresh_all(
             s.pane_command.as_deref(),
         );
         let detected = registry.detect(&ctx);
-        let smoothed = state
-            .smoothers
-            .entry(s.name.clone())
-            .or_default()
-            .observe(detected);
+        let smoother = state.smoothers.entry(s.name.clone()).or_default();
+        let (smoothed, status_source, status_detail) =
+            settle_status(config, &s, detected, now, smoother);
 
         // Only hold onto the preview buffer for the focused session — the
         // others get None so we don't keep megabytes of pane history alive.
@@ -1774,10 +1817,64 @@ async fn refresh_all(
             preview,
         );
         view.content_hash = content_hash;
+        view.status_source = status_source;
+        view.status_detail = status_detail;
         out.push(view);
     }
 
     Ok(out)
+}
+
+/// Combine the detector's answer with what the agent reported through
+/// its hooks (see `agent_hooks::resolve`). A hook state that wins skips
+/// the smoother: the agent said so, there's nothing to debounce. The
+/// detectors' answers keep their hysteresis.
+///
+/// A hook `done` is published as `Idle`, the same thing the detectors
+/// report for a finished turn, so `AppState::display_status` keeps
+/// owning the Done badge (promoted while unread, cleared on view). The
+/// raw report stays on `TmuxSession::hook` for the app's `ran` latch.
+fn settle_status(
+    config: &Config,
+    s: &crate::tmux::TmuxSession,
+    detected: Status,
+    now: SystemTime,
+    smoother: &mut Smoother,
+) -> (Status, StatusSource, Option<String>) {
+    let hook = if config.agent_hooks {
+        s.hook.as_ref()
+    } else {
+        None
+    };
+    let now_ms = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let quiet_ms = s
+        .last_activity
+        .and_then(|t| now.duration_since(t).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(u64::MAX);
+    let input = agent_hooks::ResolveInput {
+        agent: s.agent.as_deref(),
+        pane_title: s.pane_title.as_deref(),
+        pane_command: s.pane_command.as_deref(),
+        detected,
+        quiet_ms,
+        now_ms,
+    };
+    match (agent_hooks::resolve(hook, &input), hook) {
+        (Some(status), Some(hook)) => {
+            let publish = if status == Status::Done {
+                Status::Idle
+            } else {
+                status
+            };
+            smoother.force(publish);
+            (publish, StatusSource::Hook, hook.detail.clone())
+        }
+        _ => (smoother.observe(detected), StatusSource::Detector, None),
+    }
 }
 
 /// Layout-independent fingerprint of a pane's visible plain text, used
@@ -2026,10 +2123,234 @@ mod build_cmd_tests {
         HashMap::new()
     }
 
+    fn none() -> LaunchHooks {
+        LaunchHooks::none()
+    }
+
+    fn hooks() -> LaunchHooks {
+        LaunchHooks {
+            claude_settings: Some(std::path::PathBuf::from(
+                "/Users/a/Library/Application Support/dev.yetidevworks.bosun/hooks/claude-settings-0123abcd.json",
+            )),
+        }
+    }
+
+    const SETTINGS: &str = "--settings '/Users/a/Library/Application Support/dev.yetidevworks.bosun/hooks/claude-settings-0123abcd.json'";
+
+    #[test]
+    fn claude_new_launch_carries_hook_settings() {
+        assert_eq!(
+            build_launch_command("claude", &opts(), "", "Fox", false, &bins(), &hooks()),
+            format!("claude {SETTINGS} --name fox")
+        );
+    }
+
+    #[test]
+    fn claude_resume_and_restart_keep_hook_settings() {
+        // `r` restart (one-shot resume) and a persisted Resume mode both
+        // keep the flag alongside the others, with remote control last.
+        let mut o = opts();
+        o.claude.skip_permissions = true;
+        o.claude.remote_control = true;
+        assert_eq!(
+            build_launch_command("claude", &o, "--model=opus", "Fox", true, &bins(), &hooks()),
+            format!(
+                "claude --continue --dangerously-skip-permissions {SETTINGS} --name fox --model=opus --remote-control"
+            )
+        );
+        o.claude.session_mode = ClaudeSessionMode::Resume;
+        assert_eq!(
+            build_launch_command("claude", &o, "", "", false, &bins(), &hooks()),
+            format!("claude --resume --dangerously-skip-permissions {SETTINGS} --remote-control")
+        );
+    }
+
+    #[test]
+    fn user_settings_flag_wins_over_hook_settings() {
+        assert_eq!(
+            build_launch_command(
+                "claude",
+                &opts(),
+                "--settings mine.json",
+                "",
+                true,
+                &bins(),
+                &hooks()
+            ),
+            "claude --continue --settings mine.json"
+        );
+    }
+
+    #[test]
+    fn hook_settings_only_go_to_claude() {
+        for agent in ["codex", "kimi", "opencode", "qwen", "terminal"] {
+            assert_eq!(
+                build_launch_command(agent, &opts(), "", "", false, &bins(), &hooks()),
+                build_launch_command(agent, &opts(), "", "", false, &bins(), &none()),
+                "{agent}"
+            );
+        }
+    }
+
+    #[test]
+    fn hooks_off_leaves_the_launch_command_as_before() {
+        assert_eq!(prepare_launch_hooks(false), LaunchHooks::none());
+    }
+
+    fn hook_session(
+        hook: Option<agent_hooks::HookState>,
+        title: &str,
+        cmd: &str,
+        quiet: Duration,
+        now: SystemTime,
+    ) -> crate::tmux::TmuxSession {
+        crate::tmux::TmuxSession {
+            name: "bosun-a".into(),
+            display_name: None,
+            windows: 1,
+            attached: false,
+            created: None,
+            last_activity: Some(now - quiet),
+            current_path: None,
+            agent: Some("claude".into()),
+            spec_path: None,
+            container_id: None,
+            worktree_path: None,
+            branch: None,
+            pane_width: 80,
+            pane_title: Some(title.into()),
+            pane_command: Some(cmd.into()),
+            hook,
+        }
+    }
+
+    fn hook_at(
+        status: Status,
+        now: SystemTime,
+        ago: Duration,
+        detail: Option<&str>,
+    ) -> agent_hooks::HookState {
+        agent_hooks::HookState {
+            status,
+            at_ms: (now - ago)
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            detail: detail.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn hook_state_skips_hysteresis_and_carries_detail() {
+        let config = Config::default();
+        let now = SystemTime::now();
+        let mut sm = Smoother::new();
+        sm.observe(Status::Running);
+        // Detector would need two polls to demote to Idle; the hook's
+        // Waiting lands at once, with its detail.
+        let s = hook_session(
+            Some(hook_at(
+                Status::Waiting,
+                now,
+                Duration::from_secs(1),
+                Some("permission: Bash"),
+            )),
+            "✳ task",
+            "2_1_301",
+            Duration::from_secs(1),
+            now,
+        );
+        assert_eq!(
+            settle_status(&config, &s, Status::Idle, now, &mut sm),
+            (
+                Status::Waiting,
+                StatusSource::Hook,
+                Some("permission: Bash".into())
+            )
+        );
+        // Hook says done: published as Idle (the app owns the Done badge),
+        // immediately, not after a streak.
+        let s = hook_session(
+            Some(hook_at(Status::Done, now, Duration::from_secs(1), None)),
+            "✳ task",
+            "2_1_301",
+            Duration::from_secs(1),
+            now,
+        );
+        let mut sm = Smoother::new();
+        sm.observe(Status::Running);
+        assert_eq!(
+            settle_status(&config, &s, Status::Running, now, &mut sm),
+            (Status::Idle, StatusSource::Hook, None)
+        );
+    }
+
+    #[test]
+    fn rejected_hook_state_goes_through_the_smoother() {
+        let config = Config::default();
+        let now = SystemTime::now();
+        // Esc: Running reported 30s ago, title no longer spinning.
+        let s = hook_session(
+            Some(hook_at(Status::Running, now, Duration::from_secs(30), None)),
+            "✳ task",
+            "2_1_301",
+            Duration::from_secs(1),
+            now,
+        );
+        let mut sm = Smoother::new();
+        sm.observe(Status::Running);
+        // First Idle poll is held by hysteresis, second lands.
+        assert_eq!(
+            settle_status(&config, &s, Status::Idle, now, &mut sm).0,
+            Status::Running
+        );
+        assert_eq!(
+            settle_status(&config, &s, Status::Idle, now, &mut sm),
+            (Status::Idle, StatusSource::Detector, None)
+        );
+        // Agent exited to the shell: hook ignored.
+        let s = hook_session(
+            Some(hook_at(
+                Status::Waiting,
+                now,
+                Duration::from_secs(1),
+                Some("permission: Bash"),
+            )),
+            "zsh",
+            "zsh",
+            Duration::from_secs(1),
+            now,
+        );
+        assert_eq!(
+            settle_status(&config, &s, Status::Idle, now, &mut Smoother::new()).1,
+            StatusSource::Detector
+        );
+    }
+
+    #[test]
+    fn hook_state_ignored_when_setting_is_off() {
+        let config = Config {
+            agent_hooks: false,
+            ..Config::default()
+        };
+        let now = SystemTime::now();
+        let s = hook_session(
+            Some(hook_at(Status::Waiting, now, Duration::from_secs(1), None)),
+            "✳ task",
+            "2_1_301",
+            Duration::from_secs(1),
+            now,
+        );
+        assert_eq!(
+            settle_status(&config, &s, Status::Idle, now, &mut Smoother::new()),
+            (Status::Idle, StatusSource::Detector, None)
+        );
+    }
+
     #[test]
     fn claude_with_no_options_is_bare() {
         assert_eq!(
-            build_agent_command("claude", &opts(), "", "", &bins()),
+            build_agent_command("claude", &opts(), "", "", &bins(), &none()),
             "claude"
         );
     }
@@ -2039,7 +2360,7 @@ mod build_cmd_tests {
         let mut o = opts();
         o.claude.session_mode = ClaudeSessionMode::Continue;
         assert_eq!(
-            build_agent_command("claude", &o, "", "", &bins()),
+            build_agent_command("claude", &o, "", "", &bins(), &none()),
             "claude --continue"
         );
     }
@@ -2056,7 +2377,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("claude", &o, "", "", &bins()),
+            build_agent_command("claude", &o, "", "", &bins(), &none()),
             "claude --resume --dangerously-skip-permissions"
         );
     }
@@ -2072,7 +2393,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("claude", &o, "--model=opus", "", &bins()),
+            build_agent_command("claude", &o, "--model=opus", "", &bins(), &none()),
             "claude --dangerously-skip-permissions --model=opus"
         );
     }
@@ -2080,7 +2401,7 @@ mod build_cmd_tests {
     #[test]
     fn claude_name_appends_slugified_display_name() {
         assert_eq!(
-            build_agent_command("claude", &opts(), "", "My Rocket Fox", &bins()),
+            build_agent_command("claude", &opts(), "", "My Rocket Fox", &bins(), &none()),
             "claude --name my-rocket-fox"
         );
     }
@@ -2096,7 +2417,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("claude", &o, "--model=opus", "Bosun Fix", &bins()),
+            build_agent_command("claude", &o, "--model=opus", "Bosun Fix", &bins(), &none()),
             "claude --continue --dangerously-skip-permissions --name bosun-fix --model=opus"
         );
     }
@@ -2106,7 +2427,14 @@ mod build_cmd_tests {
         // A user-supplied --name in the extra args wins; don't emit a
         // duplicate that commander would reject.
         assert_eq!(
-            build_agent_command("claude", &opts(), "--name custom", "My Session", &bins()),
+            build_agent_command(
+                "claude",
+                &opts(),
+                "--name custom",
+                "My Session",
+                &bins(),
+                &none()
+            ),
             "claude --name custom"
         );
     }
@@ -2124,11 +2452,11 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("claude", &o, "--model=opus", "Bosun Fix", &bins()),
+            build_agent_command("claude", &o, "--model=opus", "Bosun Fix", &bins(), &none()),
             "claude --dangerously-skip-permissions --name bosun-fix --model=opus --remote-control"
         );
         assert_eq!(
-            build_agent_command("claude", &o, "", "", &bins()),
+            build_agent_command("claude", &o, "", "", &bins(), &none()),
             "claude --dangerously-skip-permissions --remote-control"
         );
     }
@@ -2144,7 +2472,7 @@ mod build_cmd_tests {
             "--remote-control=phone",
         ] {
             assert_eq!(
-                build_agent_command("claude", &o, args, "", &bins()),
+                build_agent_command("claude", &o, args, "", &bins(), &none()),
                 format!("claude {args}")
             );
         }
@@ -2155,7 +2483,8 @@ mod build_cmd_tests {
                 &o,
                 "--remote-control-session-name-prefix box",
                 "",
-                &bins()
+                &bins(),
+                &none()
             ),
             "claude --remote-control-session-name-prefix box --remote-control"
         );
@@ -2166,7 +2495,7 @@ mod build_cmd_tests {
         let mut o = opts();
         o.claude.remote_control = true;
         assert_eq!(
-            build_launch_command("claude", &o, "", "", true, &bins()),
+            build_launch_command("claude", &o, "", "", true, &bins(), &none()),
             "claude --continue --remote-control"
         );
     }
@@ -2192,7 +2521,7 @@ mod build_cmd_tests {
     #[test]
     fn claude_name_skipped_when_slug_is_empty() {
         assert_eq!(
-            build_agent_command("claude", &opts(), "", "!!!", &bins()),
+            build_agent_command("claude", &opts(), "", "!!!", &bins(), &none()),
             "claude"
         );
     }
@@ -2201,7 +2530,15 @@ mod build_cmd_tests {
     fn launch_resume_keeps_claude_name() {
         // The `r` restart re-asserts the bosun name on the resumed session.
         assert_eq!(
-            build_launch_command("claude", &opts(), "", "My Rocket Fox", true, &bins()),
+            build_launch_command(
+                "claude",
+                &opts(),
+                "",
+                "My Rocket Fox",
+                true,
+                &bins(),
+                &none()
+            ),
             "claude --continue --name my-rocket-fox"
         );
     }
@@ -2209,15 +2546,15 @@ mod build_cmd_tests {
     #[test]
     fn name_ignored_for_other_agents() {
         assert_eq!(
-            build_agent_command("codex", &opts(), "", "My Fox", &bins()),
+            build_agent_command("codex", &opts(), "", "My Fox", &bins(), &none()),
             "codex"
         );
         assert_eq!(
-            build_agent_command("kimi", &opts(), "", "My Fox", &bins()),
+            build_agent_command("kimi", &opts(), "", "My Fox", &bins(), &none()),
             "kimi"
         );
         assert_eq!(
-            build_agent_command("terminal", &opts(), "", "My Fox", &bins()),
+            build_agent_command("terminal", &opts(), "", "My Fox", &bins(), &none()),
             ""
         );
     }
@@ -2232,7 +2569,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("codex", &o, "", "", &bins()),
+            build_agent_command("codex", &o, "", "", &bins(), &none()),
             "codex --yolo"
         );
     }
@@ -2247,7 +2584,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("codex", &o, "", "", &bins()),
+            build_agent_command("codex", &o, "", "", &bins(), &none()),
             "codex resume --last"
         );
     }
@@ -2262,7 +2599,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("codex", &o, "", "", &bins()),
+            build_agent_command("codex", &o, "", "", &bins(), &none()),
             "codex resume --yolo"
         );
     }
@@ -2270,7 +2607,7 @@ mod build_cmd_tests {
     #[test]
     fn opencode_defaults_bare_and_continue_flags() {
         assert_eq!(
-            build_agent_command("opencode", &opts(), "", "", &bins()),
+            build_agent_command("opencode", &opts(), "", "", &bins(), &none()),
             "opencode"
         );
         let o = SpecOptions {
@@ -2281,7 +2618,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("opencode", &o, "-m anthropic/claude", "", &bins()),
+            build_agent_command("opencode", &o, "-m anthropic/claude", "", &bins(), &none()),
             "opencode --continue --auto -m anthropic/claude"
         );
     }
@@ -2298,7 +2635,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("opencode", &o, "", "", &bins()),
+            build_agent_command("opencode", &o, "", "", &bins(), &none()),
             "opencode --continue"
         );
     }
@@ -2306,7 +2643,7 @@ mod build_cmd_tests {
     #[test]
     fn qwen_modes_and_yolo() {
         assert_eq!(
-            build_agent_command("qwen", &opts(), "", "", &bins()),
+            build_agent_command("qwen", &opts(), "", "", &bins(), &none()),
             "qwen"
         );
         let mut o = opts();
@@ -2315,12 +2652,12 @@ mod build_cmd_tests {
             yolo: true,
         };
         assert_eq!(
-            build_agent_command("qwen", &o, "", "", &bins()),
+            build_agent_command("qwen", &o, "", "", &bins(), &none()),
             "qwen --continue --yolo"
         );
         o.qwen.session_mode = ClaudeSessionMode::Resume;
         assert_eq!(
-            build_agent_command("qwen", &o, "-m qwen3-coder-plus", "", &bins()),
+            build_agent_command("qwen", &o, "-m qwen3-coder-plus", "", &bins(), &none()),
             "qwen --resume --yolo -m qwen3-coder-plus"
         );
     }
@@ -2330,11 +2667,14 @@ mod build_cmd_tests {
         let mut b = bins();
         b.insert("opencode".into(), "/Users/me/bin/opencode-wrapper".into());
         assert_eq!(
-            build_agent_command("opencode", &opts(), "", "", &b),
+            build_agent_command("opencode", &opts(), "", "", &b, &none()),
             "/Users/me/bin/opencode-wrapper"
         );
         // Other agents are untouched by an unrelated override.
-        assert_eq!(build_agent_command("claude", &opts(), "", "", &b), "claude");
+        assert_eq!(
+            build_agent_command("claude", &opts(), "", "", &b, &none()),
+            "claude"
+        );
     }
 
     #[test]
@@ -2342,7 +2682,7 @@ mod build_cmd_tests {
         let mut b = bins();
         b.insert("codex".into(), "codex-nightly".into());
         assert_eq!(
-            build_launch_command("codex", &opts(), "", "", true, &b),
+            build_launch_command("codex", &opts(), "", "", true, &b, &none()),
             "codex-nightly resume --last"
         );
     }
@@ -2351,13 +2691,16 @@ mod build_cmd_tests {
     fn blank_binary_override_falls_back_to_agent_name() {
         let mut b = bins();
         b.insert("qwen".into(), "   ".into());
-        assert_eq!(build_agent_command("qwen", &opts(), "", "", &b), "qwen");
+        assert_eq!(
+            build_agent_command("qwen", &opts(), "", "", &b, &none()),
+            "qwen"
+        );
     }
 
     #[test]
     fn kimi_uses_kimi_binary_and_defaults_bare() {
         assert_eq!(
-            build_agent_command("kimi", &opts(), "", "", &bins()),
+            build_agent_command("kimi", &opts(), "", "", &bins(), &none()),
             "kimi"
         );
     }
@@ -2372,7 +2715,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("kimi", &o, "-m k2", "", &bins()),
+            build_agent_command("kimi", &o, "-m k2", "", &bins(), &none()),
             "kimi --continue --yolo -m k2"
         );
     }
@@ -2387,7 +2730,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("kimi", &o, "", "", &bins()),
+            build_agent_command("kimi", &o, "", "", &bins(), &none()),
             "kimi --session"
         );
     }
@@ -2404,7 +2747,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_launch_command("kimi", &o, "", "", true, &bins()),
+            build_launch_command("kimi", &o, "", "", true, &bins(), &none()),
             "kimi --continue --yolo"
         );
     }
@@ -2419,11 +2762,11 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_agent_command("terminal", &o, "vim .zshrc", "", &bins()),
+            build_agent_command("terminal", &o, "vim .zshrc", "", &bins(), &none()),
             "vim .zshrc"
         );
         assert_eq!(
-            build_agent_command("terminal", &opts(), "", "", &bins()),
+            build_agent_command("terminal", &opts(), "", "", &bins(), &none()),
             ""
         );
     }
@@ -2431,7 +2774,7 @@ mod build_cmd_tests {
     #[test]
     fn launch_without_resume_matches_plain_build() {
         assert_eq!(
-            build_launch_command("claude", &opts(), "", "", false, &bins()),
+            build_launch_command("claude", &opts(), "", "", false, &bins(), &none()),
             "claude"
         );
     }
@@ -2441,7 +2784,7 @@ mod build_cmd_tests {
         // Persisted mode is the default (New); the one-shot resume
         // override swaps in `--continue` without touching the options.
         assert_eq!(
-            build_launch_command("claude", &opts(), "", "", true, &bins()),
+            build_launch_command("claude", &opts(), "", "", true, &bins(), &none()),
             "claude --continue"
         );
     }
@@ -2457,7 +2800,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_launch_command("claude", &o, "--model=opus", "", true, &bins()),
+            build_launch_command("claude", &o, "--model=opus", "", true, &bins(), &none()),
             "claude --continue --dangerously-skip-permissions --model=opus"
         );
     }
@@ -2465,7 +2808,7 @@ mod build_cmd_tests {
     #[test]
     fn launch_resume_uses_codex_resume_last() {
         assert_eq!(
-            build_launch_command("codex", &opts(), "", "", true, &bins()),
+            build_launch_command("codex", &opts(), "", "", true, &bins(), &none()),
             "codex resume --last"
         );
     }
@@ -2480,7 +2823,7 @@ mod build_cmd_tests {
             ..Default::default()
         };
         assert_eq!(
-            build_launch_command("codex", &o, "--model gpt-5", "", true, &bins()),
+            build_launch_command("codex", &o, "--model gpt-5", "", true, &bins(), &none()),
             "codex resume --last --yolo --model gpt-5"
         );
     }
@@ -2488,7 +2831,15 @@ mod build_cmd_tests {
     #[test]
     fn launch_resume_noop_for_terminal() {
         assert_eq!(
-            build_launch_command("terminal", &opts(), "vim .zshrc", "", true, &bins()),
+            build_launch_command(
+                "terminal",
+                &opts(),
+                "vim .zshrc",
+                "",
+                true,
+                &bins(),
+                &none()
+            ),
             "vim .zshrc"
         );
     }
