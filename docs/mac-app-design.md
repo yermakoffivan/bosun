@@ -147,8 +147,8 @@ The TUI's biggest daily annoyance is focus. The sidebar and the terminal take tu
 
 - The focused terminal view gets every key except app key equivalents (Cmd+…). There's no prefix key and no send-next-key, because Cmd belongs to the app and everything else goes to the agent.
 - Option-as-Meta comes from the Ghostty config (`macos-option-as-alt`). IME and dead keys are handled by Ghostty's own text-input path, which the spike must verify in the embed.
-- **Close vs kill:** Cmd+W closes a tile and detaches the client (the session keeps running). Killing a session is a menu item with a confirmation dialog, never a single keystroke.
-- Default shortcuts: Cmd+D split right, Cmd+Shift+D split down, Cmd+Option+arrows move focus between tiles, Cmd+Return zoom.
+- **Close vs kill:** a pane is a tab, so Cmd+W closes the active pane and ends its tab (section 6). It asks first unless the pane is a shell at its prompt, and closing a row's last pane always asks. Killing a whole row is a menu item with a confirmation dialog, never a single keystroke.
+- Default shortcuts: Cmd+D new terminal tab split right, Cmd+Shift+D split down, Cmd+T new tab with the sheet, Cmd+Option+arrows move focus between tiles, Cmd+Return zoom.
 - **Navigation matches the TUI:** previous/next session and previous/next tab work like the TUI's `[keybindings]` defaults, using the same config so a remap applies to both. Where a TUI key would clash with what the agent needs, the app uses the Cmd version of it.
 - **Drag and drop into terminals:** dropping files or images on a tile inserts their paths, shell-escaped, as typed text, so Claude Code attaches dropped images the same way it does in Ghostty. Image data that isn't a file (from a browser, or a screenshot thumbnail) is written to a temp file first and its path inserted. This ports Ghostty's own drop handling into `TerminalView`; the spike didn't have it.
 
