@@ -4,6 +4,21 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.17] — 2026-10-16
+
+### Added
+
+- **Claude Code reports its own status.** Claude sessions now tell Bosun when they're working, waiting for you (and on what, e.g. `permission: Bash`, a question or plan approval), done or idle, through hooks Bosun passes with `--settings` at launch. Your own `~/.claude/settings.json` is never edited, and your own hooks keep running alongside. Existing sessions pick this up on their next restart. The old detectors stay as a cross-check, e.g. when you interrupt Claude with Esc. Turn it off with **agent status hooks** in the settings panel (`s`), `agent_hooks = false` in `config.toml`, or `BOSUN_AGENT_HOOKS=0`. Other agents keep the existing detection for now, because none of them offers a way to add hooks without changing your own config.
+- **`bosun serve`.** A background daemon that runs Bosun's session engine behind a Unix socket, for graphical clients such as the upcoming Mac app. The protocol is described in `docs/protocol.md`.
+
+### Changed
+
+- **Faster tmux commands.** Bosun now sends its tmux commands over one long-lived control-mode connection instead of starting a `tmux` process for each one. Navigating starts about 80% fewer processes, and common commands take well under a millisecond instead of about 5 ms. Set `BOSUN_TMUX_CONTROL=0` to go back to the old behaviour.
+
+### Fixed
+
+- **Two Bosun processes on one tmux server no longer undo each other.** A Bosun that's still running now picks up section changes made by another one instead of reverting them on its next save, and quitting one no longer removes the shared tmux key bindings (C-q, Shift+Left/Right, M-O, prefix 1–9) while another is still running.
+
 ## [2.1.16] — 2026-10-05
 
 ### Added
