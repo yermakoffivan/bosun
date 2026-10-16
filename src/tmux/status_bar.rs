@@ -71,6 +71,35 @@ const STATUS_LEFT_LEN: &str = "0";
 const STATUS_RIGHT_LEN: &str = "120";
 const STATUS_STYLE: &str = "bg=default,fg=#e6e9ef";
 
+/// The terminal type (`TERM`, tmux's `#{client_termname}`) that Bosun
+/// for Mac's terminals attach with: Ghostty's own terminfo entry under a
+/// name of its own, shipped in the app bundle. It is how tmux formats
+/// and Bosun tell the app's clients from the TUI's preview, Moshi, or a
+/// plain `tmux attach`. tmux has no per-client `status` option and no
+/// client user options, so the terminal type is the one thing a format
+/// can tell clients apart by. It starts with `xterm` so tmux's default
+/// `xterm*` terminal features still apply.
+pub const APP_CLIENT_TERM: &str = "xterm-ghostty-bosun";
+
+/// Whether a Bosun session should show tmux's status line, given the
+/// terminal types of the clients attached to it. The line carries the
+/// TUI's key hints, which mean nothing in the Mac app (it has its own
+/// keys) and cost each of its terminals a row. So a session that only
+/// the app is showing has no status line; any other client (the TUI's
+/// preview, Moshi, `tmux attach`), or none at all, keeps it. A session
+/// shown in both gets the line, and the app's clients see it empty (see
+/// `build_hint`).
+pub fn wants_status_line<'a>(client_terms: impl IntoIterator<Item = &'a str>) -> bool {
+    let mut any = false;
+    for term in client_terms {
+        if term != APP_CLIENT_TERM {
+            return true;
+        }
+        any = true;
+    }
+    !any
+}
+
 // --- Public API ------------------------------------------------------
 
 /// Install the global parts of the status bar: prefix-1..9 jump
@@ -98,7 +127,8 @@ pub fn configure_session(
     let hint = build_hint(socket);
     let target = &["-t", session];
 
-    run_targeted(socket, target, &["set-option", "status", "on"])?;
+    // `status` itself (on or off) is set by the actor's
+    // `sync_status_lines`, from which clients are attached.
     run_targeted(
         socket,
         target,
@@ -177,7 +207,13 @@ fn build_hint(socket: Option<&str>) -> String {
     } else {
         navigation.as_str()
     };
-    format!("#[fg=#7c8495]^Q detach · {navigation} · {prefix} 1-9 jump ")
+    let hint = format!("#[fg=#7c8495]^Q detach · {navigation} · {prefix} 1-9 jump ");
+    // Empty for the Mac app's clients: these are the TUI's keys, and the
+    // app has its own. A comma would end the conditional's branch early.
+    format!(
+        "#{{?#{{==:#{{client_termname}},{APP_CLIENT_TERM}}},,{}}}",
+        hint.replace(',', "#,")
+    )
 }
 
 /// Wrap `s` in double quotes for passing through tmux's own argv parser.
@@ -253,6 +289,29 @@ mod tests {
         assert!(hint.contains("send next"));
         assert!(hint.contains("^Q detach"));
         assert!(hint.contains("1-9 jump"));
+    }
+
+    #[test]
+    fn hint_is_empty_for_the_mac_apps_clients() {
+        let hint = build_hint(None);
+        assert!(
+            hint.starts_with("#{?#{==:#{client_termname},xterm-ghostty-bosun},,"),
+            "{hint}"
+        );
+        assert!(hint.ends_with('}'), "{hint}");
+    }
+
+    #[test]
+    fn status_line_only_goes_when_the_app_alone_shows_a_session() {
+        let app = APP_CLIENT_TERM;
+        // Nobody attached: keep it, so the first TUI or Moshi client
+        // gets its hints without a resize.
+        assert!(wants_status_line([]));
+        assert!(!wants_status_line([app]));
+        assert!(!wants_status_line([app, app]));
+        assert!(wants_status_line(["xterm-256color"]));
+        assert!(wants_status_line([app, "xterm-ghostty"]));
+        assert!(wants_status_line(["tmux-256color", app]));
     }
 
     #[test]

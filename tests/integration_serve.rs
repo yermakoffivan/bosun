@@ -510,3 +510,213 @@ fn serve_hook_state_reaches_clients_within_the_poll() {
     c.send(json!({"t": "cmd", "id": 2, "op": "kill", "session": name}));
     c.until("kill ack", |v| is_ack(v, 2));
 }
+
+/// Create a `terminal` session through the daemon and return its tmux
+/// name. `args` is the command typed into its shell (empty: none).
+fn create_terminal(c: &mut Conn, id: u64, name: &str, args: &str) -> String {
+    c.send(json!({
+        "t": "cmd", "id": id, "op": "create",
+        "spec": {"name": name, "path": "/tmp", "agent": "terminal", "args": args}
+    }));
+    let seen = c.until("create ack", |v| is_ack(v, id));
+    let ack = seen.last().unwrap();
+    assert_eq!(ack["ok"], true, "{ack}");
+    ack["session"].as_str().unwrap().to_string()
+}
+
+fn wait_for(what: &str, timeout: Duration, mut cond: impl FnMut() -> bool) {
+    let deadline = Instant::now() + timeout;
+    while !cond() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn serve_launch_types_only_the_command() {
+    let mut fx = fixture();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    assert_eq!(c.recv().expect("snapshot")["t"], "snapshot");
+
+    // `cat` reads its terminal in cooked mode, the way an agent's
+    // terminal is until it switches to raw mode, so any key Bosun sends
+    // after the launch is echoed where this test can see it (a Ctrl-L
+    // shows as `^L`).
+    let name = create_terminal(&mut c, 1, "launch", "cat");
+    let display = |format: &str| {
+        let out = fx.tmux(&["display", "-p", "-t", &name, format]);
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    wait_for("cat in the pane", Duration::from_secs(15), || {
+        display("#{pane_current_command}") == "cat"
+    });
+    std::thread::sleep(Duration::from_millis(1500));
+    let out = fx.tmux(&["capture-pane", "-p", "-t", &name]);
+    let pane = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        !pane.contains("^L"),
+        "something was typed after the launch:\n{pane}"
+    );
+    assert!(pane.contains("cat"), "{pane}");
+}
+
+/// A terminfo directory holding `xterm-ghostty-bosun`, the terminal type
+/// Bosun for Mac's terminals attach with (built from `xterm-256color`,
+/// which every system has; only the name matters here).
+fn app_terminfo(dir: &std::path::Path) {
+    let src = Command::new("infocmp")
+        .args(["-x", "xterm-256color"])
+        .output()
+        .expect("infocmp");
+    assert!(src.status.success(), "{src:?}");
+    let text = String::from_utf8(src.stdout).unwrap();
+    let renamed: String = text
+        .lines()
+        .map(|l| {
+            if l.starts_with("xterm-256color|") {
+                format!("xterm-ghostty-bosun|bosun app test terminal,")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let file = dir.join("app.src");
+    std::fs::write(&file, renamed + "\n").unwrap();
+    let out = Command::new("tic")
+        .args(["-x", "-o"])
+        .arg(dir)
+        .arg(&file)
+        .output()
+        .expect("tic");
+    assert!(out.status.success(), "{out:?}");
+}
+
+/// A terminal client (`tmux attach` in a pty from `script`) with the
+/// given TERM. Killed on drop.
+struct TermClient(Child);
+
+impl TermClient {
+    fn attach(fx: &Fixture, session: &str, term: &str, terminfo: &std::path::Path) -> Self {
+        let tmux = format!("tmux -L {} attach -t ={}", fx.sock, session);
+        let mut cmd = Command::new("script");
+        if cfg!(target_os = "macos") {
+            cmd.args(["-q", "/dev/null", "sh", "-c", &tmux]);
+        } else {
+            cmd.args(["-qfec", &tmux, "/dev/null"]);
+        }
+        let child = cmd
+            .env("TERM", term)
+            .env("TERMINFO", terminfo)
+            .env_remove("TMUX")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("script");
+        Self(child)
+    }
+}
+
+impl Drop for TermClient {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn serve_reports_client_moves_and_hides_the_status_line_for_app_clients() {
+    let mut fx = fixture();
+    let terminfo = tempfile::tempdir().unwrap();
+    app_terminfo(terminfo.path());
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    assert_eq!(c.recv().expect("snapshot")["t"], "snapshot");
+    let a = create_terminal(&mut c, 1, "first", "");
+    let b = create_terminal(&mut c, 2, "second", "");
+
+    let clients = || {
+        let out = fx.tmux(&[
+            "list-clients",
+            "-F",
+            "#{client_tty}|||#{client_session}|||#{client_termname}|||#{E:status-right}",
+        ]);
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.split("|||").map(str::to_string).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    };
+    let status = |session: &str| {
+        let out = fx.tmux(&["display", "-p", "-t", session, "#{status}"]);
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    wait_for("status lines on", Duration::from_secs(10), || {
+        status(&a) == "on" && status(&b) == "on"
+    });
+
+    // The app's terminal attaches to A: reported, and A's status line goes.
+    let app = TermClient::attach(&fx, &a, "xterm-ghostty-bosun", terminfo.path());
+    let seen = c.until("client_session for A", |v| {
+        v["t"] == "client_session" && v["session"] == a.as_str()
+    });
+    let tty = seen.last().unwrap()["tty"].as_str().unwrap().to_string();
+    assert!(tty.starts_with("/dev/"), "{tty}");
+    let row = clients()
+        .into_iter()
+        .find(|r| r[0] == tty)
+        .expect("app client");
+    assert_eq!(row[2], "xterm-ghostty-bosun");
+    assert_eq!(row[3], "", "TUI hints on an app client");
+    wait_for("A's status line off", Duration::from_secs(5), || {
+        status(&a) == "off"
+    });
+
+    // Something moves it to B (a jump key typed inside it does the same).
+    fx.tmux(&["switch-client", "-c", &tty, "-t", &format!("={b}")]);
+    let seen = c.until("client_session for B", |v| v["t"] == "client_session");
+    let moved = seen.last().unwrap();
+    assert_eq!(moved["tty"], tty.as_str());
+    assert_eq!(moved["session"], b.as_str());
+    wait_for(
+        "status lines follow the move",
+        Duration::from_secs(5),
+        || status(&a) == "on" && status(&b) == "off",
+    );
+
+    // Another kind of client on B brings the line back, with its hints.
+    let other = TermClient::attach(&fx, &b, "xterm-256color", terminfo.path());
+    wait_for("B's status line back", Duration::from_secs(5), || {
+        status(&b) == "on"
+    });
+    let rows = clients();
+    let hint = rows
+        .iter()
+        .find(|r| r[0] != tty && r[0].starts_with('/'))
+        .map(|r| r[3].clone())
+        .unwrap_or_default();
+    assert!(
+        hint.contains("detach"),
+        "hints missing for a TUI client: {rows:?}"
+    );
+    drop(other);
+    wait_for("B's status line off again", Duration::from_secs(5), || {
+        status(&b) == "off"
+    });
+
+    // A detach is reported too.
+    fx.tmux(&["detach-client", "-t", &tty]);
+    // (The other client's detach, from dropping it above, comes first.)
+    c.until("client_detached", |v| {
+        v["t"] == "client_detached" && v["tty"] == tty.as_str()
+    });
+    wait_for(
+        "B's status line on with nobody attached",
+        Duration::from_secs(5),
+        || status(&b) == "on",
+    );
+    drop(app);
+}

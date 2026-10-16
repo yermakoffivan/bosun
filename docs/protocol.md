@@ -385,6 +385,19 @@ The daemon picks up changes to `config.toml` made elsewhere (the TUI's theme pic
 
 A message for a person, the same text the TUI shows in its status bar: confirmations and errors from Bosun's own work. Show it as a toast or ignore it. Messages caused by a command are also listed in that command's `ack`.
 
+### `client_session` and `client_detached`
+
+```json
+{"t":"client_session","seq":12,"tty":"/dev/ttys026","session":"bosun-api-1a2b3c4d"}
+{"t":"client_detached","seq":13,"tty":"/dev/ttys026"}
+```
+
+A tmux client attached to Bosun's tmux server changed session or went away. `tty` is the client's terminal, the same value `client_flags` takes (`#{client_tty}`, which libghostty reports with `ghostty_surface_tty_name()`); `session` is the tmux session name it's on now. They come from tmux control mode's `%client-session-changed` and `%client-detached`, for every terminal client on the server (control-mode clients are left out), so a client ignores ttys that aren't its own.
+
+`client_session` is sent when a client attaches, when anything moves it (`switch-client`, `choose-tree`, the `prefix 1-9` and Shift+arrow bindings Bosun installs for the TUI, typed inside the terminal), and also when a client is switched to the session it's already on, which `make_latest` does. Compare `session` with what the terminal is meant to show and act only on a difference. `client_detached` follows a detach from any cause (`C-q`, `detach-client`, the session ending); the `tmux attach` process in that terminal exits at the same time.
+
+These are events, not state: they aren't in the `snapshot` and a `resync` doesn't repeat them.
+
 ### `ack`
 
 ```json
@@ -400,6 +413,15 @@ The reply to one `cmd`. `ok` says whether it worked; `error` is a human-readable
 ```
 
 A protocol problem rather than a command failure. Codes: `protocol_mismatch` and `no_hello` close the connection; `bad_message` (unparseable JSON, an unknown `t` or `op`, a missing field) doesn't.
+
+## Terminal clients
+
+A GUI's terminal views attach with `tmux -L <socket> attach -t =<session>` in their own ptys (see `server.tmux_socket`). They should run that `tmux` with `TERM=xterm-ghostty-bosun`, a copy of Ghostty's `xterm-ghostty` terminfo entry under a name of its own (Bosun for Mac ships it in its bundle and points `TERMINFO` at it). tmux shows that name as `#{client_termname}`, and it's how Bosun tells a GUI's clients from the TUI's preview, Moshi or a plain `tmux attach`:
+
+- Bosun's status line hints (`^Q detach · Shift+Left / Shift+Right cycle · …`) are the TUI's keys, so they're blank on these clients.
+- A session that only these clients are attached to has no status line at all (`status off`), so each terminal gets that row back. As soon as any other client attaches, or none is attached, the session's status line is on again. tmux has no per-client status line, so while a session is shown both in the GUI and elsewhere, the GUI's terminals have an empty bottom row.
+
+Both Bosun processes that may share a tmux server (the TUI and `bosun serve`) apply this the same way when a client attaches, moves or detaches.
 
 ## Debugging with socat or nc
 

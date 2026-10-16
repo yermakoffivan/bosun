@@ -193,6 +193,26 @@ pub trait TmuxClient: Send + Sync {
     fn control_channel_up(&self) -> bool {
         false
     }
+
+    /// Every attached terminal client's session and terminal type
+    /// (`#{client_session}`, `#{client_termname}`), for deciding which
+    /// sessions show tmux's status line (see
+    /// [`crate::tmux::status_bar::wants_status_line`]). Control-mode
+    /// clients are left out.
+    async fn list_client_terms(&self) -> Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+
+    /// Each session's `status` option as tmux resolves it: whether the
+    /// session shows a status line.
+    async fn session_status_lines(&self) -> Result<Vec<(String, bool)>> {
+        Ok(Vec::new())
+    }
+
+    /// Turn a session's status line on or off (its `status` option).
+    async fn set_session_status_line(&self, _session: &str, _on: bool) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Production implementation. tmux commands go over a long-lived
@@ -1053,6 +1073,58 @@ impl TmuxClient for TokioTmuxClient {
         std::fs::write(&exclude, contents)
             .map_err(|e| BosunError::Git(format!("write {}: {e}", exclude.display())))?;
         Ok(())
+    }
+
+    async fn list_client_terms(&self) -> Result<Vec<(String, String)>> {
+        const SEP: &str = "|||";
+        let fmt =
+            format!("#{{client_control_mode}}{SEP}#{{client_session}}{SEP}#{{client_termname}}");
+        let out = self.run(&["list-clients", "-F", &fmt], Retry::Safe).await?;
+        if !out.success {
+            return Ok(Vec::new());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let mut parts = l.splitn(3, SEP);
+                let control = parts.next()?;
+                let session = parts.next()?;
+                let term = parts.next()?;
+                (control != "1" && !session.is_empty())
+                    .then(|| (session.to_string(), term.to_string()))
+            })
+            .collect())
+    }
+
+    async fn session_status_lines(&self) -> Result<Vec<(String, bool)>> {
+        const SEP: &str = "|||";
+        let fmt = format!("#{{session_name}}{SEP}#{{status}}");
+        let out = self
+            .run(&["list-sessions", "-F", &fmt], Retry::Safe)
+            .await?;
+        if !out.success {
+            return Ok(Vec::new());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.rsplit_once(SEP))
+            .map(|(name, status)| (name.to_string(), status != "off"))
+            .collect())
+    }
+
+    async fn set_session_status_line(&self, session: &str, on: bool) -> Result<()> {
+        let value = if on { "on" } else { "off" };
+        let out = self
+            .run(&["set-option", "-t", session, "status", value], Retry::Safe)
+            .await?;
+        if out.success {
+            Ok(())
+        } else {
+            Err(BosunError::Tmux(format!(
+                "set status on {session}: {}",
+                out.stderr.trim()
+            )))
+        }
     }
 }
 

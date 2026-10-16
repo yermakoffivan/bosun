@@ -916,6 +916,25 @@ pub fn spawn(
                         continue;
                     }
 
+                    // A terminal client attached, moved or left: tell a
+                    // GUI that may own it, and show or hide the status
+                    // line of the sessions involved. Control-mode
+                    // clients (named `client-<pid>`, not a tty) are ours
+                    // and never matter here.
+                    let client_change = match &notif {
+                        Notification::ClientSessionChanged { client, name, .. } => {
+                            Some((client.clone(), Some(name.clone())))
+                        }
+                        Notification::ClientDetached { client } => Some((client.clone(), None)),
+                        _ => None,
+                    };
+                    if let Some((tty, session)) = client_change {
+                        if tty.starts_with('/') {
+                            let _ = evt_tx.send(AppMsg::ClientSession { tty, session });
+                        }
+                        sync_status_lines(&*client, &config).await;
+                    }
+
                     if should_refresh {
                         let _ = do_refresh(
                             &*client,
@@ -1776,6 +1795,7 @@ async fn do_refresh(
     if !bar_state_equal(&state, last_bar_state) {
         sync_status_bar(socket, &state, globals);
         *last_bar_state = state;
+        sync_status_lines(client, config).await;
     }
 
     let _ = evt_tx.send(AppMsg::SessionsRefreshed {
@@ -1783,6 +1803,37 @@ async fn do_refresh(
         select_after,
     });
     Ok(())
+}
+
+/// Show tmux's status line on each Bosun session unless only the Mac
+/// app's terminals are attached to it (`status_bar::wants_status_line`).
+/// Runs when a client attaches, moves or detaches, and when the session
+/// list changes. Reads what tmux has now and writes only differences,
+/// so two Bosun processes on one server (the TUI and `bosun serve`)
+/// agree instead of undoing each other. Best effort.
+async fn sync_status_lines(client: &dyn TmuxClient, config: &Config) {
+    let (Ok(clients), Ok(current)) = (
+        client.list_client_terms().await,
+        client.session_status_lines().await,
+    ) else {
+        return;
+    };
+    for (session, shown) in current {
+        if !config.manages(&session) {
+            continue;
+        }
+        let want = status_bar::wants_status_line(
+            clients
+                .iter()
+                .filter(|(s, _)| *s == session)
+                .map(|(_, term)| term.as_str()),
+        );
+        if want != shown {
+            if let Err(e) = client.set_session_status_line(&session, want).await {
+                tracing::warn!("status line on {}: {}", session, e);
+            }
+        }
+    }
 }
 
 /// Whether the status bar needs rewriting. Compares membership, order
