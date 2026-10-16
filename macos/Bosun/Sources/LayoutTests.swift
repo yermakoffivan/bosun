@@ -9,6 +9,7 @@ extension FocusTest {
     func layoutSections(_ only: Set<String>?) async {
         func wants(_ s: String) -> Bool { only?.contains(s) ?? true }
         if wants("sheet") { await sheetLayout() }
+        if wants("empty") { await emptyState() }
     }
 
     // MARK: Sheet layout
@@ -165,5 +166,66 @@ extension FocusTest {
         w.setFrame(frame, display: true)
         await sleep(200)
         for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
+    }
+
+    // MARK: Empty tiles
+
+    /// What in an empty tile's placeholder is cut off: anything outside it, or text taller than its frame.
+    func placeholderProblems(_ p: PlaceholderView) -> [String] {
+        p.layoutSubtreeIfNeeded()
+        var bad: [String] = []
+        let inner = p.bounds.insetBy(dx: 4, dy: 0)
+        for v in [p.title, p.hint, p.primary, p.secondary] as [NSControl] where !v.isHidden {
+            let name = (v as? NSButton)?.title ?? (v as? NSTextField)?.stringValue.prefix(24).description ?? ""
+            if !inner.contains(v.frame) { bad.append("“\(name)” at \(v.frame) outside \(p.bounds)") }
+            if let t = v as? NSTextField, let cell = t.cell {
+                let need = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: t.frame.width, height: .greatestFiniteMagnitude))
+                if need.height > t.frame.height + 1 { bad.append("“\(name)” needs \(Int(need.height)) pt, has \(Int(t.frame.height))") }
+                if (t.attributedStringValue.size().width > t.frame.width + 1) && t.frame.height < 2 * (t.font?.boundingRectForFont.height ?? 14) - 4 {
+                    bad.append("“\(name)” doesn't wrap: one line of \(Int(t.frame.height)) pt for \(Int(t.attributedStringValue.size().width)) pt of text")
+                }
+            }
+        }
+        return bad
+    }
+
+    func emptyState() async {
+        guard let api = session("api") else { return }
+        await showOnly(api)
+        await cmd("d")
+        await cmd("d")
+        await waitUntil(3) { ws.layout.count == 3 }
+        // Squeeze the first tile with the first divider, then empty it.
+        let first = ws.layout.tiles[0]
+        if let d = ws.area.subviews.compactMap({ $0 as? DividerView }).compactMap(\.divider).first(where: { $0.path.isEmpty }) {
+            ws.dividerDragBegan()
+            ws.dividerDragged(d, to: NSPoint(x: d.container.minX + 30, y: d.container.midY))
+            ws.dividerDragEnded()
+        }
+        ws.clear(first)
+        await sleep(200)
+        let chrome = ws.area.subviews.compactMap { $0 as? TileChromeView }.first { $0.tile == first }
+        let width = Int(ws.tileRects[first]?.width ?? 0)
+        if let p = chrome?.placeholderView {
+            let bad = placeholderProblems(p)
+            r.check("a narrow empty tile (\(width) pt) wraps and centres its text, nothing cut off", bad.isEmpty, bad.joined(separator: "; "))
+            r.check("…its title wraps onto more lines rather than running off the edge", p.title.frame.height > 22, "title \(p.title.frame)")
+        } else {
+            r.check("a narrow empty tile shows its placeholder", false)
+        }
+        shot("14-empty-tile-narrow")
+        // Every width from very narrow to wide: nothing ever cut off.
+        var bad: [String] = []
+        if let d = ws.area.subviews.compactMap({ $0 as? DividerView }).compactMap(\.divider).first(where: { $0.path.isEmpty }), let p = chrome?.placeholderView {
+            for x in stride(from: 20, through: Int(d.container.width * 0.6), by: 25) {
+                ws.dividerDragged(d, to: NSPoint(x: d.container.minX + CGFloat(x), y: d.container.midY))
+                ws.area.layoutSubtreeIfNeeded()
+                bad += placeholderProblems(p).map { "\(Int(ws.tileRects[first]?.width ?? 0)) pt: \($0)" }
+            }
+            ws.dividerDragEnded()
+        }
+        r.check("an empty tile at every width from narrow to wide keeps its text inside", bad.isEmpty, bad.prefix(4).joined(separator: "; "))
+        for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
+        await showOnly(api)
     }
 }

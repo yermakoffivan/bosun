@@ -694,6 +694,7 @@ final class SectionCellView: NSTableCellView {
         identifier = SectionCellView.id
         wantsLayer = true
         label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.lineBreakMode = .byTruncatingTail
         count.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         addSubview(label)
         addSubview(count)
@@ -708,7 +709,7 @@ final class SectionCellView: NSTableCellView {
         label.sizeToFit()
         count.sizeToFit()
         let y = bounds.height - label.frame.height - 5
-        label.frame = NSRect(x: 8, y: y, width: min(label.frame.width, bounds.width - 70), height: label.frame.height)
+        label.frame = NSRect(x: 8, y: y, width: max(0, min(label.frame.width, bounds.width - 70)), height: label.frame.height)
         count.frame = NSRect(x: label.frame.maxX + 6, y: y, width: count.frame.width, height: count.frame.height)
         CATransaction.begin()
         CATransaction.setDisableActions(true)

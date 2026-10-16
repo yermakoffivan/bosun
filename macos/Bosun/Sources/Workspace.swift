@@ -456,8 +456,9 @@ final class TileChromeView: NSView {
     private var placeholder: PlaceholderView?
     private(set) var isActive = false
     private var session: String?
-    /// The session the header names (for the test modes).
+    /// The session the header names, and the placeholder (for the test modes).
     var headerSession: String? { session }
+    var placeholderView: PlaceholderView? { placeholder }
 
     override var isFlipped: Bool { true }
 
@@ -660,14 +661,16 @@ final class TileHeaderView: NSView {
     override func menu(for event: NSEvent) -> NSMenu? { menuProvider?() }
 }
 
-/// What an empty tile or an exited session shows.
+/// What an empty tile or an exited session shows. Text wraps and stays centred however narrow the
+/// tile gets; the buttons stack when they don't fit side by side, and what doesn't fit at all is left out.
 final class PlaceholderView: NSView {
-    private let title = NSTextField(labelWithString: "")
-    private let hint = NSTextField(labelWithString: "")
-    private let primary = NSButton(title: "", target: nil, action: nil)
-    private let secondary = NSButton(title: "", target: nil, action: nil)
+    let title = NSTextField(wrappingLabelWithString: "")
+    let hint = NSTextField(wrappingLabelWithString: "")
+    let primary = NSButton(title: "", target: nil, action: nil)
+    let secondary = NSButton(title: "", target: nil, action: nil)
     private var primaryAction: (() -> Void)?
     private var secondaryAction: (() -> Void)?
+    static let margin: CGFloat = 14
 
     override var isFlipped: Bool { true }
 
@@ -678,13 +681,18 @@ final class PlaceholderView: NSView {
         for l in [title, hint] {
             l.alignment = .center
             l.refusesFirstResponder = true
+            l.isSelectable = false
+            l.maximumNumberOfLines = 4
+            l.cell?.truncatesLastVisibleLine = true
+            l.lineBreakMode = .byWordWrapping
             addSubview(l)
         }
-        hint.maximumNumberOfLines = 2
+        hint.maximumNumberOfLines = 6
         for (b, sel) in [(primary, #selector(primaryClicked)), (secondary, #selector(secondaryClicked))] {
             b.bezelStyle = .push
             b.controlSize = .regular
             b.refusesFirstResponder = true
+            b.lineBreakMode = .byTruncatingTail
             b.target = self
             b.action = sel
             addSubview(b)
@@ -717,25 +725,55 @@ final class PlaceholderView: NSView {
         needsLayout = true
     }
 
+    /// Height of a wrapping label at `width`.
+    private func height(_ l: NSTextField, _ width: CGFloat) -> CGFloat {
+        guard !l.stringValue.isEmpty, width > 0, let cell = l.cell else { return 0 }
+        return ceil(cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude)).height)
+    }
+
     override func layout() {
         super.layout()
-        let w = min(bounds.width - 40, 420)
+        let m = PlaceholderView.margin
+        let w = max(0, min(bounds.width - 2 * m, 420))
         let x = (bounds.width - w) / 2
-        title.sizeToFit()
-        let hintH: CGFloat = 36
-        let total = title.frame.height + 8 + hintH + 14 + 28
-        var y = max(10, (bounds.height - total) / 2)
-        title.frame = NSRect(x: x, y: y, width: w, height: title.frame.height)
-        y += title.frame.height + 8
-        hint.frame = NSRect(x: x, y: y, width: w, height: hintH)
-        y += hintH + 14
+        let th = height(title, w)
+        let hh = height(hint, w)
         primary.sizeToFit()
         secondary.sizeToFit()
-        let bw = primary.frame.width + (secondary.isHidden ? 0 : 10 + secondary.frame.width)
-        var bx = (bounds.width - bw) / 2
-        primary.frame = NSRect(x: bx, y: y, width: primary.frame.width, height: 28)
-        bx += primary.frame.width + 10
-        secondary.frame = NSRect(x: bx, y: y, width: secondary.frame.width, height: 28)
+        let two = secondaryAction != nil && !secondary.title.isEmpty
+        let gap: CGFloat = 10
+        let pw = min(primary.frame.width, w), sw = min(secondary.frame.width, w)
+        let sideBySide = !two || pw + gap + sw <= w
+        let buttonsH: CGFloat = sideBySide ? 28 : 28 * 2 + 8
+        // Leave out what doesn't fit: first the buttons, then the hint.
+        let avail = bounds.height - 2 * 10
+        var showHint = hh > 0, showButtons = w >= 60
+        func total() -> CGFloat { th + (showHint ? 8 + hh : 0) + (showButtons ? 14 + buttonsH : 0) }
+        if total() > avail { showButtons = false }
+        if total() > avail { showHint = false }
+        hint.isHidden = !showHint
+        primary.isHidden = !showButtons
+        secondary.isHidden = !showButtons || !two
+        var y = max(10, (bounds.height - total()) / 2)
+        title.frame = NSRect(x: x, y: y, width: w, height: min(th, max(0, bounds.height - y)))
+        y += th + 8
+        if showHint {
+            hint.frame = NSRect(x: x, y: y, width: w, height: hh)
+            y += hh + 14
+        } else {
+            y += 6
+        }
+        guard showButtons else { return }
+        if sideBySide {
+            var bx = (bounds.width - (pw + (two ? gap + sw : 0))) / 2
+            primary.frame = NSRect(x: bx, y: y, width: pw, height: 28)
+            bx += pw + gap
+            secondary.frame = NSRect(x: bx, y: y, width: sw, height: 28)
+        } else {
+            let bw = min(w, max(pw, sw))
+            primary.frame = NSRect(x: (bounds.width - bw) / 2, y: y, width: bw, height: 28)
+            secondary.frame = NSRect(x: (bounds.width - bw) / 2, y: y + 36, width: bw, height: 28)
+        }
     }
 
     @objc private func primaryClicked() { primaryAction?() }
