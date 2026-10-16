@@ -451,11 +451,12 @@ extension FocusTest {
                     "\(names(app.daemon.state.sidebar.ungrouped))")
             r.check("…a drag isn't a click: the main area still shows what it did", ws.activeSession == shownBefore)
         }
-        // b) A row dropped on the middle of a row in a section: it goes into that section, beside that row.
-        if let from = rowPoint(rowItem(api), 0.5), let to = rowPoint(rowItem(parser), 0.4) {
+        // b) A row dropped near the top edge of a row in a section: it goes into that section, beside that row.
+        // (The middle of a row means merge, checked in g.)
+        if let from = rowPoint(rowItem(api), 0.5), let to = rowPoint(rowItem(parser), 0.1) {
             let res = await outlineDrag(from: from, to: to)
             let work = app.daemon.state.sidebar.sections.first { $0.name == "Work" }
-            r.check("sidebar: a row dropped on the middle of another row is accepted (not refused)", res.op == .move && res.accepted, "op \(res.op.rawValue)")
+            r.check("sidebar: a row dropped near another row's edge is accepted (not refused)", res.op == .move && res.accepted, "op \(res.op.rawValue)")
             r.check("…and lands in that row's section next to it", work.map { names($0.members).prefix(2).contains("api") } ?? false,
                     "Work: \(work.map { names($0.members) } ?? [])")
         }
@@ -472,13 +473,14 @@ extension FocusTest {
             let tabs = app.daemon.state.sidebar.container(holding: web)?.tabs.map { app.displayName($0.session) } ?? []
             r.check("sidebar: a tab dragged above its sibling reorders the row's tabs", res.accepted && Array(tabs.prefix(3)) == ["web tests", "web", "web shell"], "\(tabs) op \(res.op.rawValue)")
         }
-        // e) A row dropped over a multi-tab row's tabs goes beside that row, not inside it (refused before).
+        // e) A row dropped on the middle of one of a multi-tab row's tabs merges into that row.
         if let shell = session("shell"), let webTab = app.sidebar.itemFor(session: web),
            let from = rowPoint(rowItem(shell), 0.5), let to = rowPoint(webTab, 0.5, x: 80) {
             let res = await outlineDrag(from: from, to: to)
-            let work = app.daemon.state.sidebar.sections.first { $0.name == "Work" }.map { names($0.members) } ?? []
-            r.check("sidebar: a row dropped over another row's tabs lands beside that row", res.accepted && work.contains("shell"),
-                    "Work: \(work) op \(res.op.rawValue)")
+            await waitUntil(2) { app.daemon.state.sidebar.container(holding: web)?.tabs.contains { $0.session == shell } == true }
+            let tabs = app.daemon.state.sidebar.container(holding: web)?.tabs.map { app.displayName($0.session) } ?? []
+            r.check("sidebar: a row dropped on another row's tab merges into that row", res.accepted && tabs.contains("shell"),
+                    "\(tabs) op \(res.op.rawValue)")
         }
         // f) Finder-style rename tells a click from a drag: dragging the selected row's name never renames.
         await showRow(docs)
@@ -500,6 +502,24 @@ extension FocusTest {
         app.daemon.saveSidebar(original)
         await sleep(300)
         r.check("sidebar: put back as it was", app.daemon.state.sidebar == original)
+
+        // g) A one-tab row dropped on the middle of another one-tab row merges into it. With the old gap
+        // feedback the target row slid away from the pointer, so this only ever reordered.
+        await showRow(api)
+        if let from = rowPoint(rowItem(docs), 0.5), let to = rowPoint(rowItem(api), 0.5) {
+            let res = await outlineDrag(from: from, to: to)
+            await waitUntil(2) { app.daemon.state.sidebar.container(holding: docs)?.tabs.contains { $0.session == api } == true }
+            let merged = app.daemon.state.sidebar.container(holding: docs)?.tabs.map(\.session) ?? []
+            r.check("sidebar: a row dropped on the middle of a one-tab row merges into it", res.accepted && merged.contains(api) && merged.contains(docs),
+                    "\(merged.map { app.displayName($0) }) op \(res.op.rawValue)")
+            await waitUntil(2) { ws.layout.count == 2 }
+            r.check("…and the merged row shows both as panes", ws.layout.count == 2 && ws.layout.contains(api) && ws.layout.contains(docs), "\(ws.layout.panes)")
+            r.check("…with the keyboard still in a terminal", firstResponderIsActiveTerminal)
+            app.moveTabToOwnRow(docs)
+            await waitUntil(2) { app.daemon.state.sidebar.container(holding: docs)?.tabs.count == 1 }
+            r.check("…and Move to Own Row splits it back out",
+                    app.daemon.state.sidebar.container(holding: docs)?.tabs.count == 1 && app.daemon.state.sidebar.container(holding: api)?.tabs.count == 1)
+        }
         await showRow(api)
     }
 

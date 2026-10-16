@@ -71,7 +71,9 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         outline.delegate = self
         outline.registerForDraggedTypes([rowDragType] + DropReader.types)
         outline.setDraggingSourceOperationMask(.move, forLocal: true)
-        outline.draggingDestinationFeedbackStyle = .gap
+        // Not .gap: the gap animation pushes the row under the pointer away, so a drop could never land on
+        // the middle of a one-tab row to merge into it.
+        outline.draggingDestinationFeedbackStyle = .regular
 
         scroll.documentView = outline
         scroll.hasVerticalScroller = true
@@ -726,6 +728,17 @@ final class SidebarRowView: NSTableRowView {
         NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6).fill()
         theme.accent.setFill()
         NSBezierPath(roundedRect: NSRect(x: r.minX + 3, y: r.minY + 5, width: 3, height: r.height - 10), xRadius: 1.5, yRadius: 1.5).fill()
+    }
+
+    /// A row being dropped onto (a merge): an accent outline in the theme's colours.
+    override func drawDraggingDestinationFeedback(in dirtyRect: NSRect) {
+        guard let theme else { return super.drawDraggingDestinationFeedback(in: dirtyRect) }
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 7, dy: 1), xRadius: 6, yRadius: 6)
+        theme.accent.withAlphaComponent(0.18).setFill()
+        path.fill()
+        theme.accent.setStroke()
+        path.lineWidth = 2
+        path.stroke()
     }
 
     override var isEmphasized: Bool { get { false } set {} }
