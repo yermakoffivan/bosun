@@ -23,8 +23,20 @@ use bosun::tmux::{
     TokioTmuxClient,
 };
 
+fn main() -> Result<()> {
+    // `bosun hook <agent> <event>` runs inside an agent's hooks, on the
+    // agent's critical path. Dispatch it before anything else starts —
+    // no async runtime, no config, no store — and always exit 0 so a
+    // failing hook can never break the agent. See `agent_hooks`.
+    if std::env::args().nth(1).as_deref() == Some("hook") {
+        bosun::agent_hooks::run(std::env::args().skip(2));
+        std::process::exit(0);
+    }
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("bosun {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -253,6 +265,9 @@ USAGE:
     bosun release-notes  Page the bundled CHANGELOG.md
     bosun editor [<cmd>] Print or set the editor launched by `E` in the TUI
                          (e.g. `bosun editor zed`, `bosun editor code`)
+    bosun hook <agent> <event>
+                         Record an agent's state on its tmux pane (run by the
+                         hooks bosun installs at launch; not for direct use)
     bosun --version      Print version and exit
     bosun --help         Print this message
 

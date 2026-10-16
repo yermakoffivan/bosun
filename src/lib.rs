@@ -1,4 +1,5 @@
 pub mod actors;
+pub mod agent_hooks;
 pub mod app;
 pub mod commands;
 pub mod config;
