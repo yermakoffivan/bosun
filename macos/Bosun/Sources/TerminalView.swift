@@ -16,6 +16,8 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
     var onContents: ((TerminalView) -> Void)?
     /// The tmux client exited on its own (session killed, client detached elsewhere).
     var onExit: ((TerminalView) -> Void)?
+    /// The user typed, pasted or dropped something into this terminal (not app shortcuts or Cmd bindings).
+    var onInput: ((TerminalView) -> Void)?
     private(set) var contentsCount = 0
     private var contentsObs: NSKeyValueObservation?
 
@@ -165,6 +167,7 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
     /// Insert text the way a paste does (bracketed if the program asked for it). Used for drops.
     func paste(_ text: String) {
         guard let surface, !text.isEmpty else { return }
+        onInput?(self)
         let len = text.utf8.count
         text.withCString { ghostty_surface_paste_text(surface, $0, UInt(len)) }
     }
@@ -318,7 +321,10 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
     // MARK: Edit menu
 
     @objc func copy(_ sender: Any?) { bindingAction("copy_to_clipboard") }
-    @objc func paste(_ sender: Any?) { bindingAction("paste_from_clipboard") }
+    @objc func paste(_ sender: Any?) {
+        onInput?(self)
+        bindingAction("paste_from_clipboard")
+    }
     @objc override func selectAll(_ sender: Any?) { bindingAction("select_all") }
 
     // MARK: Mouse
@@ -470,6 +476,8 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
 
     override func keyDown(with event: NSEvent) {
         guard let surface else { interpretKeyEvents([event]); return }
+        // Cmd keys that get here are Ghostty's own bindings (font size, copy...), not input for the session.
+        if !event.modifierFlags.contains(.command) { onInput?(self) }
         let translationGhostty = TerminalView.flags(ghostty_surface_key_translation_mods(surface, TerminalView.mods(event.modifierFlags)))
         var translationMods = event.modifierFlags
         for flag in [NSEvent.ModifierFlags.shift, .control, .option, .command] {
@@ -680,7 +688,11 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
             keyTextAccumulator = acc
             return
         }
-        if !chars.isEmpty { _ = committedText(GHOSTTY_ACTION_PRESS, text: chars) }
+        // Text committed outside a keyDown (an input method, the character viewer, dictation).
+        if !chars.isEmpty {
+            onInput?(self)
+            _ = committedText(GHOSTTY_ACTION_PRESS, text: chars)
+        }
     }
 
     override func doCommand(by selector: Selector) {

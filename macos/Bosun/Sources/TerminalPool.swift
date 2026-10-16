@@ -16,6 +16,8 @@ final class TerminalPool {
     /// tmux `-L` socket name terminals attach with (nil: tmux's default socket).
     var tmuxSocket: String?
     var onExit: ((String) -> Void)?
+    /// The user gave a terminal input (see `TerminalView.onInput`): its session.
+    var onInput: ((String) -> Void)?
     /// Views whose client currently has tmux's ignore-size flag set.
     private var ignoringSize: Set<String> = []
 
@@ -54,6 +56,7 @@ final class TerminalPool {
             guard let self, self.views[view.session] === view else { return }
             self.onExit?(view.session)
         }
+        v.onInput = { [weak self] view in self?.onInput?(view.session) }
         container?.addSubview(v, positioned: .below, relativeTo: nil)
         v.frame = frame
         views[session] = v

@@ -327,6 +327,15 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         updateDockBadge()
     }
 
+    /// The user typed, pasted or dropped into `session`'s terminal: a hook-reported done turn is now read.
+    func terminalInput(_ session: String) {
+        let before = displayState(session)
+        seen.noteInput(session, at: UInt64(Date().timeIntervalSince1970 * 1000))
+        guard displayState(session) != before else { return }
+        sidebar.refreshRows([session])
+        workspace.updateChromeState()
+    }
+
     func terminalPainted(_ session: String) {
         guard firstTerminalAt == nil else { return }
         firstTerminalAt = ProcessClock.sinceLaunch()
@@ -365,14 +374,14 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 applyTheme()
                 nav = NavBindings(st.keybindings)
                 workspace.pool.tmuxSocket = st.server?.tmuxSocket
-                for name in st.sessionOrder { seen.observe(name, state: st.state(of: name), title: st.sessions[name]?.paneTitle) }
+                for name in st.sessionOrder { seen.observe(name, status: st.statuses[name], title: st.sessions[name]?.paneTitle) }
                 for (name, info) in st.statuses where info.state == .waiting { if waitingSince[name] == nil { waitingSince[name] = Date() } }
                 waitingSince = waitingSince.filter { st.state(of: $0.key) == .waiting }
                 structure = true
                 chrome = true
                 if st.live { liveSnapshotArrived() }
             case .sessions(let changed, let gone):
-                for name in changed { seen.observe(name, state: st.state(of: name), title: st.sessions[name]?.paneTitle) }
+                for name in changed { seen.observe(name, status: st.statuses[name], title: st.sessions[name]?.paneTitle) }
                 for name in gone {
                     seen.forget(name)
                     waitingSince[name] = nil
@@ -383,7 +392,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 chrome = chrome || !changed.isDisjoint(with: workspace.visibleSessions) || !gone.isEmpty
             case .status(let name):
                 let state = st.state(of: name)
-                seen.observe(name, state: state, title: st.sessions[name]?.paneTitle)
+                seen.observe(name, status: st.statuses[name], title: st.sessions[name]?.paneTitle)
                 if state == .waiting { if waitingSince[name] == nil { waitingSince[name] = Date() } } else { waitingSince[name] = nil }
                 touched.insert(name)
                 chrome = chrome || workspace.visibleSessions.contains(name)

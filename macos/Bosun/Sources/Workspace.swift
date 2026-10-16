@@ -57,6 +57,7 @@ final class Workspace {
         pool = TerminalPool(daemon: app.daemon, capacity: AppSettings.shared.poolSize)
         pool.container = area
         pool.onExit = { [weak self] s in self?.terminalExited(s) }
+        pool.onInput = { [weak self] s in self?.app.terminalInput(s) }
         area.workspace = self
         area.registerForDraggedTypes(DropReader.types)
     }
@@ -88,6 +89,8 @@ final class Workspace {
     var visibleSessions: Set<String> { Set(layout.panes) }
     var tileRects: [TileID: CGRect] { lastLayout.tiles }
     func headerSession(_ tile: TileID) -> String? { chrome[tile]?.headerSession }
+    /// What a pane's header shows: its badge, the text beside the name and that text's colour (for the test modes).
+    func headerStatus(_ tile: TileID) -> (state: AgentState?, text: String, color: NSColor?)? { chrome[tile]?.headerStatus }
     func session(in tile: TileID) -> String? { tile.isEmpty ? nil : tile }
 
     func terminal(in tile: TileID) -> TerminalView? {
@@ -746,6 +749,7 @@ final class TileChromeView: NSView {
     private var session: String?
     /// The session the header names, and the placeholder (for the test modes).
     var headerSession: String? { session }
+    var headerStatus: (state: AgentState?, text: String, color: NSColor?) { header.shownStatus }
     var placeholderView: PlaceholderView? { placeholder }
 
     override var isFlipped: Bool { true }
@@ -890,6 +894,11 @@ final class TileHeaderView: NSView {
     private var dragging = false
 
     override var isFlipped: Bool { true }
+
+    /// The badge's state, the text beside the name and its colour (for the test modes).
+    var shownStatus: (state: AgentState?, text: String, color: NSColor?) {
+        (badge.isHidden ? nil : badge.state, detail.stringValue, detail.textColor)
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
