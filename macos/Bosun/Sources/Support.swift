@@ -148,7 +148,42 @@ final class AppSettings {
     var onChange: [() -> Void] = []
 
     private init() {
-        d.register(defaults: ["focusFollowsMouse": true, "matchTerminalTheme": false, "poolSize": AppSettings.defaultPoolSize, "sidebarWidth": 248.0])
+        d.register(defaults: ["focusFollowsMouse": true, "matchTerminalTheme": false, "poolSize": AppSettings.defaultPoolSize, "sidebarWidth": 248.0,
+                              Key.notifyWhenWaiting: true, Key.notifyWhenDone: true, Key.showDockBadge: true])
+    }
+
+    enum Key {
+        static let notifyWhenWaiting = "notifyWhenWaiting"
+        static let notifyWhenDone = "notifyWhenDone"
+        static let showDockBadge = "showDockBadge"
+    }
+
+    /// The test modes share the installed app's defaults (same bundle id), so their changes to these stay in memory.
+    private var testFlags: [String: Bool] = [:]
+
+    private func flag(_ key: String) -> Bool { testMode ? testFlags[key] ?? true : d.bool(forKey: key) }
+
+    private func setFlag(_ key: String, _ v: Bool) {
+        if testMode { testFlags[key] = v } else { d.set(v, forKey: key) }
+        changed()
+    }
+
+    /// A macOS notification when an agent you can't see starts waiting on you.
+    var notifyWhenWaiting: Bool {
+        get { flag(Key.notifyWhenWaiting) }
+        set { setFlag(Key.notifyWhenWaiting, newValue) }
+    }
+
+    /// A macOS notification when an agent you can't see finishes its turn (from its hook).
+    var notifyWhenDone: Bool {
+        get { flag(Key.notifyWhenDone) }
+        set { setFlag(Key.notifyWhenDone, newValue) }
+    }
+
+    /// The number of sessions waiting on you, on the Dock icon.
+    var showDockBadge: Bool {
+        get { flag(Key.showDockBadge) }
+        set { setFlag(Key.showDockBadge, newValue) }
     }
 
     var focusFollowsMouse: Bool {

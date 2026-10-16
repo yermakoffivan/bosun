@@ -18,7 +18,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     private(set) var window: MainWindow!
     private var root: RootView!
     private var palette: PaletteView?
-    private var settingsWindow: NSWindow?
+    private(set) var settingsWindow: NSWindow?
     private var sendNextPending = false
     private var waitingSince: [String: Date] = [:]
     private var monitors: [Any] = []
@@ -32,6 +32,18 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     /// Test modes run where the window can't become key (a locked screen); they treat it as key.
     var assumeKeyForTests = false
     var windowIsKey: Bool { window.isKeyWindow || assumeKeyForTests }
+    /// When to notify about a session (design 10).
+    private var attention = Attention()
+    /// Notifications go to the system, or to a recorder in the test modes (they never post for real).
+    let notifier: any Notifier = testMode ? RecordingNotifier() : SystemNotifier()
+    /// Whether you can see the window right now (`windowOnScreen`). The test modes replace it.
+    var windowSeen: () -> Bool = { false }
+    /// The first live snapshot has been taken as the notifications' baseline.
+    private var attentionLive = false
+    /// The Dock badge as last set, and how many times it was set (the tests check it only changes with the count).
+    private(set) var dockBadgeLabel: String?
+    private(set) var dockBadgeUpdates = 0
+    private var inputsTimer: Timer?
 
     // MARK: Startup
 
@@ -49,6 +61,12 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             MainActor.assumeIsolated { self?.settingsChanged() }
         }
         focus.followsMouse = AppSettings.shared.focusFollowsMouse
+        windowSeen = { [weak self] in self?.windowOnScreen ?? false }
+        notifier.onOpen = { [weak self] in self?.notificationClicked(userInfo: $0) }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reviewSeen() }
+        }
+        loadInputs()
 
         // 1. First frame from the cached snapshot: no I/O beyond one small file.
         let cached = daemon.loadCache()
@@ -147,6 +165,16 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         // The test modes run with the screen locked, where the window counts as occluded.
         let visible = assumeKeyForTests || window.occlusionState.contains(.visible)
         for s in workspace.visibleSessions { workspace.pool.view(for: s)?.setRendererVisible(visible) }
+        reviewSeen()
+    }
+
+    func windowDidDeminiaturize(_ notification: Notification) {
+        reviewSeen()
+    }
+
+    func appBecameActive() {
+        notifier.recheck()
+        reviewSeen()
     }
 
     func windowDidResize(_ notification: Notification) {
@@ -162,6 +190,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         if let row = workspace.currentRow { syncActiveTab(row: row, pane: workspace.rows[row]?.active) }
         daemon.writeCache()
         workspace.save()
+        saveInputs()
     }
 
     private func installMonitors() {
@@ -325,12 +354,16 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         focus.setTiles(count: workspace.tiles.count, active: workspace.activeTile)
         updateTitle()
         updateDockBadge()
+        reviewSeen()
     }
 
-    /// The user typed, pasted or dropped into `session`'s terminal: a hook-reported done turn is now read.
+    /// The user typed, pasted or dropped into `session`'s terminal: a hook-reported done turn is now read,
+    /// and its notifications go.
     func terminalInput(_ session: String) {
         let before = displayState(session)
         seen.noteInput(session, at: UInt64(Date().timeIntervalSince1970 * 1000))
+        scheduleInputsSave()
+        if !attention.delivered.isEmpty { act(attention.seen(session)) }
         guard displayState(session) != before else { return }
         sidebar.refreshRows([session])
         workspace.updateChromeState()
@@ -355,9 +388,106 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         }
     }
 
+    /// The Dock badge: the number of sessions waiting on you (see `Attention.badgeCount` for why done turns
+    /// don't count). The tile is only touched when the number changes.
     private func updateDockBadge() {
-        let n = waitingSince.count
-        NSApp.dockTile.badgeLabel = n > 0 ? "\(n)" : nil
+        let st = daemon.state
+        let n = AppSettings.shared.showDockBadge && st.live ? Attention.badgeCount(statuses: st.statuses) { st.isAlive($0) } : 0
+        let label = Attention.badgeLabel(n)
+        guard label != dockBadgeLabel else { return }
+        dockBadgeLabel = label
+        dockBadgeUpdates += 1
+        NSApp.dockTile.badgeLabel = label
+    }
+
+    // MARK: Notifications (design 10)
+
+    /// The window is in front of you: the app is active and the window is on screen, on this Space and not covered.
+    var windowOnScreen: Bool {
+        NSApp.isActive && window.isVisible && !window.isMiniaturized && window.isOnActiveSpace && window.occlusionState.contains(.visible)
+    }
+
+    /// You can see `session`: the window is in front of you and the session is a pane of the row it shows.
+    func userCanSee(_ session: String) -> Bool {
+        workspace.visibleSessions.contains(session) && windowSeen()
+    }
+
+    private func observeAttention(_ s: String) {
+        let enabled = Attention.Enabled(waiting: AppSettings.shared.notifyWhenWaiting, done: AppSettings.shared.notifyWhenDone)
+        act(attention.observe(s, status: daemon.state.statuses[s], done: displayState(s) == .done, visible: userCanSee(s), enabled: enabled))
+    }
+
+    private func act(_ actions: [Attention.Action]) {
+        for a in actions {
+            switch a {
+            case .post(let n): notifier.post(notification(for: n))
+            case .remove(let ids): notifier.remove(ids)
+            }
+        }
+    }
+
+    /// Sessions with a notification out that you can now see: their notifications go.
+    func reviewSeen() {
+        guard !attention.delivered.isEmpty else { return }
+        for s in attention.outstanding where userCanSee(s) { act(attention.seen(s)) }
+    }
+
+    /// The title is the session's name; the subtitle its row (for a tab of a multi-tab row) and section.
+    func notification(for n: Attention.Note) -> AppNotification {
+        let s = n.session
+        let name = displayName(s)
+        let sb = daemon.state.sidebar
+        var context: [String] = []
+        if let c = sb.container(holding: s), c.tabs.count > 1, rowLabel(c) != name { context.append(rowLabel(c)) }
+        if let sec = sb.sections.first(where: { $0.members.contains { $0.tabs.contains { $0.session == s } } }) { context.append(sec.name) }
+        let body: String
+        switch n.kind {
+        case .waiting: body = n.detail.map { "Waiting — \($0)" } ?? "Waiting for you"
+        case .done: body = "Done — your turn"
+        }
+        return AppNotification(id: n.id, session: s, kind: n.kind, title: name, subtitle: context.joined(separator: " · "), body: body)
+    }
+
+    /// A notification was clicked: bring the app forward, show the session's row with its pane active and the
+    /// keyboard in it.
+    func notificationClicked(userInfo: [AnyHashable: Any]) {
+        guard let s = userInfo["session"] as? String else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        if testMode {
+            window.orderFront(nil)
+        } else {
+            NSApp.activate()
+            window.makeKeyAndOrderFront(nil)
+        }
+        closePalette()
+        closeShortcuts()
+        if daemon.state.sidebar.container(holding: s) != nil { sidebarActivated(session: s) }
+        act(attention.seen(s))
+    }
+
+    // MARK: Input times (the done rule), kept across launches
+
+    /// Per daemon, like the row layouts.
+    var inputsURL: URL { Paths.supportDir.appendingPathComponent("inputs-\(Paths.key(for: daemon.socketPath)).json") }
+
+    private func loadInputs() {
+        guard let data = try? Data(contentsOf: inputsURL), let saved = SavedInputs.decode(data) else { return }
+        seen.restoreInputs(saved.inputs)
+    }
+
+    func saveInputs() {
+        inputsTimer?.invalidate()
+        inputsTimer = nil
+        guard let data = SavedInputs(seen.inputTimes).encoded() else { return }
+        try? data.write(to: inputsURL, options: .atomic)
+    }
+
+    /// Input arrives with every key: the file is written a few seconds after the first one, and on quit.
+    private func scheduleInputsSave() {
+        guard inputsTimer == nil else { return }
+        inputsTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.saveInputs() }
+        }
     }
 
     // MARK: State
@@ -375,8 +505,11 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 nav = NavBindings(st.keybindings)
                 workspace.pool.tmuxSocket = st.server?.tmuxSocket
                 for name in st.sessionOrder { seen.observe(name, status: st.statuses[name], title: st.sessions[name]?.paneTitle) }
-                for (name, info) in st.statuses where info.state == .waiting { if waitingSince[name] == nil { waitingSince[name] = Date() } }
+                // Waits already there share one time; the sidebar order breaks the tie (`oldestWaiting`).
+                let now = Date()
+                for (name, info) in st.statuses where info.state == .waiting { if waitingSince[name] == nil { waitingSince[name] = now } }
                 waitingSince = waitingSince.filter { st.state(of: $0.key) == .waiting }
+                if st.live { snapshotAttention() }
                 structure = true
                 chrome = true
                 if st.live { liveSnapshotArrived() }
@@ -385,6 +518,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 for name in gone {
                     seen.forget(name)
                     waitingSince[name] = nil
+                    act(attention.forget(name))
                 }
                 touched.formUnion(changed)
                 removed.formUnion(gone)
@@ -394,6 +528,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 let state = st.state(of: name)
                 seen.observe(name, status: st.statuses[name], title: st.sessions[name]?.paneTitle)
                 if state == .waiting { if waitingSince[name] == nil { waitingSince[name] = Date() } } else { waitingSince[name] = nil }
+                if attentionLive { observeAttention(name) }
                 touched.insert(name)
                 chrome = chrome || workspace.visibleSessions.contains(name)
             case .sidebar:
@@ -437,6 +572,24 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
 
     private var hadLiveSnapshot = false
+
+    /// A live snapshot: the first is the notifications' baseline (nothing that was already waiting or done when
+    /// the app connected is notified). After a reconnect, sessions the app knew are compared with what it had.
+    private func snapshotAttention() {
+        let st = daemon.state
+        if !attentionLive {
+            attentionLive = true
+            for name in st.sessionOrder { attention.baseline(name, status: st.statuses[name]) }
+            // Input times of sessions that ended while the app was closed.
+            seen.pruneInputs(keeping: Set(st.sessionOrder))
+            scheduleInputsSave()
+            return
+        }
+        for s in attention.outstanding where st.sessions[s] == nil { act(attention.forget(s)) }
+        for name in st.sessionOrder {
+            if attention.isKnown(name) { observeAttention(name) } else { attention.baseline(name, status: st.statuses[name]) }
+        }
+    }
     /// The last daemon notice, as sent and as shown (see `readableNotice`).
     private var lastNotice: (raw: String, shown: String)?
 
@@ -543,6 +696,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         workspace.pool.capacity = AppSettings.shared.poolSize
         workspace.pool.evict(keeping: workspace.visibleSessions)
         applyTerminalTheme()
+        updateDockBadge()
     }
 
     // MARK: Commands
@@ -1149,6 +1303,10 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         app.addItem(.separator())
         add(app, "Settings…", #selector(showSettings), ",", target: self)
         app.addItem(.separator())
+        add(app, "Notify When Waiting", #selector(toggleNotifyWhenWaiting), target: self)
+        add(app, "Notify When Done", #selector(toggleNotifyWhenDone), target: self)
+        add(app, "Show Dock Badge", #selector(toggleShowDockBadge), target: self)
+        app.addItem(.separator())
         add(app, "Hide Bosun", #selector(NSApplication.hide(_:)), "h", target: NSApp)
         add(app, "Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option], target: NSApp)
         add(app, "Show All", #selector(NSApplication.unhideAllApplications(_:)), target: NSApp)
@@ -1270,9 +1428,16 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         sidebarActivated(row: rows[sender.tag - 1].id)
     }
 
-    /// The session that has been waiting for you the longest.
+    @objc func toggleNotifyWhenWaiting() { AppSettings.shared.notifyWhenWaiting.toggle() }
+    @objc func toggleNotifyWhenDone() { AppSettings.shared.notifyWhenDone.toggle() }
+    @objc func toggleShowDockBadge() { AppSettings.shared.showDockBadge.toggle() }
+
+    /// The session that has been waiting for you the longest (waits that were already there when the app
+    /// connected go in sidebar order).
     var oldestWaiting: String? {
-        waitingSince.filter { isAlive($0.key) }.min { $0.value < $1.value }?.key
+        let order = daemon.state.sidebar.allRows.flatMap { $0.tabs.map(\.session) }
+        func rank(_ s: String) -> Int { order.firstIndex(of: s) ?? Int.max }
+        return waitingSince.filter { isAlive($0.key) }.min { ($0.value, rank($0.key)) < ($1.value, rank($1.key)) }?.key
     }
 
     @objc func menuOldestWaiting() {
@@ -1296,6 +1461,19 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(toggleNotifyWhenWaiting):
+            item.state = AppSettings.shared.notifyWhenWaiting ? .on : .off
+            return true
+        case #selector(toggleNotifyWhenDone):
+            item.state = AppSettings.shared.notifyWhenDone ? .on : .off
+            return true
+        case #selector(toggleShowDockBadge):
+            item.state = AppSettings.shared.showDockBadge ? .on : .off
+            return true
+        default:
+            break
+        }
         if sheetOpen { return false }
         switch item.action {
         case #selector(menuSession(_:)):

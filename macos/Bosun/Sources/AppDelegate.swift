@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         GhosttyRuntime.shared.setAppFocus(true)
+        controller.appBecameActive()
     }
 
     func applicationDidResignActive(_ notification: Notification) {

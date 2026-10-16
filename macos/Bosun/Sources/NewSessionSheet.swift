@@ -493,6 +493,9 @@ struct SettingsView: View {
     @AppStorage("focusFollowsMouse") private var focusFollowsMouse = true
     @AppStorage("matchTerminalTheme") private var matchTerminalTheme = false
     @AppStorage("poolSize") private var poolSize = AppSettings.defaultPoolSize
+    @AppStorage(AppSettings.Key.notifyWhenWaiting) private var notifyWhenWaiting = true
+    @AppStorage(AppSettings.Key.notifyWhenDone) private var notifyWhenDone = true
+    @AppStorage(AppSettings.Key.showDockBadge) private var showDockBadge = true
 
     var body: some View {
         Form {
@@ -505,6 +508,13 @@ struct SettingsView: View {
             Stepper("Warm terminals kept attached: \(poolSize)", value: $poolSize, in: AppSettings.poolSizeRange)
             Text("One per pane, including the ones on screen, so recently shown rows switch back in one frame. About 14 MB each.")
                 .font(.caption).foregroundStyle(.secondary)
+            Section("Notifications") {
+                Toggle("Notify when an agent is waiting for you", isOn: $notifyWhenWaiting)
+                Toggle("Notify when an agent finishes its turn", isOn: $notifyWhenDone)
+                Text("Only for sessions you can't see: Bosun isn't the active app, its window is minimized or on another Space, or the session isn't in the row on screen.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Show the number waiting on the Dock icon", isOn: $showDockBadge)
+            }
         }
         .formStyle(.grouped)
         .frame(width: 460)
