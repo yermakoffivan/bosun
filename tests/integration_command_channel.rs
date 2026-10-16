@@ -121,8 +121,12 @@ async fn control_commands_match_exec_byte_for_byte() {
 
     // A hostile session name: created over control, found by exec.
     // (No `#{` here: tmux format-expands `new-session -s` itself, on
-    // either transport. Internal names are slugs, so it never applies.)
-    let nasty = "bosun-x;kill-server \"q\" ~ $HOME";
+    // either transport. No `$` either: tmux 3.4 stores a `$` in a
+    // session name escaped, so the session can't be found by the name
+    // it was created with, on either transport. Internal names are
+    // slugs, so neither applies to Bosun. `$` quoting is covered by
+    // the values above and the options and environment below.)
+    let nasty = "bosun-x;kill-server \"q\" ~ home";
     client
         .create_session(&CreateSpec {
             name: nasty.into(),
@@ -143,10 +147,43 @@ async fn control_commands_match_exec_byte_for_byte() {
     let names =
         String::from_utf8(tmux(sock, &["list-sessions", "-F", "#{session_name}"]).stdout).unwrap();
     assert!(names.lines().any(|l| l == nasty), "names: {names}");
-    let env = tmux(sock, &["show-environment", "-t", nasty, "ODD"]);
+    // The environment the session's processes see: a window in the
+    // hostile session writes `$ODD` to a file. (Not `show-environment`'s
+    // output, which tmux 3.4 escapes for display, `$` as `\$` and a
+    // newline as `_`, while the value itself is intact.)
+    let odd_file = std::env::temp_dir().join(format!("{sock}.odd"));
+    let script = format!("printf %s \"$ODD\" > '{}'", odd_file.display());
+    let out = tmux(
+        sock,
+        &["new-window", "-d", "-t", &format!("{nasty}:"), &script],
+    );
+    assert!(out.status.success(), "new-window: {out:?}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let odd = loop {
+        match std::fs::read(&odd_file) {
+            Ok(bytes) if !bytes.is_empty() => break bytes,
+            _ => {
+                assert!(Instant::now() < deadline, "window never wrote $ODD");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    };
+    let _ = std::fs::remove_file(&odd_file);
+    assert_eq!(odd, b"a;b \"c\" $d\ne");
+    // And tmux reports it the same as for a session created by exec.
+    exec.create_session(&CreateSpec {
+        name: "bosun-chan-twin".into(),
+        display_name: None,
+        path: "/tmp".into(),
+        command: String::new(),
+        metadata: None,
+        env: vec![("ODD".into(), "a;b \"c\" $d\ne".into())],
+    })
+    .await
+    .expect("create twin over exec");
     assert_eq!(
-        String::from_utf8_lossy(&env.stdout).trim_end(),
-        "ODD=a;b \"c\" $d\ne"
+        tmux(sock, &["show-environment", "-t", nasty, "ODD"]).stdout,
+        tmux(sock, &["show-environment", "-t", "bosun-chan-twin", "ODD"]).stdout
     );
     let meta_c = client.get_session_metadata(nasty).await.unwrap().unwrap();
     let meta_e = exec.get_session_metadata(nasty).await.unwrap().unwrap();
