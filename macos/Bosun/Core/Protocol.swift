@@ -495,13 +495,23 @@ public struct Snapshot: Codable, Equatable, Sendable {
     public var recents: [Recent]
     public var config: ConfigView
     public var theme: ThemePalette
+    /// The Light/Dark pair's palettes (`theme_light` / `theme_dark`); nil is unset, "use `theme`".
+    public var themeLight: ThemePalette?
+    public var themeDark: ThemePalette?
     public var themes: [ThemeEntry]
     public var keybindings: KeyBindingsWire?
 
+    enum CodingKeys: String, CodingKey {
+        case seq, server, sessions, statuses, sidebar, recents, config, theme, themes, keybindings
+        case themeLight = "theme_light", themeDark = "theme_dark"
+    }
+
     public init(seq: UInt64, server: ServerInfo, sessions: [SessionInfo], statuses: [String: StatusInfo], sidebar: Sidebar,
-                recents: [Recent], config: ConfigView, theme: ThemePalette, themes: [ThemeEntry], keybindings: KeyBindingsWire?) {
+                recents: [Recent], config: ConfigView, theme: ThemePalette, themeLight: ThemePalette? = nil,
+                themeDark: ThemePalette? = nil, themes: [ThemeEntry], keybindings: KeyBindingsWire?) {
         self.seq = seq; self.server = server; self.sessions = sessions; self.statuses = statuses; self.sidebar = sidebar
-        self.recents = recents; self.config = config; self.theme = theme; self.themes = themes; self.keybindings = keybindings
+        self.recents = recents; self.config = config; self.theme = theme; self.themeLight = themeLight; self.themeDark = themeDark
+        self.themes = themes; self.keybindings = keybindings
     }
 
     public init(from decoder: Decoder) throws {
@@ -514,6 +524,8 @@ public struct Snapshot: Codable, Equatable, Sendable {
         recents = try c.decodeIfPresent([Recent].self, forKey: .recents) ?? []
         config = try c.decodeIfPresent(ConfigView.self, forKey: .config) ?? ConfigView()
         theme = try c.decodeIfPresent(ThemePalette.self, forKey: .theme) ?? .fallback
+        themeLight = try c.decodeIfPresent(ThemePalette.self, forKey: .themeLight)
+        themeDark = try c.decodeIfPresent(ThemePalette.self, forKey: .themeDark)
         themes = try c.decodeIfPresent([ThemeEntry].self, forKey: .themes) ?? []
         keybindings = try c.decodeIfPresent(KeyBindingsWire.self, forKey: .keybindings)
     }
@@ -567,6 +579,8 @@ public enum ServerMessage: Equatable, Sendable {
     case config(seq: UInt64, ConfigView)
     case theme(seq: UInt64, ThemePalette)
     case themes(seq: UInt64, [ThemeEntry])
+    /// The Light/Dark pair changed; it replaces both sides (nil: unset).
+    case themePair(seq: UInt64, light: ThemePalette?, dark: ThemePalette?)
     case keybindings(seq: UInt64, KeyBindingsWire)
     case notice(seq: UInt64, String)
     /// The tmux client on `tty` is now on `session` (nil: it detached). An event, not state.
@@ -580,7 +594,8 @@ public enum ServerMessage: Equatable, Sendable {
         switch self {
         case .snapshot(let s): s.seq
         case .sessions(let q, _, _), .status(let q, _, _), .sidebar(let q, _), .recents(let q, _), .config(let q, _),
-             .theme(let q, _), .themes(let q, _), .keybindings(let q, _), .notice(let q, _), .client(let q, _, _): q
+             .theme(let q, _), .themes(let q, _), .themePair(let q, _, _), .keybindings(let q, _), .notice(let q, _),
+             .client(let q, _, _): q
         case .ack, .error: nil
         case .unknown(_, let q): q
         }
@@ -618,6 +633,16 @@ public enum ServerMessage: Equatable, Sendable {
             value = try c.decode(T.self, forKey: AnyKey(key))
         }
         static var fieldKey: CodingUserInfoKey { CodingUserInfoKey(rawValue: "bosun.field")! }
+    }
+    private struct ThemePairBody: Decodable {
+        let seq: UInt64
+        let light: ThemePalette?
+        let dark: ThemePalette?
+
+        enum CodingKeys: String, CodingKey {
+            case seq
+            case light = "theme_light", dark = "theme_dark"
+        }
     }
     private struct ClientBody: Decodable {
         let seq: UInt64
@@ -663,6 +688,9 @@ public enum ServerMessage: Equatable, Sendable {
         case "themes":
             let (q, v) = try field([ThemeEntry].self, "themes")
             return .themes(seq: q, v)
+        case "theme_pair":
+            let b = try plain.decode(ThemePairBody.self, from: data)
+            return .themePair(seq: b.seq, light: b.light, dark: b.dark)
         case "keybindings":
             let (q, v) = try field(KeyBindingsWire.self, "keybindings")
             return .keybindings(seq: q, v)

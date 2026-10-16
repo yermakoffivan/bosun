@@ -11,6 +11,9 @@ public struct BosunState: Sendable {
     public private(set) var recents: [Recent] = []
     public private(set) var config = ConfigView()
     public private(set) var theme: ThemePalette = .fallback
+    /// The Light/Dark pair's palettes; nil sides use `theme`. See `ThemeChoice`.
+    public private(set) var themeLight: ThemePalette?
+    public private(set) var themeDark: ThemePalette?
     public private(set) var themes: [ThemeEntry] = []
     public private(set) var keybindings: KeyBindingsWire?
     /// True once a live snapshot (not the on-disk cache) has been applied.
@@ -25,6 +28,7 @@ public struct BosunState: Sendable {
         case config
         case theme
         case themes
+        case themePair
         case keybindings
         case notice(String)
         /// A tmux client moved to `session`, or detached (nil). See `ServerMessage.client`.
@@ -97,6 +101,10 @@ public struct BosunState: Sendable {
         case .themes(_, let t):
             themes = t
             return .applied([.themes])
+        case .themePair(_, let light, let dark):
+            themeLight = light
+            themeDark = dark
+            return .applied([.themePair])
         case .keybindings(_, let k):
             keybindings = k
             return .applied([.keybindings])
@@ -119,6 +127,8 @@ public struct BosunState: Sendable {
         recents = s.recents
         config = s.config
         theme = s.theme
+        themeLight = s.themeLight
+        themeDark = s.themeDark
         themes = s.themes
         keybindings = s.keybindings
     }
@@ -127,7 +137,8 @@ public struct BosunState: Sendable {
     public func snapshot() -> Snapshot? {
         guard let server else { return nil }
         return Snapshot(seq: seq ?? 0, server: server, sessions: sessionOrder.compactMap { sessions[$0] }, statuses: statuses,
-                        sidebar: sidebar, recents: recents, config: config, theme: theme, themes: themes, keybindings: keybindings)
+                        sidebar: sidebar, recents: recents, config: config, theme: theme, themeLight: themeLight,
+                        themeDark: themeDark, themes: themes, keybindings: keybindings)
     }
 
     public func state(of session: String) -> AgentState { statuses[session]?.state ?? .unknown }
@@ -146,4 +157,12 @@ public struct BosunState: Sendable {
 
     /// The active theme name the daemon reports in config (falls back to the palette's own name).
     public var themeName: String { theme.name }
+
+    /// What the chrome shows for an appearance: the pair's side when it's set, else `theme`.
+    public func palette(for appearance: ThemeChoice.Appearance) -> ThemePalette {
+        ThemeChoice.palette(for: appearance, theme: theme, light: themeLight, dark: themeDark)
+    }
+
+    /// The Light/Dark pair as names, for menus and settings.
+    public var themePair: ThemeChoice.Pair { ThemeChoice.Pair(light: themeLight?.name, dark: themeDark?.name) }
 }
