@@ -465,6 +465,12 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         return s
     }
 
+    /// A sidebar row's label: the daemon's (the active tab's name, as the TUI shows it), or the
+    /// active tab's display name when the row came from a daemon that sent a tmux name there.
+    func rowLabel(_ c: Container) -> String {
+        c.name.isEmpty || c.tabs.contains(where: { $0.session == c.name }) ? displayName(c.active) : c.name
+    }
+
     func displayState(_ s: String) -> AgentState {
         guard isAlive(s) else { return .idle }
         return seen.display(s, state: daemon.state.state(of: s))
@@ -554,7 +560,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     func confirmKillContainer(_ c: Container) {
         let alert = NSAlert()
-        alert.messageText = "Kill all \(c.tabs.count) tabs of “\(c.name)”?"
+        alert.messageText = "Kill all \(c.tabs.count) tabs of “\(rowLabel(c))”?"
         alert.informativeText = "Every tmux session in this row stops."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Kill All")

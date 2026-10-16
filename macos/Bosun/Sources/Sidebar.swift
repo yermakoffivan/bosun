@@ -378,7 +378,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             let multi = con.tabs.count > 1
             let session = con.active
             let alive = con.tabs.contains { app.isAlive($0.session) }
-            let name = app.displayName(session)
+            let name = app.rowLabel(con)
             let state: AgentState = multi ? aggregate(con) : app.displayState(session)
             if renaming?.item !== item { c.nameField.stringValue = name }
             c.configure(state: state, exited: !alive, trailing: multi ? "\(con.tabs.count) tabs" : trailing(for: session),
