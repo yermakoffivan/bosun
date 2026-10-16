@@ -12,7 +12,9 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     var focus = FocusModel()
     private var seen = SeenTracker()
     private(set) var theme = AppTheme(.fallback)
-    private(set) var nav = NavBindings(nil)
+    private(set) var nav = NavBindings(nil) { didSet { updateNavMenu() } }
+    private var navItems: [NavAction: NSMenuItem] = [:]
+    private(set) var shortcutsPanel: ShortcutsPanel?
     private(set) var window: MainWindow!
     private var root: RootView!
     private var palette: PaletteView?
@@ -159,6 +161,11 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         for s in workspace.visibleSessions { workspace.pool.view(for: s)?.setRendererVisible(visible) }
     }
 
+    func windowDidResize(_ notification: Notification) {
+        layoutPalette()
+        layoutShortcuts()
+    }
+
     func windowWillClose(_ notification: Notification) {
         persist()
     }
@@ -193,6 +200,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     /// A click outside an open rename or palette closes it (rename keeps the new name).
     private func clickedSomewhere(_ e: NSEvent) {
+        if e.window === window, shortcutsPanel != nil { closeShortcuts() }
         guard e.window === window, let ex = focus.exception else { return }
         switch ex {
         case .palette:
@@ -213,6 +221,11 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         if debugKeys {
             print("key \(e.keyCode) mods=\(e.modifierFlags.rawValue & 0xFFFF0000) key=\(windowIsKey) owns=\(focus.terminalOwnsKeyboard) " +
                   "fr=\((window.firstResponder as? TerminalView).map { displayName($0.session) } ?? String(describing: window.firstResponder.map { type(of: $0) })) active=\(workspace.activeSession.map(displayName) ?? "-")")
+        }
+        // Esc closes the shortcuts panel (it never has the keyboard itself, so the key comes through here).
+        if e.window === window, shortcutsPanel != nil, e.keyCode == 53, e.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty {
+            closeShortcuts()
+            return nil
         }
         // Esc while a tile is being dragged by its header cancels the drag (the key never reaches the terminal).
         if e.window === window, workspace.tileDragActive, e.keyCode == 53 {
@@ -724,6 +737,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     private func presentForm(_ model: NewSessionModel, onSubmit: @escaping (Spec) -> Void) {
         closePalette()
+        closeShortcuts()
         let form = NewSessionFormView(model: model)
         let sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: NewSessionFormView.width, height: form.fittingHeight),
                              styleMask: [.titled], backing: .buffered, defer: false)
@@ -774,11 +788,86 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
+    // MARK: Keyboard shortcuts panel
+
+    /// What the panel lists: a title and the menu items whose key equivalents it shows. The keys are
+    /// read from the menus, so the panel and the menus can't disagree.
+    static let shortcutCatalog: [(group: String, rows: [(title: String, items: [String])])] = [
+        ("Sessions", [("New session", ["New Session…"]), ("Go to session", ["Go to Session…"]),
+                      ("Oldest waiting session", ["Oldest Waiting Session"]), ("Sidebar row 1 to 9", ["Row 1", "Row 9"])]),
+        ("Tiles", [("Split right", ["Split Right"]), ("Split down", ["Split Down"]),
+                   ("Focus the tile left / right", ["Focus Tile Left", "Focus Tile Right"]),
+                   ("Focus the tile up / down", ["Focus Tile Up", "Focus Tile Down"]),
+                   ("Close tile (the session keeps running)", ["Close Tile"]), ("Move or swap a tile", [])]),
+        ("Navigation", [("Next session", ["Next Session"]), ("Previous session", ["Previous Session"]),
+                        ("Next tab", ["Next Tab"]), ("Previous tab", ["Previous Tab"]),
+                        ("Send the next key to the terminal", ["Send Next Key to Terminal"])]),
+        ("Other", [("Keyboard shortcuts", ["Keyboard Shortcuts"]), ("Settings", ["Settings…"]),
+                   ("Copy / paste", ["Copy", "Paste"]), ("Undo / cut / select all", ["Undo", "Cut", "Select All"]),
+                   ("Full screen", ["Enter Full Screen"]), ("Minimize", ["Minimize"]),
+                   ("Hide Bosun / others", ["Hide Bosun", "Hide Others"]), ("Quit", ["Quit Bosun"])]),
+    ]
+
+    func menuItem(titled title: String, in menu: NSMenu? = NSApp.mainMenu) -> NSMenuItem? {
+        for item in menu?.items ?? [] {
+            if item.title == title || (title == "Enter Full Screen" && item.title == "Exit Full Screen") { return item }
+            if let found = menuItem(titled: title, in: item.submenu) { return found }
+        }
+        return nil
+    }
+
+    func shortcutGroups() -> [ShortcutsPanel.Group] {
+        Self.shortcutCatalog.map { g in
+            ShortcutsPanel.Group(name: g.group, rows: g.rows.map { row in
+                if row.items.isEmpty { return ShortcutsPanel.Row(title: row.title, keys: "drag its header") }
+                let keys = row.items.compactMap { menuItem(titled: $0).flatMap(ShortcutsPanel.keyLabel) }
+                if keys.isEmpty { return ShortcutsPanel.Row(title: row.title, keys: "off") }
+                return ShortcutsPanel.Row(title: row.title, keys: keys.joined(separator: row.title.hasPrefix("Sidebar row") ? " … " : "  "))
+            })
+        }
+    }
+
+    @objc func toggleShortcuts() {
+        if shortcutsPanel != nil { closeShortcuts() } else { showShortcuts() }
+    }
+
+    /// Open the panel over the main area. It never becomes first responder: the keyboard stays in the terminal.
+    func showShortcuts() {
+        guard !sheetOpen, shortcutsPanel == nil else { return }
+        closePalette()
+        if focus.exception == .rename { window.makeFirstResponder(nil) }
+        let p = ShortcutsPanel(groups: shortcutGroups(),
+                               footnote: "Navigation keys follow [keybindings] in Bosun's config.toml. Esc or ⌘/ closes this.",
+                               theme: theme)
+        shortcutsPanel = p
+        root.addSubview(p)
+        layoutShortcuts()
+        workspace.focusActiveTerminal()
+    }
+
+    func closeShortcuts() {
+        guard let p = shortcutsPanel else { return }
+        shortcutsPanel = nil
+        p.removeFromSuperview()
+        workspace.focusActiveTerminal()
+    }
+
+    private func layoutShortcuts() {
+        guard let p = shortcutsPanel else { return }
+        let main = workspace.area.frame
+        var size = p.preferredSize(maxWidth: max(200, main.width - 40))
+        // A short window gets a shorter panel whose list scrolls.
+        size.height = min(size.height, max(120, main.height - 32))
+        p.frame = NSRect(x: (main.midX - size.width / 2).rounded(), y: main.minY + max(16, (main.height - size.height) / 2).rounded(),
+                         width: size.width, height: size.height)
+    }
+
     // MARK: Palette
 
     func showPalette() {
         if palette != nil { closePalette(); return }
         guard !sheetOpen else { return }
+        closeShortcuts()
         let p = PaletteView(theme: theme)
         p.source = { [weak self] q in self?.paletteEntries(q) ?? [] }
         p.onClose = { [weak self] in self?.closePalette() }
@@ -908,12 +997,14 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             main.addItem(item)
             return menu
         }
-        func add(_ menu: NSMenu, _ title: String, _ sel: Selector?, _ key: String = "", _ mods: NSEvent.ModifierFlags = [.command], target: AnyObject? = nil, tag: Int = 0) {
+        @discardableResult
+        func add(_ menu: NSMenu, _ title: String, _ sel: Selector?, _ key: String = "", _ mods: NSEvent.ModifierFlags = [.command], target: AnyObject? = nil, tag: Int = 0) -> NSMenuItem {
             let i = NSMenuItem(title: title, action: sel, keyEquivalent: key)
             i.keyEquivalentModifierMask = mods
             i.target = target ?? (sel.map { NSApp.responds(to: $0) ? nil : self } ?? nil)
             i.tag = tag
             menu.addItem(i)
+            return i
         }
 
         let app = sub("Bosun")
@@ -960,10 +1051,12 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         add(go, "Go to Session…", #selector(menuPalette), "k", target: self)
         add(go, "Oldest Waiting Session", #selector(menuOldestWaiting), "U", [.command, .shift], target: self)
         go.addItem(.separator())
-        add(go, "Next Session", #selector(menuNav(_:)), target: self, tag: 0)
-        add(go, "Previous Session", #selector(menuNav(_:)), target: self, tag: 1)
-        add(go, "Next Tab", #selector(menuNav(_:)), target: self, tag: 2)
-        add(go, "Previous Tab", #selector(menuNav(_:)), target: self, tag: 3)
+        // Their keys come from [keybindings] (updateNavMenu); the key monitor handles them first.
+        navItems[.nextSession] = add(go, "Next Session", #selector(menuNav(_:)), target: self, tag: 0)
+        navItems[.previousSession] = add(go, "Previous Session", #selector(menuNav(_:)), target: self, tag: 1)
+        navItems[.nextTab] = add(go, "Next Tab", #selector(menuNav(_:)), target: self, tag: 2)
+        navItems[.previousTab] = add(go, "Previous Tab", #selector(menuNav(_:)), target: self, tag: 3)
+        navItems[.sendNextKey] = add(go, "Send Next Key to Terminal", #selector(menuNav(_:)), target: self, tag: 4)
         go.addItem(.separator())
         for i in 1...9 { add(go, "Row \(i)", #selector(menuJump(_:)), "\(i)", target: self, tag: i) }
 
@@ -981,7 +1074,38 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         add(win, "Zoom", #selector(NSWindow.performZoom(_:)), target: nil)
         NSApp.windowsMenu = win
 
+        let help = sub("Help")
+        add(help, "Keyboard Shortcuts", #selector(toggleShortcuts), "/", target: self)
+        NSApp.helpMenu = help
+
         NSApp.mainMenu = main
+        updateNavMenu()
+    }
+
+    /// Show the [keybindings] nav keys on their Go menu items.
+    private func updateNavMenu() {
+        for (action, item) in navItems {
+            guard let c = nav.chords[action] else {
+                item.keyEquivalent = ""
+                item.keyEquivalentModifierMask = []
+                continue
+            }
+            var mods: NSEvent.ModifierFlags = []
+            if c.mods.contains(.shift) { mods.insert(.shift) }
+            if c.mods.contains(.control) { mods.insert(.control) }
+            if c.mods.contains(.option) { mods.insert(.option) }
+            let key: String
+            switch c.key {
+            case .left: key = "\u{F702}"
+            case .right: key = "\u{F703}"
+            case .up: key = "\u{F700}"
+            case .down: key = "\u{F701}"
+            case .function(let n): key = String(Character(Unicode.Scalar(0xF704 + UInt32(max(1, n)) - 1)!))
+            case .letter(let ch): key = String(ch)
+            }
+            item.keyEquivalent = key
+            item.keyEquivalentModifierMask = mods
+        }
     }
 
     @objc func menuNewSession() { newSession() }
@@ -996,7 +1120,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
 
     @objc func menuNav(_ sender: NSMenuItem) {
-        perform([NavAction.nextSession, .previousSession, .nextTab, .previousTab][sender.tag])
+        perform([NavAction.nextSession, .previousSession, .nextTab, .previousTab, .sendNextKey][sender.tag])
     }
 
     @objc func menuJump(_ sender: NSMenuItem) {
@@ -1040,6 +1164,12 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             return true
         case #selector(menuCloseTile):
             return workspace.layout.count > 1 || workspace.activeSession != nil
+        case #selector(menuNav(_:)):
+            // Only while the terminal has the keyboard (the key monitor takes these keys first then).
+            // Disabled otherwise, so Shift+arrows in the rename field or the palette, or while composing
+            // with an input method, are never taken by the menu.
+            return windowIsKey && focus.terminalOwnsKeyboard && !(window.firstResponder is NSText)
+                && workspace.activeTerminal?.hasMarkedText() != true
         case #selector(menuFocusTile(_:)):
             return workspace.layout.count > 1
         case #selector(menuSplitRight), #selector(menuSplitDown):

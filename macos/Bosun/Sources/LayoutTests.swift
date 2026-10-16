@@ -12,6 +12,7 @@ extension FocusTest {
         if wants("empty") { await emptyState() }
         if wants("tiledrag") { await tileDrag() }
         if wants("sidebardrag") { await sidebarDrag() }
+        if wants("shortcuts") { await shortcuts() }
     }
 
     // MARK: Sheet layout
@@ -537,4 +538,97 @@ extension FocusTest {
     }
 
     private var review1Session: String? { session("review-1") }
+
+    // MARK: Keyboard shortcuts panel
+
+    func shortcuts() async {
+        guard let api = session("api") else { return }
+        await showOnly(api)
+        // The catalog and the menus agree both ways.
+        var missing: [String] = []
+        var listed = Set<String>()
+        for g in AppController.shortcutCatalog {
+            for row in g.rows {
+                for title in row.items {
+                    listed.insert(title)
+                    guard let item = app.menuItem(titled: title) else { missing.append("\(title): no menu item"); continue }
+                    if ShortcutsPanel.keyLabel(item) == nil { missing.append("\(title): no key equivalent") }
+                }
+            }
+        }
+        r.check("every shortcut in the panel is a menu item with that key equivalent", missing.isEmpty, missing.joined(separator: "; "))
+        var unlisted: [String] = []
+        func walk(_ m: NSMenu?) {
+            for item in m?.items ?? [] {
+                // AppKit adds Dictation and Emoji & Symbols to the Edit menu itself; they aren't the app's.
+                let system = [NSSelectorFromString("startDictation:"), #selector(NSApplication.orderFrontCharacterPalette(_:))].contains { $0 == item.action }
+                if !item.keyEquivalent.isEmpty, !listed.contains(item.title), item.title != "Exit Full Screen", !system {
+                    let row = Int(item.title.split(separator: " ").last ?? "") ?? 0
+                    if !(item.title.hasPrefix("Row ") && (1...9).contains(row)) { unlisted.append(item.title) }
+                }
+                walk(item.submenu)
+            }
+        }
+        walk(NSApp.mainMenu)
+        r.check("every menu shortcut is listed in the panel", unlisted.isEmpty, unlisted.joined(separator: ", "))
+        // The nav keys come from [keybindings].
+        let navRows: [(String, NavAction)] = [("Next session", .nextSession), ("Previous session", .previousSession),
+                                               ("Next tab", .nextTab), ("Previous tab", .previousTab),
+                                               ("Send the next key to the terminal", .sendNextKey)]
+        let groups = app.shortcutGroups()
+        let nav = groups.first { $0.name == "Navigation" }?.rows ?? []
+        let navOK = navRows.allSatisfy { title, action in nav.first { $0.title == title }?.keys == (app.nav.chords[action]?.label ?? "off") }
+        r.check("the panel's navigation keys are the configured [keybindings]", navOK, nav.map { "\($0.title) \($0.keys)" }.joined(separator: ", "))
+
+        // Cmd+/ opens it without taking the keyboard.
+        await cmd("/")
+        await waitUntil(1) { app.shortcutsPanel != nil }
+        r.check("Cmd+/ opens the keyboard shortcuts panel", app.shortcutsPanel != nil)
+        r.check("…and the keyboard stays in the terminal", firstResponderIsActiveTerminal && app.focus.exception == nil)
+        if let p = app.shortcutsPanel {
+            let inside = w.contentView.map { p.frame.insetBy(dx: -1, dy: -1).intersection($0.bounds) == p.frame.insetBy(dx: -1, dy: -1) } ?? false
+            r.check("…and fits in the window", inside, "\(p.frame)")
+        }
+        await sleep(200)
+        shot("17-shortcuts-panel")
+        await type("with-help-open\n")
+        r.check("…typing while it's open still reaches the terminal", await paneShows(api, "got: with-help-open"))
+        await key(53, "\u{1b}")
+        await waitUntil(1) { app.shortcutsPanel == nil }
+        r.check("Esc closes it", app.shortcutsPanel == nil)
+        await type("after-help\n")
+        r.check("…the Esc never reached the terminal and typing goes there", await paneShows(api, "got: after-help") && !pane(api).contains("^["))
+        await cmd("/")
+        await waitUntil(1) { app.shortcutsPanel != nil }
+        await cmd("/")
+        await waitUntil(1) { app.shortcutsPanel == nil }
+        r.check("Cmd+/ toggles it closed", app.shortcutsPanel == nil && firstResponderIsActiveTerminal)
+        await cmd("/")
+        await waitUntil(1) { app.shortcutsPanel != nil }
+        if let c = tileCenter(ws.activeTile) { await click(NSPoint(x: c.x, y: c.y + 200)) }
+        r.check("a click closes it", app.shortcutsPanel == nil && firstResponderIsActiveTerminal)
+        // Smallest window: one column, still inside.
+        let frame = w.frame
+        w.setFrame(NSRect(origin: frame.origin, size: w.minSize), display: true)
+        await sleep(200)
+        await cmd("/")
+        await waitUntil(1) { app.shortcutsPanel != nil }
+        if let p = app.shortcutsPanel {
+            let main = ws.area.frame
+            r.check("in the smallest window the panel fits inside the main area, its list scrolling",
+                    main.contains(p.frame) && p.scrolls, "\(p.frame) in \(main), scrolls \(p.scrolls)")
+            shot("18-shortcuts-panel-small")
+        }
+        await key(53, "\u{1b}")
+        w.setFrame(frame, display: true)
+        await sleep(200)
+        // While the rename field has the keyboard the nav menu items are off, so Shift+arrows edit the text.
+        app.sidebar.beginRename(session: api)
+        await sleep(100)
+        let next = app.menuItem(titled: "Next Session")!
+        r.check("nav menu items are off while a rename has the keyboard", !app.validateMenuItem(next))
+        await key(53, "\u{1b}")
+        await waitUntil(1) { firstResponderIsActiveTerminal }
+        r.check("…and on again once the terminal has it", app.validateMenuItem(next))
+    }
 }
