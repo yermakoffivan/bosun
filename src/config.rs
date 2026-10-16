@@ -695,8 +695,11 @@ pub fn user_themes_dir() -> Option<PathBuf> {
 }
 
 fn read_config_file() -> Option<ConfigFile> {
-    let path = config_dir()?.join("config.toml");
-    let s = std::fs::read_to_string(&path).ok()?;
+    read_config_file_at(&config_dir()?.join("config.toml"))
+}
+
+fn read_config_file_at(path: &std::path::Path) -> Option<ConfigFile> {
+    let s = std::fs::read_to_string(path).ok()?;
 
     // Parse as a generic Value first so we can detect + migrate the
     // legacy v0.2.8 `sidebar = [...]` array shape. The v0.2.9 shape
@@ -1012,12 +1015,15 @@ pub fn write_sidebar(model: &SidebarModel) -> std::io::Result<()> {
     let dir =
         config_dir().ok_or_else(|| std::io::Error::other("cannot resolve bosun config dir"))?;
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join("config.toml");
+    write_sidebar_at(&dir.join("config.toml"), model)
+}
 
+/// [`write_sidebar`] against an explicit `config.toml` path.
+pub fn write_sidebar_at(path: &std::path::Path, model: &SidebarModel) -> std::io::Result<()> {
     // Read via the migrating reader so a pre-existing legacy sidebar
     // is converted before we overwrite it. Otherwise the first save
     // after a legacy read-through would wipe the user's groups.
-    let mut file = read_config_file().unwrap_or_default();
+    let mut file = read_config_file_at(path).unwrap_or_default();
     file.sidebar = if model.ungrouped.is_empty() && model.sections.is_empty() {
         None
     } else {
@@ -1030,8 +1036,74 @@ pub fn write_sidebar(model: &SidebarModel) -> std::io::Result<()> {
 
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, &path)?;
+    std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Notices when another process changes the sidebar in `config.toml`.
+///
+/// The TUI keeps the sidebar model in memory and writes the whole thing
+/// back on every edit, never re-reading the file. With a second process
+/// editing the same layout (another TUI, or the Mac app's daemon), the
+/// TUI's next save would silently revert the other's change. So before
+/// applying a local edit the app polls this: a cheap `stat`, and only
+/// when the file's mtime or size moved, a read and parse. The sidebar
+/// found there is compared with the last one this process knows is on
+/// disk (what it loaded or last wrote), so the TUI's own writes and
+/// edits to unrelated settings never count as an external change.
+#[derive(Debug)]
+pub struct SidebarWatch {
+    path: PathBuf,
+    stamp: Option<(std::time::SystemTime, u64)>,
+    disk: SidebarModel,
+}
+
+impl SidebarWatch {
+    /// Watch `path`, starting from the sidebar that was loaded from it.
+    pub fn new(path: PathBuf, loaded: &SidebarModel) -> Self {
+        let stamp = file_stamp(&path);
+        Self {
+            path,
+            stamp,
+            disk: loaded.clone(),
+        }
+    }
+
+    /// Watch bosun's own `config.toml`. `None` if the config dir can't
+    /// be resolved.
+    pub fn for_config_file(loaded: &SidebarModel) -> Option<Self> {
+        Some(Self::new(config_dir()?.join("config.toml"), loaded))
+    }
+
+    /// Record a sidebar this process just wrote, so reading it back
+    /// isn't mistaken for someone else's change.
+    pub fn wrote(&mut self, model: &SidebarModel) {
+        self.disk = model.clone();
+        self.stamp = file_stamp(&self.path);
+    }
+
+    /// The sidebar another process wrote since the last check, if any.
+    pub fn poll(&mut self) -> Option<SidebarModel> {
+        let stamp = file_stamp(&self.path);
+        if stamp == self.stamp {
+            return None;
+        }
+        self.stamp = stamp;
+        // A missing or unparseable file isn't a layout change; keep
+        // what we have rather than wiping the sidebar.
+        let file = read_config_file_at(&self.path)?;
+        let model = file.sidebar.unwrap_or_default();
+        if model == self.disk {
+            return None;
+        }
+        self.disk = model.clone();
+        Some(model)
+    }
+}
+
+fn file_stamp(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 /// If `$TMUX` is set, ask tmux for the current session name. Used to
@@ -1104,6 +1176,73 @@ mod tests {
             session_env: std::collections::BTreeMap::new(),
             agent_hooks: DEFAULT_AGENT_HOOKS,
         }
+    }
+
+    fn model(names: &[&str]) -> SidebarModel {
+        SidebarModel {
+            ungrouped: names
+                .iter()
+                .map(|n| Container::single(n.to_string(), n.to_string()))
+                .collect(),
+            sections: Vec::new(),
+        }
+    }
+
+    /// Bump the file's mtime past the last stamp even on filesystems
+    /// with coarse timestamps.
+    fn touch_later(path: &std::path::Path) {
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(later).unwrap();
+    }
+
+    #[test]
+    fn sidebar_watch_ignores_own_writes_and_unrelated_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let a = model(&["a"]);
+        write_sidebar_at(&path, &a).unwrap();
+        let mut watch = SidebarWatch::new(path.clone(), &a);
+        assert_eq!(watch.poll(), None, "nothing changed");
+
+        // Our own save.
+        let ab = model(&["a", "b"]);
+        write_sidebar_at(&path, &ab).unwrap();
+        touch_later(&path);
+        watch.wrote(&ab);
+        assert_eq!(watch.poll(), None);
+
+        // Another process changes the theme only.
+        let body = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("theme = \"nord\"\n{body}")).unwrap();
+        touch_later(&path);
+        assert_eq!(
+            watch.poll(),
+            None,
+            "unrelated setting is not a layout change"
+        );
+    }
+
+    #[test]
+    fn sidebar_watch_reports_another_processes_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let a = model(&["a"]);
+        write_sidebar_at(&path, &a).unwrap();
+        let mut watch = SidebarWatch::new(path.clone(), &a);
+
+        // Someone else reorders and adds a row.
+        let ca = model(&["c", "a"]);
+        write_sidebar_at(&path, &ca).unwrap();
+        touch_later(&path);
+        assert_eq!(watch.poll(), Some(ca));
+        // Reported once.
+        assert_eq!(watch.poll(), None);
+
+        // An unreadable file mid-edit isn't a layout change.
+        std::fs::write(&path, "[[[ not toml").unwrap();
+        touch_later(&path);
+        assert_eq!(watch.poll(), None);
     }
 
     #[test]

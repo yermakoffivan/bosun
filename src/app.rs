@@ -2065,6 +2065,26 @@ impl AppState {
     /// Insert a new empty section at the end of the sections list.
     /// Called by the app loop after the SectionModal submits. Cursor
     /// jumps to the new header.
+    /// Swap in a sidebar another process wrote to `config.toml` (see
+    /// `config::SidebarWatch`), keeping the cursor on the same row when
+    /// it still exists. Done before a local edit is applied, so the edit
+    /// lands on the current layout and its save doesn't revert the other
+    /// process's change. Sessions the new model names but this process
+    /// hasn't listed yet show as exited until the next refresh reconciles
+    /// them.
+    pub fn adopt_external_sidebar(&mut self, model: SidebarModel) {
+        let prior = self
+            .sidebar
+            .visible()
+            .get(self.selected)
+            .map(|v| v.identity().to_string());
+        self.sidebar = model;
+        if let Some(idx) = prior.and_then(|id| self.sidebar.find_identity(&id)) {
+            self.selected = idx;
+        }
+        self.clamp_selection();
+    }
+
     pub fn insert_section(&mut self, name: String, out: &mut Vec<Command>) {
         let id = self.sidebar.insert_section_at_end(name);
         if let Some(idx) = self.sidebar.find_identity(&id) {
@@ -2304,6 +2324,10 @@ pub struct App {
     /// Live copy of `Config::agent_hooks`, for the settings panel. The
     /// tmux actor holds the copy that matters (`Command::SetAgentHooks`).
     agent_hooks: bool,
+    /// Picks up sidebar edits another bosun process wrote to
+    /// `config.toml`, so a save from here doesn't revert them. `None`
+    /// when the config dir can't be resolved.
+    sidebar_watch: Option<crate::config::SidebarWatch>,
     /// Deferred embed spawn while the user is moving through the
     /// sidebar quickly. `sync_embed` spawns immediately on an
     /// isolated selection change, but once changes arrive faster
@@ -2457,6 +2481,7 @@ impl App {
             embed: None,
             embed_enabled: config.embed_enabled,
             agent_hooks: config.agent_hooks,
+            sidebar_watch: crate::config::SidebarWatch::for_config_file(&config.sidebar),
             embed_focused: false,
             keybindings: config.keybindings,
             key_router: crate::keybindings::KeyRouter::default(),
@@ -3040,6 +3065,22 @@ impl App {
             // spec. Every `SessionsRefreshed` already runs after any
             // command that could mutate the recents table, so it's
             // the right edge to re-cache on.
+            // Before anything that can edit the sidebar (input) or
+            // reconcile it (a refresh), pick up a layout another bosun
+            // process saved, so this one's next save builds on it
+            // instead of reverting it. A stat per message; the file is
+            // only read when it actually changed.
+            if matches!(
+                msg,
+                AppMsg::SessionsRefreshed { .. }
+                    | AppMsg::Key(_)
+                    | AppMsg::Mouse(_)
+                    | AppMsg::Paste(_)
+            ) {
+                if let Some(model) = self.sidebar_watch.as_mut().and_then(|w| w.poll()) {
+                    self.state.adopt_external_sidebar(model);
+                }
+            }
             let should_reload_recents = matches!(msg, AppMsg::SessionsRefreshed { .. });
             // A fresh create (select_after) whose agent launch the actor
             // deferred until the embed attaches (issue #2). Captured
@@ -3115,11 +3156,16 @@ impl App {
                             self.state.warning = Some(format!("divider: failed to save: {e}"));
                         }
                     }
-                    Command::SaveSidebar(entries) => {
-                        if let Err(e) = crate::config::write_sidebar(&entries) {
+                    Command::SaveSidebar(entries) => match crate::config::write_sidebar(&entries) {
+                        Ok(()) => {
+                            if let Some(w) = self.sidebar_watch.as_mut() {
+                                w.wrote(&entries);
+                            }
+                        }
+                        Err(e) => {
                             self.state.warning = Some(format!("sidebar: failed to save: {e}"));
                         }
-                    }
+                    },
                     Command::SaveSessionHistory(history) => {
                         if let Err(e) = crate::config::write_session_history(&history) {
                             self.state.warning = Some(format!("history: failed to save: {e}"));
@@ -5217,6 +5263,61 @@ mod tests {
 
     fn con(internal: &str) -> Container {
         Container::single(internal.to_string(), internal.to_string())
+    }
+
+    /// Another process saved a new layout; a local edit made after it is
+    /// picked up must build on that layout, not the stale in-memory one.
+    #[test]
+    fn local_edit_after_external_reload_keeps_the_other_processes_change() {
+        let mut s = AppState::default();
+        s.sessions = vec![ses("a"), ses("b"), ses("c")];
+        // Both processes loaded the same file, so container ids match.
+        let b = con("b");
+        s.sidebar = SidebarModel {
+            ungrouped: vec![con("a"), b.clone()],
+            sections: vec![],
+        };
+        s.selected = 1; // on "b"
+
+        // The other process grouped "a" and added "c".
+        let external = SidebarModel {
+            ungrouped: vec![b, con("c")],
+            sections: vec![section("s1", "work", &["a"])],
+        };
+        s.adopt_external_sidebar(external.clone());
+        assert_eq!(
+            s.selected_session_name().as_deref(),
+            Some("b"),
+            "cursor stays on the same row"
+        );
+
+        let mut out = Vec::new();
+        s.insert_section("later".into(), &mut out);
+        let saved = out
+            .iter()
+            .find_map(|c| match c {
+                Command::SaveSidebar(m) => Some(m.clone()),
+                _ => None,
+            })
+            .expect("edit saves the sidebar");
+        assert_eq!(saved.ungrouped, external.ungrouped);
+        assert_eq!(saved.sections[0], external.sections[0]);
+        assert_eq!(saved.sections[1].name, "later");
+    }
+
+    #[test]
+    fn external_reload_clamps_a_vanished_selection() {
+        let mut s = AppState::default();
+        s.sidebar = SidebarModel {
+            ungrouped: vec![con("a"), con("b"), con("c")],
+            sections: vec![],
+        };
+        s.selected = 2;
+        s.adopt_external_sidebar(SidebarModel {
+            ungrouped: vec![con("a")],
+            sections: vec![],
+        });
+        assert_eq!(s.selected, 0);
     }
 
     fn section(id: &str, name: &str, members: &[&str]) -> Section {
