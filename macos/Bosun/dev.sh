@@ -46,6 +46,11 @@ up() {
   mkdir -p "$DEV_HOME"
   local s; s="$(sock)"
   if [[ ${#s} -ge 104 ]]; then echo "socket path too long (${#s} bytes): $s; set a shorter BOSUN_DEV_HOME" >&2; exit 1; fi
+  # Bosun's own config and data live in the throwaway HOME, but the sessions get the
+  # real one, so a real agent started in a test session finds its login and settings
+  # (Claude's OAuth token is in the login keychain under ~/Library/Keychains). Panes
+  # inherit the tmux server's global environment, so start the server here and set it.
+  env -u TMUX -u TMUX_PANE "$TMUX_BIN" -L "$TMUX_SOCK" start-server \; set -g exit-empty off \; set-environment -g HOME "$HOME"
   # A daemon started before the binary was last rebuilt is running old code: restart it.
   if [[ -f "$LOCK" && "$(bin)" -nt "$LOCK" ]]; then
     echo "restarting the test daemon on the rebuilt bosun" >&2
