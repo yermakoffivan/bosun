@@ -212,7 +212,16 @@ final class DaemonClient {
     nonisolated private static func spawnDetached(_ exe: String, _ args: [String], env: [String: String]) {
         var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
-        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
+        // This runs on a libdispatch thread, which blocks most signals, and a spawned process
+        // inherits the caller's mask. Clear it and reset every signal to its default, or the
+        // daemon starts with SIGCHLD and SIGTERM blocked and its first tmux command never returns.
+        var noSignals = sigset_t()
+        sigemptyset(&noSignals)
+        posix_spawnattr_setsigmask(&attr, &noSignals)
+        var allSignals = sigset_t()
+        sigfillset(&allSignals)
+        posix_spawnattr_setsigdefault(&attr, &allSignals)
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF))
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
         posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)

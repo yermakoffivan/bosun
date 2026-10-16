@@ -32,7 +32,33 @@ fn main() -> Result<()> {
         bosun::agent_hooks::run(std::env::args().skip(2));
         std::process::exit(0);
     }
+    reset_inherited_signals();
     run()
+}
+
+/// Undo a signal mask and ignored signals inherited from whoever started
+/// us, before the runtime's threads copy them. A GUI app that spawns
+/// `bosun serve` from a libdispatch thread hands down that thread's mask,
+/// which blocks nearly everything: with SIGCHLD blocked, tokio never sees
+/// a `tmux` child exit, so the first tmux command hangs forever (and with
+/// SIGTERM blocked, the daemon can't be stopped).
+fn reset_inherited_signals() {
+    // SAFETY: plain libc calls on stack-local sigset_t values, made before
+    // any other thread exists. SIGPIPE is left as the Rust runtime set it.
+    unsafe {
+        let mut none: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut none);
+        libc::pthread_sigmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
+        for sig in [
+            libc::SIGCHLD,
+            libc::SIGTERM,
+            libc::SIGINT,
+            libc::SIGHUP,
+            libc::SIGQUIT,
+        ] {
+            libc::signal(sig, libc::SIG_DFL);
+        }
+    }
 }
 
 #[tokio::main]
