@@ -130,6 +130,45 @@ fn hook_writes_state_the_poll_reads_back() {
     assert_eq!(session(&server).hook, None);
 }
 
+/// Claude's question dialog: PreToolUse and PermissionRequest name
+/// AskUserQuestion, then a permission notification that names no tool
+/// arrives a few seconds later. The row keeps saying `question`.
+#[test]
+fn a_generic_permission_notification_keeps_the_question_detail() {
+    let server = Server::start("ask");
+    let detail = |server: &Server| session(server).hook.and_then(|h| h.detail);
+    let generic =
+        r#"{"notification_type":"permission_prompt","message":"Claude Code needs your attention"}"#;
+
+    hook(
+        &server,
+        &["claude", "PreToolUse"],
+        r#"{"tool_name":"AskUserQuestion"}"#,
+    );
+    hook(
+        &server,
+        &["claude", "PermissionRequest"],
+        r#"{"tool_name":"AskUserQuestion"}"#,
+    );
+    assert_eq!(detail(&server).as_deref(), Some("question"));
+    let before = session(&server).hook.unwrap().at_ms;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let out = hook(&server, &["claude", "Notification"], generic);
+    assert!(out.status.success());
+    let h = session(&server).hook.unwrap();
+    assert_eq!(h.status, Status::Waiting);
+    assert_eq!(h.detail.as_deref(), Some("question"));
+    assert!(h.at_ms > before, "the state is still rewritten");
+
+    // With no detail yet (a fresh wait), the notification writes its own.
+    hook(&server, &["claude", "PostToolUse"], "{}");
+    assert_eq!(detail(&server), None);
+    hook(&server, &["claude", "Notification"], generic);
+    let h = session(&server).hook.unwrap();
+    assert_eq!(h.status, Status::Waiting);
+    assert_eq!(h.detail.as_deref(), Some("permission"));
+}
+
 #[test]
 fn hook_outside_tmux_or_with_bad_input_exits_zero() {
     let out = Command::new(env!("CARGO_BIN_EXE_bosun"))

@@ -113,6 +113,14 @@ pub enum HookAction {
         status: Status,
         detail: Option<String>,
     },
+    /// Write `waiting`, but keep a detail the pane already has. For a
+    /// report that says only that the agent is waiting (`permission`
+    /// with no tool) arriving after a more specific one for the same
+    /// wait (`question`, `permission: Bash`): the specific detail stays.
+    /// A detail is only ever written alongside `waiting` and every other
+    /// write clears it, so one that is already set belongs to this wait.
+    /// `detail` is written only when none is set.
+    WaitingKeepDetail { detail: String },
     /// Remove the state options: the agent session ended.
     Clear,
     /// The agent says it's sitting idle at its prompt. Demote a
@@ -215,52 +223,61 @@ pub fn tmux_target(tmux: Option<&str>, pane: Option<&str>) -> Option<(String, St
 /// One invocation, with `;` separating the commands, so the three
 /// options change together. Empty for [`HookAction::Ignore`] and
 /// [`HookAction::SettleIdle`], which need a read first.
+/// [`HookAction::WaitingKeepDetail`] needs no read: `set-option -o`
+/// writes the detail only if the pane has none, and fails ("already
+/// set") otherwise. It goes last, so the state and time before it are
+/// written either way.
 pub fn tmux_args(action: &HookAction, pane: &str, now_ms: u64) -> Vec<String> {
     let s = |v: &str| v.to_string();
     match action {
         HookAction::Set { status, detail } => {
-            let Some(word) = status_word(*status) else {
+            let Some(mut argv) = state_args(*status, pane, now_ms) else {
                 return Vec::new();
             };
-            let mut argv = vec![
-                s("set-option"),
-                s("-p"),
-                s("-t"),
-                s(pane),
-                s(STATE_OPTION),
-                s(word),
-                s(";"),
-                s("set-option"),
-                s("-p"),
-                s("-t"),
-                s(pane),
-                s(AT_OPTION),
-                now_ms.to_string(),
-                s(";"),
-                s("set-option"),
-                s("-p"),
-                s("-t"),
-                s(pane),
-            ];
+            argv.extend([s(";"), s("set-option"), s("-p"), s("-t"), s(pane)]);
             match detail
                 .as_deref()
                 .map(sanitize_detail)
                 .filter(|d| !d.is_empty())
             {
-                Some(d) => {
-                    argv.push(s(DETAIL_OPTION));
-                    argv.push(d);
-                }
-                None => {
-                    argv.push(s("-u"));
-                    argv.push(s(DETAIL_OPTION));
-                }
+                Some(d) => argv.extend([s(DETAIL_OPTION), d]),
+                None => argv.extend([s("-u"), s(DETAIL_OPTION)]),
+            }
+            argv
+        }
+        HookAction::WaitingKeepDetail { detail } => {
+            let mut argv = state_args(Status::Waiting, pane, now_ms).unwrap_or_default();
+            let detail = sanitize_detail(detail);
+            if !detail.is_empty() {
+                argv.extend(
+                    [";", "set-option", "-p", "-o", "-t", pane, DETAIL_OPTION]
+                        .iter()
+                        .map(|v| s(v)),
+                );
+                argv.push(detail);
             }
             argv
         }
         HookAction::Clear => clear_args(pane),
         HookAction::SettleIdle | HookAction::Ignore => Vec::new(),
     }
+}
+
+/// The two commands that write the state word and its time. `None` for
+/// a status a hook can't report.
+fn state_args(status: Status, pane: &str, now_ms: u64) -> Option<Vec<String>> {
+    let word = status_word(status)?;
+    let mut argv: Vec<String> = ["set-option", "-p", "-t", pane, STATE_OPTION, word, ";"]
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+    argv.extend(
+        ["set-option", "-p", "-t", pane, AT_OPTION]
+            .iter()
+            .map(|v| v.to_string()),
+    );
+    argv.push(now_ms.to_string());
+    Some(argv)
 }
 
 /// tmux argv that unsets all three state options on `target`.
@@ -580,6 +597,30 @@ mod tests {
         assert_eq!(
             argv.join(" "),
             "set-option -p -t %3 @bosun_state waiting ; set-option -p -t %3 @bosun_state_at 42 ; set-option -p -t %3 @bosun_state_detail permission: Bash"
+        );
+    }
+
+    #[test]
+    fn waiting_keep_detail_writes_the_detail_only_if_unset() {
+        let argv = tmux_args(
+            &HookAction::WaitingKeepDetail {
+                detail: "permission".into(),
+            },
+            "%3",
+            42,
+        );
+        assert_eq!(
+            argv.join(" "),
+            "set-option -p -t %3 @bosun_state waiting ; set-option -p -t %3 @bosun_state_at 42 ; set-option -p -o -t %3 @bosun_state_detail permission"
+        );
+        let argv = tmux_args(
+            &HookAction::WaitingKeepDetail { detail: " ".into() },
+            "%3",
+            42,
+        );
+        assert_eq!(
+            argv.join(" "),
+            "set-option -p -t %3 @bosun_state waiting ; set-option -p -t %3 @bosun_state_at 42"
         );
     }
 

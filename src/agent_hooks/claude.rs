@@ -18,11 +18,19 @@
 //! | `PreToolUse` `ExitPlanMode`             | waiting, "plan approval"     |
 //! | `PostToolUse`                           | running (ends a wait too)    |
 //! | `PermissionRequest`                     | waiting, "permission: Tool"  |
+//! | `PermissionRequest` `AskUserQuestion`   | waiting, "question"          |
 //! | `Notification` `permission_prompt`      | waiting, "permission: Tool"  |
 //! | `Notification` `elicitation_dialog` …   | waiting, "input requested"   |
 //! | `Notification` `idle_prompt`            | running/waiting → idle only  |
 //! | `Stop`                                  | done                         |
 //! | `SessionEnd`                            | cleared                      |
+//!
+//! A permission request or notification for `AskUserQuestion` or
+//! `ExitPlanMode` gets the same detail as their `PreToolUse`. A
+//! `permission_prompt` notification that doesn't name its tool (or a
+//! `PermissionRequest` without a tool name) writes plain `permission`
+//! only when the pane has no detail yet, so it can't replace a more
+//! specific one written moments before for the same wait.
 //!
 //! Only long-established events are registered: an older Claude that
 //! doesn't know an event name could reject the whole settings file.
@@ -72,27 +80,19 @@ pub fn map(event: &str, input: &[u8]) -> HookAction {
     match event {
         "SessionStart" => HookAction::set(Status::Idle),
         "UserPromptSubmit" | "PostToolUse" => HookAction::set(Status::Running),
-        "PreToolUse" => match parse(input).tool_name.as_deref() {
-            // These two tools are the agent asking the user something,
-            // and the dialog appears as soon as the tool starts.
-            Some("AskUserQuestion") => HookAction::set_with(Status::Waiting, "question"),
-            Some("ExitPlanMode") => HookAction::set_with(Status::Waiting, "plan approval"),
-            _ => HookAction::set(Status::Running),
+        "PreToolUse" => match parse(input).tool_name.as_deref().and_then(asking_detail) {
+            // The agent asking the user something: the dialog appears
+            // as soon as the tool starts.
+            Some(detail) => HookAction::set_with(Status::Waiting, detail),
+            None => HookAction::set(Status::Running),
         },
-        "PermissionRequest" => {
-            let detail = match parse(input).tool_name {
-                Some(tool) if !tool.is_empty() => format!("permission: {tool}"),
-                _ => "permission".to_string(),
-            };
-            HookAction::set_with(Status::Waiting, detail)
-        }
+        "PermissionRequest" => permission_wait(parse(input).tool_name.as_deref()),
         "Notification" => {
             let input = parse(input);
             match input.notification_type.as_deref() {
-                Some("permission_prompt") => HookAction::set_with(
-                    Status::Waiting,
-                    permission_detail(input.message.as_deref()),
-                ),
+                Some("permission_prompt") => {
+                    permission_wait(permission_tool(input.message.as_deref()))
+                }
                 Some("elicitation_dialog" | "elicitation_url_dialog" | "agent_needs_input") => {
                     HookAction::set_with(Status::Waiting, "input requested")
                 }
@@ -113,16 +113,41 @@ pub fn map(event: &str, input: &[u8]) -> HookAction {
     }
 }
 
-/// `permission: Bash` from Claude's "Claude needs your permission to
-/// use Bash" notification text, or plain `permission` if the text isn't
-/// in that form.
-fn permission_detail(message: Option<&str>) -> String {
+/// The detail for a tool that is the agent asking the user something
+/// rather than doing something: its dialog is a question or a plan to
+/// approve, whichever event reports it.
+fn asking_detail(tool: &str) -> Option<&'static str> {
+    match tool {
+        "AskUserQuestion" => Some("question"),
+        "ExitPlanMode" => Some("plan approval"),
+        _ => None,
+    }
+}
+
+/// Waiting on a permission dialog for `tool`. With no tool name the
+/// report says nothing more specific than `permission`, so it keeps a
+/// detail the pane already has for this wait (Claude sends its
+/// `permission_prompt` notification a few seconds after the
+/// `PermissionRequest` or `PreToolUse` that named the tool).
+fn permission_wait(tool: Option<&str>) -> HookAction {
+    match tool.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(tool) => match asking_detail(tool) {
+            Some(detail) => HookAction::set_with(Status::Waiting, detail),
+            None => HookAction::set_with(Status::Waiting, format!("permission: {tool}")),
+        },
+        None => HookAction::WaitingKeepDetail {
+            detail: "permission".to_string(),
+        },
+    }
+}
+
+/// The tool named in Claude's "Claude needs your permission to use
+/// Bash" notification text, or `None` if the text isn't in that form.
+fn permission_tool(message: Option<&str>) -> Option<&str> {
     message
         .and_then(|m| m.rsplit_once(" to use "))
         .map(|(_, tool)| tool.trim().trim_end_matches('.'))
         .filter(|t| !t.is_empty())
-        .map(|t| format!("permission: {t}"))
-        .unwrap_or_else(|| "permission".to_string())
 }
 
 /// The settings JSON Bosun passes with `--settings`: one command hook
@@ -258,28 +283,76 @@ mod tests {
     fn empty_or_invalid_stdin_still_maps() {
         assert_eq!(map("Stop", b""), set(Status::Done));
         assert_eq!(map("PreToolUse", b"not json"), set(Status::Running));
-        assert_eq!(
-            map("PermissionRequest", b""),
-            HookAction::set_with(Status::Waiting, "permission")
-        );
+        assert_eq!(map("PermissionRequest", b""), keep("permission"));
         assert_eq!(map("Notification", b"{"), HookAction::Ignore);
         assert_eq!(map("UnknownEvent", b"{}"), HookAction::Ignore);
     }
 
     #[test]
-    fn permission_detail_falls_back_to_plain() {
+    fn permission_tool_comes_from_the_message() {
         assert_eq!(
-            permission_detail(Some("Claude needs your permission to use Bash")),
-            "permission: Bash"
+            permission_tool(Some("Claude needs your permission to use Bash")),
+            Some("Bash")
         );
         assert_eq!(
-            permission_detail(Some(
+            permission_tool(Some(
                 "Claude needs your permission to use mcp__github__create_issue."
             )),
-            "permission: mcp__github__create_issue"
+            Some("mcp__github__create_issue")
         );
-        assert_eq!(permission_detail(Some("Permission needed")), "permission");
-        assert_eq!(permission_detail(None), "permission");
+        assert_eq!(permission_tool(Some("Permission needed")), None);
+        assert_eq!(permission_tool(None), None);
+    }
+
+    fn keep(detail: &str) -> HookAction {
+        HookAction::WaitingKeepDetail {
+            detail: detail.to_string(),
+        }
+    }
+
+    // The order a real session sent them in: Claude's question dialog
+    // fires PreToolUse and PermissionRequest for AskUserQuestion, then a
+    // permission_prompt notification a few seconds later whose text
+    // names no tool (the text below stands in for it).
+    const PERMISSION_REQUEST_ASK: &str = r#"{"session_id":"abc123","hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Which db?","options":[{"label":"sqlite"}]}]},"permission_suggestions":[]}"#;
+    const PERMISSION_REQUEST_PLAN: &str = r#"{"session_id":"abc123","hook_event_name":"PermissionRequest","tool_name":"ExitPlanMode","tool_input":{"plan":"1. do it"}}"#;
+    const NOTIFY_PERMISSION_GENERIC: &str = r#"{"session_id":"abc123","hook_event_name":"Notification","message":"Claude Code needs your attention","title":"Claude Code","notification_type":"permission_prompt"}"#;
+
+    #[test]
+    fn asking_tools_are_questions_not_permissions() {
+        assert_eq!(
+            map("PermissionRequest", PERMISSION_REQUEST_ASK.as_bytes()),
+            HookAction::set_with(Status::Waiting, "question")
+        );
+        assert_eq!(
+            map("PermissionRequest", PERMISSION_REQUEST_PLAN.as_bytes()),
+            HookAction::set_with(Status::Waiting, "plan approval")
+        );
+        let notify = serde_json::json!({
+            "notification_type": "permission_prompt",
+            "message": "Claude needs your permission to use AskUserQuestion",
+        });
+        assert_eq!(
+            map("Notification", notify.to_string().as_bytes()),
+            HookAction::set_with(Status::Waiting, "question")
+        );
+    }
+
+    #[test]
+    fn a_notification_naming_no_tool_keeps_the_specific_detail() {
+        assert_eq!(
+            map("Notification", NOTIFY_PERMISSION_GENERIC.as_bytes()),
+            keep("permission")
+        );
+        assert_eq!(
+            map("PermissionRequest", br#"{"tool_name":""}"#),
+            keep("permission")
+        );
+        // One that names its tool is as specific as the request was.
+        assert_eq!(
+            map("Notification", NOTIFY_PERMISSION.as_bytes()),
+            HookAction::set_with(Status::Waiting, "permission: Bash")
+        );
     }
 
     #[test]

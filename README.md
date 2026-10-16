@@ -460,7 +460,7 @@ Claude Code is the agent with hooks today. Bosun never edits `~/.claude/settings
 |---|---|
 | `SessionStart` | Idle |
 | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | Running (a tool running after a permission prompt ends the wait) |
-| `PermissionRequest`, `Notification` (permission prompt, MCP input request), `PreToolUse` for `AskUserQuestion` / `ExitPlanMode` | Waiting, with what it's waiting on |
+| `PermissionRequest`, `Notification` (permission prompt, MCP input request), `PreToolUse` for `AskUserQuestion` / `ExitPlanMode` | Waiting, with what it's waiting on: `permission: Bash`, `question` (`AskUserQuestion`, whichever event reports it), `plan approval` or `input requested`. A permission notification that doesn't name its tool keeps the detail already written for that wait |
 | `Notification` (`idle_prompt`) | Running or Waiting settle to Idle; Done is left alone |
 | `Stop` | Done (shown until you look at the session, as before) |
 | `SessionEnd` | state cleared |
