@@ -95,12 +95,15 @@ def fixture(c, agent):
     for name, args in plan:
         if name not in have:
             c.cmd("create", spec=spec(name, args))
-    # A second tab in the "web" row.
+    # The "web" row gets two more tabs (it opens as three panes side by side in the app): a fake
+    # agent and a plain shell.
     c.resync()
     sb = c.snapshot["sidebar"]
     web = next((r for r in sb["ungrouped"] + [m for s in sb["sections"] for m in s["members"]] if label(r) == "web"), None)
-    if web and "web tests" not in have:
-        c.cmd("create", spec=spec("web tests", f"python3 {agent} web-tests", container=web["id"]))
+    if web:
+        for name, args in (("web tests", f"python3 {agent} web-tests"), ("web shell", "")):
+            if name not in have:
+                c.cmd("create", spec=spec(name, args, container=web["id"]))
     c.resync()
     sections = {s["name"]: s["id"] for s in c.snapshot["sidebar"]["sections"]}
     for name in ("Work", "Reviews"):
@@ -114,11 +117,13 @@ def fixture(c, agent):
     def rows(*names):
         return [{"id": by_name[n]["id"], "name": by_name[n]["name"], "active": by_name[n]["active"],
                  "tabs": [{"session": t["session"]} for t in by_name[n]["tabs"]]} for n in names if n in by_name]
-    # Make "web tests" a second tab of the "web" row (the daemon may not have regrouped it yet).
-    if "web" in by_name and "web tests" in by_name and by_name["web tests"] is not by_name["web"]:
-        extra = by_name.pop("web tests")
-        by_name["web"]["tabs"] = by_name["web"]["tabs"] + extra["tabs"]
-    placed = {"parser", "ticker", "web", "review-1", "review-2", "shell", "web tests"}
+    # Make "web tests" and "web shell" tabs of the "web" row (the daemon may not have regrouped them yet).
+    for extra_name in ("web tests", "web shell"):
+        if "web" in by_name and extra_name in by_name and by_name[extra_name] is not by_name["web"]:
+            extra = by_name.pop(extra_name)
+            known = {t["session"] for t in by_name["web"]["tabs"]}
+            by_name["web"]["tabs"] = by_name["web"]["tabs"] + [t for t in extra["tabs"] if t["session"] not in known]
+    placed = {"parser", "ticker", "web", "review-1", "review-2", "shell", "web tests", "web shell"}
     out = {"ungrouped": rows(*[n for n in by_name if n not in placed]), "sections": []}
     for s in sb["sections"]:
         members = rows("parser", "ticker", "web") if s["name"] == "Work" else rows("review-1", "review-2", "shell") if s["name"] == "Reviews" else []
