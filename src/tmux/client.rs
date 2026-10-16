@@ -10,7 +10,9 @@ use tokio::process::Command;
 
 use crate::error::{BosunError, Result};
 use crate::tmux::command_channel::{CommandChannel, Outcome};
-use crate::tmux::parse::{parse_list_sessions, LIST_SESSIONS_FORMAT};
+use crate::tmux::parse::{
+    parse_list_sessions, parse_status_rows, LIST_SESSIONS_FORMAT, STATUS_POLL_FORMAT,
+};
 use crate::tmux::session::TmuxSession;
 
 /// Spec for creating a new tmux session. All strings are expected to
@@ -80,6 +82,14 @@ pub trait TmuxClient: Send + Sync {
     /// Run `tmux list-sessions` and return parsed sessions. An empty
     /// server (exit code 1, "no server running") returns `Ok(vec![])`.
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>>;
+
+    /// Every session's status inputs (`list-sessions` with the slim
+    /// [`STATUS_POLL_FORMAT`]), for the 250 ms status poll. The rows
+    /// only carry what a hook-reported status depends on; see
+    /// [`crate::tmux::parse::parse_status_rows`].
+    async fn list_status_rows(&self) -> Result<Vec<TmuxSession>> {
+        self.list_sessions().await
+    }
 
     /// Capture the current visible pane (what the user actually sees
     /// right now — no scrollback history), preserving ANSI escape
@@ -264,6 +274,45 @@ impl TokioTmuxClient {
     /// otherwise (or after a lost connection, for [`Retry::Safe`]
     /// commands) by exec. Errors only when the command couldn't be run
     /// at all; a tmux-level failure comes back as `success == false`.
+    /// `list-sessions -F <format>`, parsed by `parse`.
+    async fn list_with(
+        &self,
+        format: &str,
+        parse: fn(&str) -> Result<Vec<TmuxSession>>,
+    ) -> Result<Vec<TmuxSession>> {
+        let output = self
+            .run(&["list-sessions", "-F", format], Retry::Safe)
+            .await?;
+
+        if output.success {
+            let s = String::from_utf8_lossy(&output.stdout);
+            return parse(&s);
+        }
+
+        // tmux exits non-zero when there are no sessions. The phrasing varies
+        // by how we got there:
+        //   * Attached but zero sessions: "no server running on /tmp/tmux-501/default"
+        //   * Custom -L socket that was never created:
+        //     "error connecting to /private/tmp/tmux-501/<name> (No such file or directory)"
+        //   * Some versions: "no sessions"
+        //   * Racing the shutdown that killing the *last* session
+        //     triggers: "server exited unexpectedly". The server is on
+        //     its way out precisely because nothing is left to list, so
+        //     that means empty too, not an error worth showing the
+        //     user. (Seen on Linux tmux; macOS usually finishes exiting
+        //     before we ask and answers "no server running".)
+        // All of them mean "empty" for our purposes.
+        let stderr = &output.stderr;
+        if is_empty_server_stderr(stderr) {
+            return Ok(Vec::new());
+        }
+
+        Err(BosunError::Tmux(format!(
+            "list-sessions failed: {}",
+            stderr.trim()
+        )))
+    }
+
     pub async fn run(&self, args: &[&str], retry: Retry) -> Result<TmuxOutput> {
         match self.channel.execute(args).await {
             Outcome::Replied(block) => {
@@ -444,37 +493,12 @@ impl TmuxClient for TokioTmuxClient {
     }
 
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>> {
-        let output = self
-            .run(&["list-sessions", "-F", LIST_SESSIONS_FORMAT], Retry::Safe)
-            .await?;
+        self.list_with(LIST_SESSIONS_FORMAT, parse_list_sessions)
+            .await
+    }
 
-        if output.success {
-            let s = String::from_utf8_lossy(&output.stdout);
-            return parse_list_sessions(&s);
-        }
-
-        // tmux exits non-zero when there are no sessions. The phrasing varies
-        // by how we got there:
-        //   * Attached but zero sessions: "no server running on /tmp/tmux-501/default"
-        //   * Custom -L socket that was never created:
-        //     "error connecting to /private/tmp/tmux-501/<name> (No such file or directory)"
-        //   * Some versions: "no sessions"
-        //   * Racing the shutdown that killing the *last* session
-        //     triggers: "server exited unexpectedly". The server is on
-        //     its way out precisely because nothing is left to list, so
-        //     that means empty too, not an error worth showing the
-        //     user. (Seen on Linux tmux; macOS usually finishes exiting
-        //     before we ask and answers "no server running".)
-        // All of them mean "empty" for our purposes.
-        let stderr = &output.stderr;
-        if is_empty_server_stderr(stderr) {
-            return Ok(Vec::new());
-        }
-
-        Err(BosunError::Tmux(format!(
-            "list-sessions failed: {}",
-            stderr.trim()
-        )))
+    async fn list_status_rows(&self) -> Result<Vec<TmuxSession>> {
+        self.list_with(STATUS_POLL_FORMAT, parse_status_rows).await
     }
 
     async fn capture_pane(&self, session: &str) -> Result<Vec<u8>> {

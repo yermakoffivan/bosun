@@ -47,6 +47,58 @@ pub const LIST_SESSIONS_FORMAT: &str = "#{session_name}|||#{session_windows}|||#
 
 const FIELD_SEP: &str = "|||";
 
+/// The `list-sessions -F` format for `bosun serve`'s 250 ms status poll:
+/// only what a hook-reported status depends on (see
+/// `agent_hooks::resolve`). Every field costs the tmux server time on
+/// each of the four polls a second, and the full
+/// [`LIST_SESSIONS_FORMAT`] costs it about 40 % more than this one
+/// (`list-panes -a` with the same fields costs more again: it walks
+/// every pane, the monitor session's included).
+pub const STATUS_POLL_FORMAT: &str = "#{session_name}|||#{session_activity}|||#{@bosun_agent}|||#{pane_title}|||#{pane_current_command}|||#{@bosun_state}|||#{@bosun_state_at}|||#{@bosun_state_detail}";
+
+/// Parse `tmux list-sessions -F <STATUS_POLL_FORMAT>` output. Only the
+/// fields that format reads are filled in (name, activity, agent, pane
+/// title and command, hook state); everything else is left at its
+/// empty value, so these rows are for working out a status and nothing
+/// else.
+pub fn parse_status_rows(input: &str) -> Result<Vec<TmuxSession>> {
+    let mut out = Vec::new();
+    for (idx, line) in input.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split(FIELD_SEP).collect();
+        let [name, activity, agent, title, command, state, at, detail] = f[..] else {
+            return Err(BosunError::Parse(format!(
+                "status row {}: expected 8 fields, got {} — raw: {:?}",
+                idx + 1,
+                f.len(),
+                line
+            )));
+        };
+        let some = |v: &str| (!v.is_empty()).then(|| v.to_string());
+        out.push(TmuxSession {
+            name: name.to_string(),
+            display_name: None,
+            windows: 0,
+            attached: false,
+            created: None,
+            last_activity: parse_epoch(activity),
+            current_path: None,
+            agent: some(agent),
+            spec_path: None,
+            container_id: None,
+            worktree_path: None,
+            branch: None,
+            pane_width: 0,
+            pane_title: some(title),
+            pane_command: some(command),
+            hook: crate::agent_hooks::HookState::parse(state, at, detail),
+        });
+    }
+    Ok(out)
+}
+
 /// Parse the full `tmux list-sessions -F <LIST_SESSIONS_FORMAT>` output.
 /// One session per line; empty input is valid (no sessions).
 pub fn parse_list_sessions(input: &str) -> Result<Vec<TmuxSession>> {
@@ -171,6 +223,36 @@ mod tests {
     #[test]
     fn parses_empty_input() {
         assert!(parse_list_sessions("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn status_rows_carry_the_status_inputs() {
+        let rows = parse_status_rows(
+            "bosun-a-1|||1792130862|||claude|||⠙ Fix it|||2_1_301|||waiting|||1792130862123|||permission: Bash\n\
+             bosun-b-2|||1792130800|||||||||zsh|||||||||\n",
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        let a = &rows[0];
+        assert_eq!(a.name, "bosun-a-1");
+        assert_eq!(
+            a.last_activity,
+            Some(UNIX_EPOCH + Duration::from_secs(1792130862))
+        );
+        assert_eq!(a.agent.as_deref(), Some("claude"));
+        assert_eq!(a.pane_title.as_deref(), Some("⠙ Fix it"));
+        assert_eq!(a.pane_command.as_deref(), Some("2_1_301"));
+        let hook = a.hook.as_ref().unwrap();
+        assert_eq!(hook.status, crate::tmux::detector::Status::Waiting);
+        assert_eq!(hook.at_ms, 1792130862123);
+        assert_eq!(hook.detail.as_deref(), Some("permission: Bash"));
+        let b = &rows[1];
+        assert_eq!((b.agent.as_ref(), b.pane_title.as_ref()), (None, None));
+        assert_eq!(b.pane_command.as_deref(), Some("zsh"));
+        assert!(b.hook.is_none());
+        // The format and the parser agree on the field count.
+        assert_eq!(STATUS_POLL_FORMAT.split(FIELD_SEP).count(), 8);
+        assert!(parse_status_rows("bosun-a|||1").is_err());
     }
 
     #[test]

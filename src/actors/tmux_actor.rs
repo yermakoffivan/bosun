@@ -2003,7 +2003,9 @@ fn hook_status(
 }
 
 /// One pass of the status poll (`Command::FastStatusPoll`): a single
-/// `list-sessions`, then [`poll_one`] for each managed session, and a
+/// `list-sessions` with the slim `STATUS_POLL_FORMAT` (see
+/// `TmuxClient::list_status_rows`), then [`poll_one`] for each managed
+/// session, and a
 /// `StatusRefreshed` for every status that changed. No captures.
 async fn poll_statuses(
     client: &dyn TmuxClient,
@@ -2011,7 +2013,7 @@ async fn poll_statuses(
     state: &mut RefreshState,
     evt_tx: &mpsc::UnboundedSender<AppMsg>,
 ) {
-    let raw = match client.list_sessions().await {
+    let raw = match client.list_status_rows().await {
         Ok(raw) => raw,
         Err(e) => {
             tracing::debug!("status poll list-sessions: {}", e);
