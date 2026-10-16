@@ -446,4 +446,14 @@ pub enum AppMsg {
     /// barrier with this id has finished. Only `bosun serve` sends
     /// barriers, so the TUI never sees this.
     CommandDone(u64),
+    /// The tmux client on terminal `tty` is now on `session` (a
+    /// `switch-client`, an attach, or one of Bosun's own jump keys
+    /// typed inside it), or detached when `session` is `None`. From
+    /// control mode's `%client-session-changed` / `%client-detached`.
+    /// `bosun serve` forwards these so a GUI can follow its own
+    /// terminals; the TUI ignores them.
+    ClientSession {
+        tty: String,
+        session: Option<String>,
+    },
 }

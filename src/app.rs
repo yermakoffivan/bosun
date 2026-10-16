@@ -1321,6 +1321,7 @@ impl AppState {
             AppMsg::FocusGained | AppMsg::FocusLost => { /* handled at the App level — see App::run */
             }
             AppMsg::CommandDone(_) => { /* only `bosun serve` sends barriers */ }
+            AppMsg::ClientSession { .. } => { /* only `bosun serve` forwards these */ }
             AppMsg::AttachStarted { .. } | AppMsg::AttachEnded { .. } => {
                 // Phase 1: attach is done inline; these arms are for future use.
             }

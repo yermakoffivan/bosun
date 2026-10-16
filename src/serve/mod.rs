@@ -1043,7 +1043,13 @@ impl Daemon {
             .sidebar
             .ungrouped
             .iter()
-            .chain(self.app.sidebar.sections.iter().flat_map(|s| s.members.iter()))
+            .chain(
+                self.app
+                    .sidebar
+                    .sections
+                    .iter()
+                    .flat_map(|s| s.members.iter()),
+            )
             .map(|c| (c.id.clone(), c.name.clone()))
             .collect();
         for c in model
@@ -1173,6 +1179,14 @@ impl Daemon {
             }
             msg @ AppMsg::StatusRefreshed { .. } => {
                 let _ = self.app.apply(msg);
+            }
+            AppMsg::ClientSession { tty, session } => {
+                let seq = self.next_seq();
+                let msg = match session {
+                    Some(session) => ServerMsg::ClientSession { seq, tty, session },
+                    None => ServerMsg::ClientDetached { seq, tty },
+                };
+                self.broadcast(&msg);
             }
             AppMsg::Fatal(e) => tracing::error!("tmux actor: {}", e),
             _ => {}

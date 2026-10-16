@@ -14,6 +14,8 @@
 //!    - `%window-renamed @<id> <name>`
 //!    - `%layout-change @<id> <layout>`
 //!    - `%pane-mode-changed %<id>`
+//!    - `%client-session-changed <client> $<id> <name>`
+//!    - `%client-detached <client>`
 //!    - `%output %<pane-id> <octal-escaped-bytes>`
 //!    - `%exit` — tmux is about to close the connection
 //!
@@ -49,6 +51,18 @@ pub enum Notification {
     SessionsChanged,
     /// A single session's focus / active state changed.
     SessionChanged { id: String, name: String },
+    /// Another tmux client (an attached terminal, not this control
+    /// connection) is now on session `name`. `client` is tmux's client
+    /// name: its tty (`/dev/ttys026`) for a terminal client. tmux sends
+    /// it on attach, on `switch-client`, and on every
+    /// `server_client_set_session` even when the session is the same.
+    ClientSessionChanged {
+        client: String,
+        session_id: String,
+        name: String,
+    },
+    /// Another tmux client detached (`client` as above).
+    ClientDetached { client: String },
     /// A session was renamed (display name via `rename-session`, not
     /// our `@bosun_display` option — those still require polling).
     SessionRenamed { id: String, name: String },
@@ -165,6 +179,22 @@ impl ControlParser {
                     name: name.to_string(),
                 });
             }
+        }
+        if let Some(rest) = line.strip_prefix("%client-session-changed ") {
+            if let Some((client, rest)) = split_once_space(rest) {
+                if let Some((id, name)) = split_once_space(rest) {
+                    return Some(Notification::ClientSessionChanged {
+                        client: client.to_string(),
+                        session_id: id.to_string(),
+                        name: name.to_string(),
+                    });
+                }
+            }
+        }
+        if let Some(rest) = line.strip_prefix("%client-detached ") {
+            return Some(Notification::ClientDetached {
+                client: rest.trim().to_string(),
+            });
         }
         if let Some(rest) = line.strip_prefix("%session-renamed ") {
             if let Some((id, name)) = split_once_space(rest) {
@@ -287,6 +317,28 @@ mod tests {
             vec![Notification::SessionChanged {
                 id: "$3".into(),
                 name: "work".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_client_session_changed() {
+        assert_eq!(
+            parse_all("%client-session-changed /dev/ttys026 $4 bosun-api 2-1a2b3c4d"),
+            vec![Notification::ClientSessionChanged {
+                client: "/dev/ttys026".into(),
+                session_id: "$4".into(),
+                name: "bosun-api 2-1a2b3c4d".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_client_detached() {
+        assert_eq!(
+            parse_all("%client-detached /dev/ttys026"),
+            vec![Notification::ClientDetached {
+                client: "/dev/ttys026".into(),
             }]
         );
     }

@@ -213,6 +213,20 @@ pub enum ServerMsg {
         seq: u64,
         message: String,
     },
+    /// The tmux client on terminal `tty` is now on `session`: it
+    /// attached, or something moved it (`switch-client`, a key binding
+    /// typed inside it). Sent for every terminal client on Bosun's tmux
+    /// server, including when the session didn't change.
+    ClientSession {
+        seq: u64,
+        tty: String,
+        session: String,
+    },
+    /// The tmux client on terminal `tty` detached.
+    ClientDetached {
+        seq: u64,
+        tty: String,
+    },
     Ack(Ack),
     /// A protocol-level problem. `protocol_mismatch` and `no_hello`
     /// close the connection.
@@ -1217,6 +1231,20 @@ mod tests {
         round_trip_server(ServerMsg::Notice {
             seq: 9,
             message: "created x".into(),
+        });
+        let moved = ServerMsg::ClientSession {
+            seq: 11,
+            tty: "/dev/ttys026".into(),
+            session: "bosun-api-1a2b3c4d".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&moved).unwrap(),
+            serde_json::json!({"t": "client_session", "seq": 11, "tty": "/dev/ttys026", "session": "bosun-api-1a2b3c4d"})
+        );
+        round_trip_server(moved);
+        round_trip_server(ServerMsg::ClientDetached {
+            seq: 12,
+            tty: "/dev/ttys026".into(),
         });
         round_trip_server(ServerMsg::Ack(Ack {
             id: 7,
