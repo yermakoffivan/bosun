@@ -86,16 +86,8 @@ class TestKit {
 
     /// The pane's visible text, straight from tmux (independent of the app's rendering).
     func pane(_ session: String) -> String {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: Paths.tmux)
-        p.arguments = (tmuxSocket.map { ["-L", $0] } ?? []) + ["capture-pane", "-p", "-J", "-t", "=\(session):"]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = FileHandle.nullDevice
-        try? p.run()
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return String(decoding: data, as: UTF8.self)
+        // With a timeout, so a slow tmux can never block the main thread for good.
+        ShellEnv.run(Paths.tmux, (tmuxSocket.map { ["-L", $0] } ?? []) + ["capture-pane", "-p", "-J", "-t", "=\(session):"], timeout: 3) ?? ""
     }
 
     func tmux(_ args: [String]) {
@@ -305,9 +297,11 @@ final class FocusTest: TestKit {
         await showOnly(api)
         r.check("start: the active terminal is first responder", firstResponderIsActiveTerminal)
 
-        // --only a,b runs just those of the later sections (sheet, empty, tiledrag, sidebardrag, shortcuts).
+        // --only a,b runs just those sections (clientmoves, sheet, empty, tiledrag, sidebardrag, shortcuts).
         if let only = argValue("--only") {
-            await layoutSections(Set(only.split(separator: ",").map(String.init)))
+            let parts = Set(only.split(separator: ",").map(String.init))
+            if parts.contains("clientmoves") { await clientMoves(api: api, docs: docs, review1: review1) }
+            await layoutSections(parts)
             await finish()
             return
         }
@@ -677,7 +671,7 @@ final class FocusTest: TestKit {
         await key(18, "1")
     }
 
-    private func clientMoves(api: String, docs: String, review1: String) async {
+    func clientMoves(api: String, docs: String, review1: String) async {
         let jumpTarget = tmuxOut(["list-keys", "-T", "prefix", "1"]).components(separatedBy: " ").last?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard jumpTarget == api else {
             r.check("prefix 1 jumps to api in the fixture", false, tmuxOut(["list-keys", "-T", "prefix", "1"]))

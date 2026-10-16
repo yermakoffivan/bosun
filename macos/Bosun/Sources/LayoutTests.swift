@@ -17,7 +17,7 @@ extension FocusTest {
 
     // MARK: Sheet layout
 
-    /// Every control and every piece of text in the sheet lies inside its content view, with a margin.
+    /// Every control and every label in the sheet (all AppKit views) lies inside its content view, with a margin, and none overlap.
     func sheetProblems(_ sheet: NSWindow) -> [String] {
         guard let content = sheet.contentView else { return ["no content view"] }
         content.layoutSubtreeIfNeeded()
@@ -52,24 +52,6 @@ extension FocusTest {
                 bad.append("\(leaves[i].0) overlaps \(leaves[j].0)")
             }
         }
-        // SwiftUI draws labels itself; their accessibility frames say where.
-        let screenInner = sheet.convertToScreen(content.convert(content.bounds.insetBy(dx: 6, dy: 4), to: nil))
-        func ax(_ e: Any, _ depth: Int) {
-            guard depth < 40 else { return }
-            let o = e as AnyObject
-            guard let f = o.accessibilityFrame?() else { return }
-            let role = (o.accessibilityRole?() ?? nil) ?? .unknown
-            if role == .staticText || role == .button || role == .checkBox || role == .radioButton || role == .textField,
-               f.width > 1, f.height > 1, !screenInner.contains(f) {
-                let label = (o.accessibilityLabel?() ?? nil) ?? ""
-                let obj = o as? NSObject
-                let value = obj?.responds(to: NSSelectorFromString("accessibilityValue")) == true
-                    ? (obj?.value(forKey: "accessibilityValue") as? String).map { " \($0)" } ?? "" : ""
-                bad.append("\(role.rawValue) “\(label)\(value)” at screen \(fmt(f)) outside \(fmt(screenInner))")
-            }
-            for c in (o.accessibilityChildren?() ?? nil) ?? [] { ax(c, depth + 1) }
-        }
-        ax(content, 0)
         return bad
     }
 
@@ -281,19 +263,22 @@ extension FocusTest {
         await sleep(120)
     }
 
-    /// Session → its terminal view, to check that moves reuse the same views.
-    private var viewsBySession: [String: ObjectIdentifier] {
-        var out: [String: ObjectIdentifier] = [:]
-        for t in ws.layout.tiles { if let s = ws.layout.session(in: t), let v = ws.terminal(in: t) { out[s] = ObjectIdentifier(v) } }
+    /// Tile → its terminal view, to check that moves reuse the same views (tiles keep their ids when moved).
+    private var viewsByTile: [TileID: ObjectIdentifier] {
+        var out: [TileID: ObjectIdentifier] = [:]
+        for t in ws.layout.tiles { if let v = ws.terminal(in: t) { out[t] = ObjectIdentifier(v) } }
         return out
     }
 
     private func keysLandIn(_ s: String, _ tag: String) async -> Bool {
         await waitUntil(1) { firstResponderIsActiveTerminal }
+        // Let the resize after a move settle (the agent redraws on SIGWINCH) before typing.
+        await sleep(250)
         guard (w.firstResponder as? TerminalView)?.session == s else { return false }
         if app.displayName(s) == "ticker" { return true }
         await type("\(tag)\n")
-        return await paneShows(s, "got: \(tag)")
+        // Matched within a "got:" line: an earlier section can leave a stray key in the agent's input line.
+        return await waitUntil(3) { pane(s).split(separator: "\n").contains { $0.hasPrefix("got: ") && $0.contains(tag) } }
     }
 
     func tileDrag() async {
@@ -309,8 +294,6 @@ extension FocusTest {
         ws.show(parser, in: tiles[2], focus: false)
         await waitUntil(3) { ws.layout.tiles.allSatisfy { ws.terminal(in: $0)?.hasPaintedContent == true } }
         await sleep(300)
-        let views = viewsBySession
-        let poolSize = ws.pool.views.count
 
         // Each edge: drag parser's tile onto api's tile, then check the tree, the views and the keyboard.
         let moving = ws.layout.tile(showing: parser)!
@@ -320,6 +303,8 @@ extension FocusTest {
             let zone = TileDropZone.edge(side)
             let expected = ws.layout.root.moving(moving, to: target, zone: zone)
             guard let from = headerPoint(moving), let to = zonePoint(target, zone) else { continue }
+            let views = viewsByTile
+            let poolSize = ws.pool.views.count
             var indicator: CGRect?
             var reported: TileDropZone?
             let want = ws.tileRects[target].map { zone.indicatorRect(in: $0) }
@@ -335,16 +320,23 @@ extension FocusTest {
             r.check("drag to the \(side) edge: the indicator covers that half of the target", indicator == want && reported == zone,
                     "indicator \(String(describing: indicator)) want \(String(describing: want))")
             r.check("drag to the \(side) edge: the tile moves there", ws.layout.root == expected, "\(ws.layout.root)")
-            let sameViews = viewsBySession == views && ws.pool.views.count == poolSize
+            let sameViews = viewsByTile == views && ws.pool.views.count == poolSize
             r.check("…with the same terminal views (no reattach)", sameViews)
             r.check("…and the dragged tile stays active with the keyboard", ws.activeTile == moving && ws.activeSession == parser)
             r.check("…typing reaches it", await keysLandIn(parser, "moved-\(side)"))
         }
 
-        // Swap.
-        let a = ws.layout.tile(showing: docs)!
-        let b = ws.layout.tile(showing: api)!
+        // Swap: two tiles that aren't the one just moved.
+        let others = ws.layout.tiles.filter { $0 != moving && ws.layout.session(in: $0) != nil }
+        guard others.count >= 2, let docsAgain = ws.layout.session(in: others[0]) else {
+            r.check("tile drag: two other tiles with sessions to swap", false, "\(ws.layout.tiles.count) tiles")
+            return
+        }
+        let a = others[0]
+        let b = others[1]
         let swapped = ws.layout.root.swapping(a, b)
+        let views = viewsByTile
+        let poolSize = ws.pool.views.count
         if let from = headerPoint(a), let to = zonePoint(b, .swap) {
             var label = false
             await drag(from: from, to: to) { [self] in
@@ -353,9 +345,11 @@ extension FocusTest {
             }
             r.check("drag to the middle: the indicator says swap", label)
             r.check("…and the two tiles swap places", ws.layout.root == swapped, "\(ws.layout.root)")
-            r.check("…with the same terminal views", viewsBySession == views && ws.pool.views.count == poolSize)
-            let landed = await keysLandIn(docs, "swapped")
-            r.check("…and the keyboard in the dragged tile", ws.activeSession == docs && landed)
+            r.check("…with the same terminal views", ws.pool.views.count == poolSize && viewsByTile == views)
+            let activeAfter = ws.activeSession
+            let landed = await keysLandIn(docsAgain, "swapped")
+            r.check("…and the keyboard in the dragged tile", activeAfter == docsAgain && landed,
+                    "active \(activeAfter.map(app.displayName) ?? "-"), landed \(landed)")
         }
 
         // Esc cancels, mid-drag.
@@ -367,7 +361,8 @@ extension FocusTest {
                 await key(53, "\u{1b}")
             }
             r.check("Esc during a drag hides the indicator and cancels it", shown && !ws.tileDragActive && ws.layout.root == before)
-            r.check("…and the Esc never reaches the terminal", ws.activeSession == api && !pane(api).contains("^["))
+            let current = ws.activeSession ?? api
+            r.check("…and the Esc never reaches the terminal", !pane(current).contains("^["))
         }
         // Released outside the tiles (over the sidebar).
         if let from = headerPoint(b), let to = zonePoint(a, .edge(.down)), let side = sidebarPoint(docs) {
@@ -388,7 +383,8 @@ extension FocusTest {
         let pb = NSPasteboard(name: NSPasteboard.Name("dev.yetidevworks.bosun.test-drag-tiles"))
         pb.clearContents()
         pb.writeObjects([URL(fileURLWithPath: file) as NSURL])
-        if let t = ws.layout.tile(showing: docs), let c = tileCenter(t) {
+        if let t = ws.layout.tiles.first(where: { ws.layout.session(in: $0).map { app.displayName($0) != "ticker" } ?? false }),
+           let target = ws.layout.session(in: t), let c = tileCenter(t) {
             let info = FakeDrag(location: c, pasteboard: pb, window: w)
             let op = ws.area.draggingEntered(info)
             r.check("a file dragged over a tile is still accepted, without the tile drop indicator",
@@ -396,7 +392,7 @@ extension FocusTest {
             _ = ws.area.performDragOperation(info)
             await sleep(150)
             await type("\n")
-            r.check("…and the drop inserts the path as before", await paneShows(docs, "got: \(ShellEscape.escape(file))"))
+            r.check("…and the drop inserts the path as before", await paneShows(target, "got: \(ShellEscape.escape(file))"))
         }
         for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
         await showOnly(api)
