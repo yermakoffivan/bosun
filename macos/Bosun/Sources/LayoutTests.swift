@@ -10,6 +10,7 @@ extension FocusTest {
         func wants(_ s: String) -> Bool { only?.contains(s) ?? true }
         if wants("sheet") { await sheetLayout() }
         if wants("empty") { await emptyState() }
+        if wants("tiledrag") { await tileDrag() }
     }
 
     // MARK: Sheet layout
@@ -225,6 +226,176 @@ extension FocusTest {
             ws.dividerDragEnded()
         }
         r.check("an empty tile at every width from narrow to wide keeps its text inside", bad.isEmpty, bad.prefix(4).joined(separator: "; "))
+        for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
+        await showOnly(api)
+    }
+
+    // MARK: Tile drag
+
+    /// A point on a tile's header strip, in window coordinates.
+    func headerPoint(_ t: TileID) -> NSPoint? {
+        guard let r = ws.tileRects[t] else { return nil }
+        return ws.area.convert(NSPoint(x: r.minX + r.width * 0.6, y: r.minY + Workspace.headerHeight / 2), to: nil)
+    }
+
+    /// A point in a tile's drop zone, in window coordinates.
+    func zonePoint(_ t: TileID, _ zone: TileDropZone) -> NSPoint? {
+        guard let r = ws.tileRects[t] else { return nil }
+        let p: NSPoint
+        switch zone {
+        case .swap: p = NSPoint(x: r.midX, y: r.midY)
+        case .edge(.left): p = NSPoint(x: r.minX + r.width * 0.08, y: r.midY)
+        case .edge(.right): p = NSPoint(x: r.maxX - r.width * 0.08, y: r.midY)
+        case .edge(.up): p = NSPoint(x: r.midX, y: r.minY + r.height * 0.08)
+        case .edge(.down): p = NSPoint(x: r.midX, y: r.maxY - r.height * 0.08)
+        }
+        return ws.area.convert(p, to: nil)
+    }
+
+    private func post(_ type: NSEvent.EventType, _ p: NSPoint) {
+        if let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                      windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+                                      pressure: type == .leftMouseUp ? 0 : 1) {
+            NSApp.postEvent(e, atStart: false)
+        }
+    }
+
+    /// Press on `from`, move to `to` in steps, run `during` while still held, then release at `release ?? to`.
+    func drag(from: NSPoint, to: NSPoint, release: NSPoint? = nil, during: (() async -> Void)? = nil) async {
+        post(.leftMouseDown, from)
+        await sleep(30)
+        for i in 1...8 {
+            let f = CGFloat(i) / 8
+            post(.leftMouseDragged, NSPoint(x: from.x + (to.x - from.x) * f, y: from.y + (to.y - from.y) * f))
+            await sleep(15)
+        }
+        await sleep(60)
+        await during?()
+        if let release {
+            post(.leftMouseDragged, release)
+            await sleep(40)
+        }
+        post(.leftMouseUp, release ?? to)
+        await sleep(120)
+    }
+
+    /// Session → its terminal view, to check that moves reuse the same views.
+    private var viewsBySession: [String: ObjectIdentifier] {
+        var out: [String: ObjectIdentifier] = [:]
+        for t in ws.layout.tiles { if let s = ws.layout.session(in: t), let v = ws.terminal(in: t) { out[s] = ObjectIdentifier(v) } }
+        return out
+    }
+
+    private func keysLandIn(_ s: String, _ tag: String) async -> Bool {
+        await waitUntil(1) { firstResponderIsActiveTerminal }
+        guard (w.firstResponder as? TerminalView)?.session == s else { return false }
+        if app.displayName(s) == "ticker" { return true }
+        await type("\(tag)\n")
+        return await paneShows(s, "got: \(tag)")
+    }
+
+    func tileDrag() async {
+        guard let api = session("api"), let docs = session("docs"), let parser = session("parser") else { return }
+        await showOnly(api)
+        await cmd("d")
+        await cmd("d", [.shift])
+        await waitUntil(3) { ws.layout.count == 3 }
+        // Fixed sessions: api | (docs / parser).
+        let tiles = ws.layout.tiles
+        ws.show(api, in: tiles[0], focus: false)
+        ws.show(docs, in: tiles[1], focus: false)
+        ws.show(parser, in: tiles[2], focus: false)
+        await waitUntil(3) { ws.layout.tiles.allSatisfy { ws.terminal(in: $0)?.hasPaintedContent == true } }
+        await sleep(300)
+        let views = viewsBySession
+        let poolSize = ws.pool.views.count
+
+        // Each edge: drag parser's tile onto api's tile, then check the tree, the views and the keyboard.
+        let moving = ws.layout.tile(showing: parser)!
+        let target = ws.layout.tile(showing: api)!
+        var edgeShot = false
+        for side in [Direction.left, .right, .up, .down] {
+            let zone = TileDropZone.edge(side)
+            let expected = ws.layout.root.moving(moving, to: target, zone: zone)
+            guard let from = headerPoint(moving), let to = zonePoint(target, zone) else { continue }
+            var indicator: CGRect?
+            var reported: TileDropZone?
+            let want = ws.tileRects[target].map { zone.indicatorRect(in: $0) }
+            await drag(from: from, to: to) { [self] in
+                indicator = ws.dropIndicator.shownRect
+                reported = ws.tileDropTarget?.zone
+                if !edgeShot, side == .right { edgeShot = true; shot("15-tile-drop-edge") }
+            }
+            if expected == nil {
+                r.check("drag to the \(side) edge: a no-op drop shows nothing and changes nothing", indicator == nil && reported == nil)
+                continue
+            }
+            r.check("drag to the \(side) edge: the indicator covers that half of the target", indicator == want && reported == zone,
+                    "indicator \(String(describing: indicator)) want \(String(describing: want))")
+            r.check("drag to the \(side) edge: the tile moves there", ws.layout.root == expected, "\(ws.layout.root)")
+            let sameViews = viewsBySession == views && ws.pool.views.count == poolSize
+            r.check("…with the same terminal views (no reattach)", sameViews)
+            r.check("…and the dragged tile stays active with the keyboard", ws.activeTile == moving && ws.activeSession == parser)
+            r.check("…typing reaches it", await keysLandIn(parser, "moved-\(side)"))
+        }
+
+        // Swap.
+        let a = ws.layout.tile(showing: docs)!
+        let b = ws.layout.tile(showing: api)!
+        let swapped = ws.layout.root.swapping(a, b)
+        if let from = headerPoint(a), let to = zonePoint(b, .swap) {
+            var label = false
+            await drag(from: from, to: to) { [self] in
+                label = ws.dropIndicator.showsSwap
+                shot("16-tile-drop-swap")
+            }
+            r.check("drag to the middle: the indicator says swap", label)
+            r.check("…and the two tiles swap places", ws.layout.root == swapped, "\(ws.layout.root)")
+            r.check("…with the same terminal views", viewsBySession == views && ws.pool.views.count == poolSize)
+            let landed = await keysLandIn(docs, "swapped")
+            r.check("…and the keyboard in the dragged tile", ws.activeSession == docs && landed)
+        }
+
+        // Esc cancels, mid-drag.
+        let before = ws.layout.root
+        if let from = headerPoint(b), let to = zonePoint(a, .edge(.left)) {
+            var shown = false
+            await drag(from: from, to: to) { [self] in
+                shown = ws.dropIndicator.shownRect != nil
+                await key(53, "\u{1b}")
+            }
+            r.check("Esc during a drag hides the indicator and cancels it", shown && !ws.tileDragActive && ws.layout.root == before)
+            r.check("…and the Esc never reaches the terminal", ws.activeSession == api && !pane(api).contains("^["))
+        }
+        // Released outside the tiles (over the sidebar).
+        if let from = headerPoint(b), let to = zonePoint(a, .edge(.down)), let side = sidebarPoint(docs) {
+            await drag(from: from, to: to, release: side)
+            r.check("a drop outside the tiles cancels", ws.layout.root == before && !ws.tileDragActive && ws.dropIndicator.superview == nil)
+        }
+        // Onto itself.
+        if let from = headerPoint(b), let to = zonePoint(b, .edge(.left)) {
+            var shown = true
+            await drag(from: from, to: to) { [self] in shown = ws.dropIndicator.shownRect != nil }
+            r.check("a drop onto itself shows nothing and does nothing", !shown && ws.layout.root == before)
+        }
+        r.check("after the drags the keyboard is in the active terminal", firstResponderIsActiveTerminal)
+
+        // File drops keep working and never show the tile indicator.
+        let file = NSTemporaryDirectory() + "bosun tiledrag.txt"
+        FileManager.default.createFile(atPath: file, contents: Data("x".utf8))
+        let pb = NSPasteboard(name: NSPasteboard.Name("dev.yetidevworks.bosun.test-drag-tiles"))
+        pb.clearContents()
+        pb.writeObjects([URL(fileURLWithPath: file) as NSURL])
+        if let t = ws.layout.tile(showing: docs), let c = tileCenter(t) {
+            let info = FakeDrag(location: c, pasteboard: pb, window: w)
+            let op = ws.area.draggingEntered(info)
+            r.check("a file dragged over a tile is still accepted, without the tile drop indicator",
+                    op == .copy && ws.dropIndicator.shownRect == nil && ws.dropIndicator.superview == nil)
+            _ = ws.area.performDragOperation(info)
+            await sleep(150)
+            await type("\n")
+            r.check("…and the drop inserts the path as before", await paneShows(docs, "got: \(ShellEscape.escape(file))"))
+        }
         for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
         await showOnly(api)
     }

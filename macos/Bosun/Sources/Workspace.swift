@@ -19,6 +19,9 @@ final class Workspace {
     static let inset: CGFloat = 5
     private var windowKey = true
     private var dropTile: TileID?
+    /// A tile being dragged by its header, and where it would land (see `tileDragMoved`).
+    private var tileDrag: (tile: TileID, target: TileID?, zone: TileDropZone?)?
+    let dropIndicator = TileDropIndicatorView()
     /// Sessions whose deferred agent launch waits for their terminal to attach.
     private var pendingLaunch: [String: Bool?] = [:]
     /// Hooks for the self-test: (session, warm, seconds to first frame / first painted frame).
@@ -370,6 +373,77 @@ final class Workspace {
         save()
     }
 
+    // MARK: Moving tiles by their header
+
+    var tileDragActive: Bool { tileDrag != nil }
+    /// Where the dragged tile would land right now (for the test modes): nil while a drop would do nothing.
+    var tileDropTarget: (target: TileID, zone: TileDropZone)? {
+        guard let d = tileDrag, let t = d.target, let z = d.zone else { return nil }
+        return (t, z)
+    }
+
+    /// A header drag passed the threshold. Only with two or more tiles, and never while the keyboard is lent out.
+    func tileDragBegan(_ tile: TileID) -> Bool {
+        guard layout.count > 1, layout.tiles.contains(tile), app.focus.exception == nil else { return false }
+        tileDrag = (tile, nil, nil)
+        area.addSubview(dropIndicator, positioned: .above, relativeTo: nil)
+        dropIndicator.frame = area.bounds
+        dropIndicator.show(nil, swap: false, theme: app.theme)
+        NSCursor.closedHand.push()
+        return true
+    }
+
+    /// The pointer moved during a tile drag (`p` in the area's coordinates). The indicator shows where
+    /// the tile would go, and only for a drop that changes something.
+    func tileDragMoved(to p: NSPoint) {
+        guard var d = tileDrag else { return }
+        var rect: CGRect?
+        d.target = nil
+        d.zone = nil
+        if let t = tile(at: p), let r = lastLayout.tiles[t] {
+            let zone = TileDropZone.at(p, in: r)
+            if layout.root.moving(d.tile, to: t, zone: zone) != nil {
+                d.target = t
+                d.zone = zone
+                rect = zone.indicatorRect(in: r)
+            }
+        }
+        tileDrag = d
+        dropIndicator.show(rect, swap: d.zone == .swap, theme: app.theme)
+    }
+
+    /// Mouse up: move the tile if the pointer is over a drop that changes something; anywhere else cancels.
+    func tileDragEnded(at p: NSPoint) {
+        guard tileDrag != nil else { return }
+        tileDragMoved(to: p)
+        let d = tileDrag!
+        endTileDrag()
+        if let target = d.target, let zone = d.zone { moveTile(d.tile, to: target, zone: zone) }
+    }
+
+    /// Esc during a drag.
+    func cancelTileDrag() {
+        guard tileDrag != nil else { return }
+        endTileDrag()
+    }
+
+    private func endTileDrag() {
+        tileDrag = nil
+        dropIndicator.show(nil, swap: false, theme: app.theme)
+        dropIndicator.removeFromSuperview()
+        NSCursor.pop()
+    }
+
+    /// Move a tile in the tree. Its terminal view goes with it (no reattach); it stays active and keeps the keyboard.
+    func moveTile(_ tile: TileID, to target: TileID, zone: TileDropZone) {
+        guard layout.move(tile, to: target, zone: zone) else { return }
+        app.focus.setTiles(count: layout.count, active: layout.active)
+        relayout()
+        focusActiveTerminal()
+        app.workspaceChanged()
+        save()
+    }
+
     // MARK: Pointer
 
     func tileClicked(_ tile: TileID) {
@@ -478,6 +552,18 @@ final class TileChromeView: NSView {
             guard let self else { return }
             self.workspace.tileClicked(self.tile)
         }
+        header.onDragBegan = { [weak self] in
+            guard let self else { return false }
+            return self.workspace.tileDragBegan(self.tile)
+        }
+        header.onDragMoved = { [weak self] e in
+            guard let self else { return }
+            self.workspace.tileDragMoved(to: self.workspace.area.convert(e.locationInWindow, from: nil))
+        }
+        header.onDragEnded = { [weak self] e in
+            guard let self else { return }
+            self.workspace.tileDragEnded(at: self.workspace.area.convert(e.locationInWindow, from: nil))
+        }
         header.menuProvider = { [weak self] in
             guard let self, let s = self.session else { return nil }
             return self.workspace.app.sessionMenu(for: s)
@@ -508,6 +594,7 @@ final class TileChromeView: NSView {
         self.session = session
         isActive = active
         let app = workspace.app
+        header.draggable = showRing
         header.update(name: session.map { app.displayName($0) }, group: session.flatMap { app.groupLabel($0) },
                       state: session.map { app.displayState($0) }, detail: session.flatMap { app.statusDetail($0) },
                       exited: session.map { !app.isAlive($0) } ?? false, active: active && showRing, theme: theme)
@@ -576,6 +663,15 @@ final class TileHeaderView: NSView {
     private let bottomLine = CALayer()
     var onClick: (@MainActor () -> Void)?
     var menuProvider: (@MainActor () -> NSMenu?)?
+    /// Dragging the header moves the tile (only with two or more tiles).
+    var onDragBegan: (@MainActor () -> Bool)?
+    var onDragMoved: (@MainActor (NSEvent) -> Void)?
+    var onDragEnded: (@MainActor (NSEvent) -> Void)?
+    var draggable = false {
+        didSet { if draggable != oldValue { window?.invalidateCursorRects(for: self) } }
+    }
+    private var downAt: NSPoint?
+    private var dragging = false
 
     override var isFlipped: Bool { true }
 
@@ -655,10 +751,82 @@ final class TileHeaderView: NSView {
         needsLayout = true
     }
 
-    override func mouseDown(with event: NSEvent) { onClick?() }
+    override func mouseDown(with event: NSEvent) {
+        downAt = event.locationInWindow
+        dragging = false
+        onClick?()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let start = downAt else { return }
+        if !dragging {
+            let p = event.locationInWindow
+            guard hypot(p.x - start.x, p.y - start.y) >= 4 else { return }
+            guard onDragBegan?() == true else { downAt = nil; return }
+            dragging = true
+        }
+        onDragMoved?(event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if dragging { onDragEnded?(event) }
+        downAt = nil
+        dragging = false
+    }
+
+    override func resetCursorRects() {
+        if draggable { addCursorRect(bounds, cursor: .openHand) }
+    }
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func menu(for event: NSEvent) -> NSMenu? { menuProvider?() }
+}
+
+/// The translucent box over the tile a dragged tile would land on: the half it would take, or the
+/// whole tile (inset) with "Swap" for a swap. Never takes clicks.
+final class TileDropIndicatorView: NSView {
+    private let box = CALayer()
+    private let label = CATextLayer()
+    private(set) var shownRect: CGRect?
+    private(set) var showsSwap = false
+
+    override var isFlipped: Bool { true }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.addSublayer(box)
+        box.addSublayer(label)
+        box.cornerRadius = 8
+        box.borderWidth = 2
+        label.alignmentMode = .center
+        label.fontSize = 13
+        label.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        label.string = "Swap"
+        box.isHidden = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func show(_ rect: CGRect?, swap: Bool, theme: AppTheme) {
+        shownRect = rect
+        showsSwap = rect != nil && swap
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard let rect else { box.isHidden = true; return }
+        box.isHidden = false
+        box.frame = rect.insetBy(dx: swap ? 10 : 5, dy: swap ? 10 : 5)
+        box.backgroundColor = theme.accent.withAlphaComponent(0.2).cgColor
+        box.borderColor = theme.accent.withAlphaComponent(0.85).cgColor
+        label.isHidden = !swap
+        label.foregroundColor = theme.text.cgColor
+        label.contentsScale = window?.backingScaleFactor ?? 2
+        label.frame = CGRect(x: 0, y: (box.bounds.height - 18) / 2, width: box.bounds.width, height: 18)
+    }
 }
 
 /// What an empty tile or an exited session shows. Text wraps and stays centred however narrow the

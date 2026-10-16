@@ -214,6 +214,11 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             print("key \(e.keyCode) mods=\(e.modifierFlags.rawValue & 0xFFFF0000) key=\(windowIsKey) owns=\(focus.terminalOwnsKeyboard) " +
                   "fr=\((window.firstResponder as? TerminalView).map { displayName($0.session) } ?? String(describing: window.firstResponder.map { type(of: $0) })) active=\(workspace.activeSession.map(displayName) ?? "-")")
         }
+        // Esc while a tile is being dragged by its header cancels the drag (the key never reaches the terminal).
+        if e.window === window, workspace.tileDragActive, e.keyCode == 53 {
+            workspace.cancelTileDrag()
+            return nil
+        }
         guard e.window === window, windowIsKey, focus.terminalOwnsKeyboard, !(window.firstResponder is NSText) else { return e }
         let term = workspace.activeTerminal
         if let term, term.hasMarkedText() { return e }
