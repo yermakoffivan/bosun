@@ -18,6 +18,8 @@ pub struct Shortcut {
     pub event: KeyEvent,
     pub label: String,
     pub tmux: String,
+    /// The value as written in `config.toml`, trimmed.
+    pub written: String,
 }
 
 impl Shortcut {
@@ -88,7 +90,18 @@ impl Shortcut {
             event: KeyEvent::new(code, modifiers),
             label,
             tmux,
+            written: value.to_string(),
         }))
+    }
+
+    /// This shortcut as a `[keybindings]` value: the canonical label
+    /// (`Ctrl+Shift+Right`) when it parses back to the same key, which
+    /// it always should, and otherwise the value as the user wrote it.
+    pub fn config_value(&self) -> String {
+        match Self::parse(&self.label) {
+            Ok(Some(back)) if back.event == self.event => self.label.clone(),
+            _ => self.written.clone(),
+        }
     }
 
     pub fn matches(&self, event: KeyEvent) -> bool {
@@ -173,6 +186,13 @@ impl KeyBindings {
             .iter()
             .find(|(a, _)| *a == action)
             .map(|(_, key)| key)
+    }
+
+    /// The shortcut for `action` as a `[keybindings]` value (see
+    /// [`Shortcut::config_value`]), or `None` when the action is
+    /// disabled.
+    pub fn config_value(&self, action: Action) -> Option<String> {
+        self.get(action).map(Shortcut::config_value)
     }
 
     pub fn label(&self, action: Action) -> &str {
@@ -285,6 +305,66 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn config_values_are_canonical_and_parse_back() {
+        let config = BindingsConfig {
+            next_tab: " alt+ctrl+shift+right ".into(),
+            previous_tab: "none".into(),
+            previous_session: "option+f5".into(),
+            next_session: "CONTROL+N".into(),
+            send_next_key: "ctrl+v".into(),
+        };
+        let keys = config.resolve().unwrap();
+        assert_eq!(
+            keys.config_value(Action::NextTab).as_deref(),
+            Some("Ctrl+Alt+Shift+Right")
+        );
+        assert_eq!(keys.config_value(Action::PreviousTab), None);
+        assert_eq!(
+            keys.config_value(Action::PreviousSession).as_deref(),
+            Some("Alt+F5")
+        );
+        assert_eq!(
+            keys.config_value(Action::NextSession).as_deref(),
+            Some("Ctrl+n")
+        );
+        assert_eq!(
+            keys.config_value(Action::SendNextKey).as_deref(),
+            Some("Ctrl+v")
+        );
+        for (_, shortcut) in &keys.0 {
+            let back = Shortcut::parse(&shortcut.config_value()).unwrap().unwrap();
+            assert_eq!(back.event, shortcut.event);
+        }
+        // Defaults read as the documented strings.
+        let defaults = KeyBindings::default();
+        assert_eq!(
+            [
+                Action::PreviousTab,
+                Action::NextTab,
+                Action::PreviousSession,
+                Action::NextSession,
+                Action::SendNextKey,
+            ]
+            .map(|a| defaults.config_value(a).unwrap()),
+            [
+                "Shift+Left",
+                "Shift+Right",
+                "Shift+Up",
+                "Shift+Down",
+                "Ctrl+v"
+            ]
+        );
+    }
+
+    #[test]
+    fn config_value_falls_back_to_what_was_written() {
+        let mut odd = Shortcut::parse("Ctrl+v").unwrap().unwrap();
+        odd.label = "not a key".into();
+        odd.written = "ctrl+V".into();
+        assert_eq!(odd.config_value(), "ctrl+V");
     }
 
     #[test]

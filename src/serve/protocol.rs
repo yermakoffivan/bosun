@@ -203,6 +203,10 @@ pub enum ServerMsg {
         seq: u64,
         themes: Vec<ThemeEntry>,
     },
+    Keybindings {
+        seq: u64,
+        keybindings: KeybindingsWire,
+    },
     /// A human-readable message from Bosun (the TUI shows these in its
     /// status bar): "created …", errors from background work, etc.
     Notice {
@@ -229,6 +233,21 @@ pub struct Snapshot {
     pub config: ConfigWire,
     pub theme: ThemeWire,
     pub themes: Vec<ThemeEntry>,
+    #[serde(default)]
+    pub keybindings: KeybindingsWire,
+}
+
+/// The navigation shortcuts from `[keybindings]` in `config.toml`, as
+/// the strings a user would write there (`Shift+Left`, `Ctrl+v`), so a
+/// GUI honours the same remaps as the TUI. `None` (JSON `null`) is an
+/// action the user disabled. Every field is always sent.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct KeybindingsWire {
+    pub previous_tab: Option<String>,
+    pub next_tab: Option<String>,
+    pub previous_session: Option<String>,
+    pub next_session: Option<String>,
+    pub send_next_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -891,6 +910,19 @@ fn xterm_256(i: u8) -> (u8, u8, u8) {
     }
 }
 
+impl From<&crate::keybindings::KeyBindings> for KeybindingsWire {
+    fn from(k: &crate::keybindings::KeyBindings) -> Self {
+        use crate::keybindings::Action;
+        Self {
+            previous_tab: k.config_value(Action::PreviousTab),
+            next_tab: k.config_value(Action::NextTab),
+            previous_session: k.config_value(Action::PreviousSession),
+            next_session: k.config_value(Action::NextSession),
+            send_next_key: k.config_value(Action::SendNextKey),
+        }
+    }
+}
+
 impl From<&crate::ui::Theme> for ThemeWire {
     fn from(t: &crate::ui::Theme) -> Self {
         Self {
@@ -1152,6 +1184,7 @@ mod tests {
             config: config.clone(),
             theme: theme.clone(),
             themes: themes.clone(),
+            keybindings: KeybindingsWire::default(),
         })));
         round_trip_server(ServerMsg::Sessions {
             seq: 2,
@@ -1170,6 +1203,10 @@ mod tests {
         round_trip_server(ServerMsg::Config { seq: 6, config });
         round_trip_server(ServerMsg::Theme { seq: 7, theme });
         round_trip_server(ServerMsg::Themes { seq: 8, themes });
+        round_trip_server(ServerMsg::Keybindings {
+            seq: 10,
+            keybindings: KeybindingsWire::from(&crate::keybindings::KeyBindings::default()),
+        });
         round_trip_server(ServerMsg::Notice {
             seq: 9,
             message: "created x".into(),
@@ -1190,6 +1227,32 @@ mod tests {
             code: "protocol_mismatch".into(),
             message: "update bosun".into(),
         });
+    }
+
+    #[test]
+    fn keybindings_match_the_documented_wire_form() {
+        let keys = crate::keybindings::BindingsConfig {
+            next_tab: "ctrl+shift+right".into(),
+            send_next_key: "none".into(),
+            ..Default::default()
+        }
+        .resolve()
+        .unwrap();
+        let msg = ServerMsg::Keybindings {
+            seq: 10,
+            keybindings: KeybindingsWire::from(&keys),
+        };
+        assert_eq!(
+            serde_json::to_value(&msg).unwrap(),
+            serde_json::json!({
+                "t": "keybindings", "seq": 10,
+                "keybindings": {
+                    "previous_tab": "Shift+Left", "next_tab": "Ctrl+Shift+Right",
+                    "previous_session": "Shift+Up", "next_session": "Shift+Down",
+                    "send_next_key": null
+                }
+            })
+        );
     }
 
     #[test]

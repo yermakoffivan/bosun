@@ -41,9 +41,9 @@ use crate::tmux::TokioTmuxClient;
 use crate::ui::Theme;
 
 use protocol::{
-    Ack, ClientMsg, CmdEnvelope, CmdOp, ConfigWire, PendingLaunchWire, RecentWire, ServerInfo,
-    ServerMsg, SessionWire, SettingWire, SidebarWire, Snapshot, SpecWire, StatusInfo, ThemeEntry,
-    ThemeSource, ThemeWire, PROTOCOL_VERSION,
+    Ack, ClientMsg, CmdEnvelope, CmdOp, ConfigWire, KeybindingsWire, PendingLaunchWire, RecentWire,
+    ServerInfo, ServerMsg, SessionWire, SettingWire, SidebarWire, Snapshot, SpecWire, StatusInfo,
+    ThemeEntry, ThemeSource, ThemeWire, PROTOCOL_VERSION,
 };
 
 /// Default for [`ServeOptions::idle_timeout`].
@@ -235,6 +235,7 @@ struct Published {
     config: ConfigWire,
     theme: ThemeWire,
     themes: Vec<ThemeEntry>,
+    keybindings: KeybindingsWire,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,6 +275,9 @@ struct Daemon {
     client: Arc<TokioTmuxClient>,
     cmd_tx: mpsc::UnboundedSender<Command>,
     theme: Theme,
+    /// `[keybindings]` from `config.toml`, resolved the way the TUI
+    /// resolves them (defaults when the table is invalid).
+    keybindings: KeybindingsWire,
     embed_enabled: bool,
     agent_hooks: bool,
     seq: u64,
@@ -316,6 +320,7 @@ impl Daemon {
         let theme = Theme::load(&config.theme, crate::config::user_themes_dir().as_deref());
         Self {
             app,
+            keybindings: KeybindingsWire::from(&config.keybindings),
             embed_enabled: config.embed_enabled,
             agent_hooks: config.agent_hooks,
             file_config: config.clone(),
@@ -437,6 +442,7 @@ impl Daemon {
             config: self.config_view(),
             theme: ThemeWire::from(&self.theme),
             themes: theme_entries(),
+            keybindings: self.keybindings.clone(),
         }
     }
 
@@ -534,6 +540,7 @@ impl Daemon {
             config: p.config,
             theme: p.theme,
             themes: p.themes,
+            keybindings: p.keybindings,
         }))
     }
 
@@ -614,6 +621,13 @@ impl Daemon {
             let msg = ServerMsg::Themes {
                 seq: self.next_seq(),
                 themes: cur.themes.clone(),
+            };
+            self.broadcast(&msg);
+        }
+        if cur.keybindings != prev.keybindings {
+            let msg = ServerMsg::Keybindings {
+                seq: self.next_seq(),
+                keybindings: cur.keybindings.clone(),
             };
             self.broadcast(&msg);
         }
@@ -1240,6 +1254,9 @@ impl Daemon {
         if new.session_history != old.session_history {
             self.app.session_history = new.session_history.clone();
         }
+        // `Config::load` already fell back to the defaults if the table
+        // is invalid, as the TUI does.
+        self.keybindings = KeybindingsWire::from(&new.keybindings);
     }
 }
 
