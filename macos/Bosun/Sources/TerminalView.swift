@@ -3,7 +3,7 @@ import BosunCore
 import Carbon
 import GhosttyKit
 
-/// The only class that talks to libghostty per terminal: one surface running `tmux attach` for one session.
+/// The only class that talks to libghostty per terminal: one `ghostty_surface_t` running `tmux attach` for one session.
 /// Keyboard and IME handling is a trimmed port of Ghostty's own SurfaceView_AppKit.swift.
 final class TerminalView: NSView, @preconcurrency NSTextInputClient {
     let session: String
@@ -69,7 +69,7 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// Free the surface. libghostty SIGHUPs the client if it is still running (slow: prefer `detachThenFree`).
+    /// Free the libghostty terminal. libghostty SIGHUPs the client if it is still running (slow: prefer `detachThenFree`).
     func destroy() {
         pendingSizeTimer?.invalidate()
         contentsObs = nil
@@ -80,8 +80,8 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
         removeFromSuperview()
     }
 
-    /// Detach the tmux client off the main thread, wait for it to exit, then free the surface.
-    /// Freeing a live surface SIGHUPs and polls on the main thread (~12 ms); this keeps that off it.
+    /// Detach the tmux client off the main thread, wait for it to exit, then free the libghostty terminal.
+    /// Freeing a live one SIGHUPs and polls on the main thread (~12 ms); this keeps that off it.
     func detachThenFree(socket: String?) {
         detaching = true
         onExit = nil
@@ -551,7 +551,7 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
         if event.modifierFlags.contains(.command), NSApp.mainMenu?.performKeyEquivalent(with: event) == true {
             return true
         }
-        // Ghostty keybinds that survived the overrides (font size, copy mode...) go to the surface.
+        // Ghostty keybinds that survived the overrides (font size, copy mode...) go to libghostty.
         var ev = TerminalView.keyEvent(event, GHOSTTY_ACTION_PRESS)
         var bflags = ghostty_binding_flags_e(0)
         let isBinding = (event.characters ?? "").withCString { ptr -> Bool in
