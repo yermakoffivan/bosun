@@ -148,7 +148,7 @@ you can click into and drive without leaving bosun.
 
 ## Requirements
 
-- tmux 3.2 or newer (tested against 3.6 and 3.7) — bosun drives tmux but does not
+- tmux 3.2 or newer (tested against 3.4 and 3.8) — bosun drives tmux but does not
   bundle it, and errors out at startup if it can't find it
 - Rust 1.80 or newer (only needed when building from source or
   installing via cargo)
