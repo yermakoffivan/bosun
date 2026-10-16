@@ -180,7 +180,7 @@ Removes one row from the recents list, by its `id`.
   "sections":[{"id":"sec-1","name":"Work","collapsed":false,"members":[]}]}}
 ```
 
-Replaces the sidebar model after a drag and drop reorder, a move between sections, a collapse toggle or a tab reorder. Send back the [sidebar](#sidebar) from the last snapshot or delta, changed; on tabs only `session` is read. Ids must be unique, every row needs at least one tab, `active` must be one of its tabs, and a session may appear only once. Sections and rows keep their ids. The change is written to `config.toml` (where the TUI reads it), and section membership is remembered by display name as it is in the TUI, so a session that is restarted or recreated lands back in its section. Sessions the model leaves out are added back as ungrouped rows on the next refresh.
+Replaces the sidebar model after a drag and drop reorder, a move between sections, a collapse toggle or a tab reorder. Send back the [sidebar](#sidebar) from the last snapshot or delta, changed; a row's `name` and, on tabs, everything but `session` are ignored. Ids must be unique, every row needs at least one tab, `active` must be one of its tabs, and a session may appear only once. Sections and rows keep their ids. The change is written to `config.toml` (where the TUI reads it), and section membership is remembered by display name as it is in the TUI, so a session that is restarted or recreated lands back in its section. Sessions the model leaves out are added back as ungrouped rows on the next refresh.
 
 #### `insert_section`
 
@@ -308,7 +308,7 @@ This is the state Bosun detects for the session itself. The TUI also shows an id
     "members":[…rows like the ones above…]}]}
 ```
 
-Ungrouped rows come first, then each section's header and rows, the same order as the TUI. Each row has one or more tabs; `active` is the session name of the shown tab. A tab with `alive: false` is a session that has ended; the TUI keeps such rows (as "exited") so they can be restarted, unless `remove_dead_sessions` is on. Its `display` is the best name Bosun can recover from the recents list. `banner_font` is left out when the section uses the global one.
+Ungrouped rows come first, then each section's header and rows, the same order as the TUI. Each row has one or more tabs; `active` is the session name of the shown tab. A row's `name` is its label as the TUI shows it: the display name of its active tab (for an exited tab, the name recovered from recents), so it changes when the active tab changes or is renamed. A tab with `alive: false` is a session that has ended; the TUI keeps such rows (as "exited") so they can be restarted, unless `remove_dead_sessions` is on. Its `display` is the best name Bosun can recover from the recents list. `banner_font` is left out when the section uses the global one.
 
 #### Recents
 

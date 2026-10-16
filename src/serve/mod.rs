@@ -1035,7 +1035,28 @@ impl Daemon {
 
     /// Adopt a sidebar a client sent. Section history follows, so a
     /// row moved out of a section isn't put back on the next refresh.
-    fn save_client_sidebar(&mut self, model: SidebarModel) {
+    fn save_client_sidebar(&mut self, mut model: SidebarModel) {
+        // A row's wire `name` is its label, not the stored name; keep
+        // what `config.toml` already has for rows that existed.
+        let stored: HashMap<String, String> = self
+            .app
+            .sidebar
+            .ungrouped
+            .iter()
+            .chain(self.app.sidebar.sections.iter().flat_map(|s| s.members.iter()))
+            .map(|c| (c.id.clone(), c.name.clone()))
+            .collect();
+        for c in model
+            .ungrouped
+            .iter_mut()
+            .chain(model.sections.iter_mut().flat_map(|s| s.members.iter_mut()))
+        {
+            match stored.get(&c.id) {
+                Some(name) => c.name = name.clone(),
+                None if c.name.is_empty() => c.name = c.active.clone(),
+                None => {}
+            }
+        }
         self.app.sidebar = model;
         self.app.selected = 0;
         let mut history_changed = false;

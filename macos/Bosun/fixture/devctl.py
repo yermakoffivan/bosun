@@ -71,7 +71,7 @@ class Conn:
 
 
 def label(row):
-    """A row's display name: its first tab's (container names are internal placeholders)."""
+    """A row's fixture name: its first tab's display name (a row's `name` follows its active tab)."""
     return row["tabs"][0].get("display") or row["name"]
 
 

@@ -370,6 +370,10 @@ pub struct SectionWire {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContainerWire {
     pub id: String,
+    /// The row's label, as the TUI shows it: the active tab's display
+    /// name (or, for an exited tab, the name recovered from recents).
+    /// Ignored on `sidebar_save`.
+    #[serde(default)]
     pub name: String,
     /// Session name of the active tab.
     pub active: String,
@@ -754,7 +758,10 @@ impl SidebarWire {
     ) -> Self {
         let container = |c: &Container| ContainerWire {
             id: c.id.clone(),
-            name: c.name.clone(),
+            // The row's label as the TUI shows it: the active tab's
+            // name. The model's own `name` is an internal placeholder
+            // (the first tab's tmux name) that nothing displays.
+            name: display_for(&c.active),
             active: c.active.clone(),
             tabs: c
                 .members
@@ -1285,7 +1292,14 @@ mod tests {
         let wire = SidebarWire::from_model(&model, |n| n.to_uppercase(), |n| n == "bosun-a-1");
         assert_eq!(wire.ungrouped[0].tabs[0].display, "BOSUN-A-1");
         assert!(!wire.sections[0].members[0].tabs[0].alive);
-        assert_eq!(wire.to_model().unwrap(), model);
+        // A row's wire name is its label (the active tab's name), not
+        // the stored placeholder; `sidebar_save` keeps the stored one.
+        assert_eq!(wire.ungrouped[0].name, "BOSUN-A-1");
+        assert_eq!(wire.sections[0].members[0].name, "BOSUN-B-2");
+        let mut back = wire.to_model().unwrap();
+        back.ungrouped[0].name = "a".into();
+        back.sections[0].members[0].name = "b".into();
+        assert_eq!(back, model);
     }
 
     #[test]
