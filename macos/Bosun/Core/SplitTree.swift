@@ -174,6 +174,87 @@ public indirect enum SplitNode: Codable, Equatable, Sendable {
     }
 }
 
+/// Where a tile dragged by its header lands on another tile: beside it on one side, or in its place.
+public enum TileDropZone: Equatable, Sendable {
+    case edge(Direction)
+    case swap
+
+    /// The zone for a point in `rect` (flipped coordinates, y grows down): the middle half of the
+    /// tile each way swaps, anywhere else picks the nearest edge.
+    public static func at(_ p: CGPoint, in rect: CGRect) -> TileDropZone {
+        guard rect.width > 0, rect.height > 0 else { return .swap }
+        let fx = (p.x - rect.minX) / rect.width
+        let fy = (p.y - rect.minY) / rect.height
+        if fx > 0.25, fx < 0.75, fy > 0.25, fy < 0.75 { return .swap }
+        let d: [(Direction, CGFloat)] = [(.left, fx), (.right, 1 - fx), (.up, fy), (.down, 1 - fy)]
+        return .edge(d.min { $0.1 < $1.1 }!.0)
+    }
+
+    /// The part of the target tile the drop indicator covers: the half the tile will take, or all of it.
+    public func indicatorRect(in r: CGRect) -> CGRect {
+        switch self {
+        case .swap: return r
+        case .edge(.left): return CGRect(x: r.minX, y: r.minY, width: (r.width / 2).rounded(), height: r.height)
+        case .edge(.right): return CGRect(x: r.minX + (r.width / 2).rounded(), y: r.minY, width: r.width - (r.width / 2).rounded(), height: r.height)
+        case .edge(.up): return CGRect(x: r.minX, y: r.minY, width: r.width, height: (r.height / 2).rounded())
+        case .edge(.down): return CGRect(x: r.minX, y: r.minY + (r.height / 2).rounded(), width: r.width, height: r.height - (r.height / 2).rounded())
+        }
+    }
+}
+
+extension SplitNode {
+    /// Exchange two leaves; everything else, ratios included, stays.
+    public func swapping(_ a: TileID, _ b: TileID) -> SplitNode {
+        switch self {
+        case .leaf(let id): return id == a ? .leaf(b) : id == b ? .leaf(a) : self
+        case .split(let ax, let r, let x, let y): return .split(axis: ax, ratio: r, first: x.swapping(a, b), second: y.swapping(a, b))
+        }
+    }
+
+    /// Split `target` and put `tile` on `side` of it.
+    public func inserting(_ tile: TileID, beside target: TileID, on side: Direction, ratio: Double = 0.5) -> SplitNode {
+        switch self {
+        case .leaf(let id) where id == target:
+            switch side {
+            case .left: return .split(axis: .horizontal, ratio: ratio, first: .leaf(tile), second: self)
+            case .right: return .split(axis: .horizontal, ratio: ratio, first: self, second: .leaf(tile))
+            case .up: return .split(axis: .vertical, ratio: ratio, first: .leaf(tile), second: self)
+            case .down: return .split(axis: .vertical, ratio: ratio, first: self, second: .leaf(tile))
+            }
+        case .leaf:
+            return self
+        case .split(let ax, let r, let a, let b):
+            return .split(axis: ax, ratio: r, first: a.inserting(tile, beside: target, on: side, ratio: ratio),
+                          second: b.inserting(tile, beside: target, on: side, ratio: ratio))
+        }
+    }
+
+    /// The same tiles in the same arrangement, whatever the ratios.
+    public func sameArrangement(as other: SplitNode) -> Bool {
+        switch (self, other) {
+        case (.leaf(let a), .leaf(let b)): return a == b
+        case (.split(let ax, _, let a1, let b1), .split(let bx, _, let a2, let b2)):
+            return ax == bx && a1.sameArrangement(as: a2) && b1.sameArrangement(as: b2)
+        default: return false
+        }
+    }
+
+    /// Move `tile` onto `target`: take it out of the tree and split `target` on that side, or swap the
+    /// two. nil when nothing would change (onto itself, or onto an edge that rebuilds the same layout).
+    public func moving(_ tile: TileID, to target: TileID, zone: TileDropZone) -> SplitNode? {
+        guard tile != target, contains(tile), contains(target) else { return nil }
+        let out: SplitNode
+        switch zone {
+        case .swap:
+            out = swapping(tile, target)
+        case .edge(let side):
+            guard let rest = removing(tile) else { return nil }
+            out = rest.inserting(tile, beside: target, on: side)
+        }
+        return out.sameArrangement(as: self) ? nil : out
+    }
+}
+
 /// The main area's tiles: the tree, which session each tile shows, and the active tile.
 /// Keeps the "a session is in at most one tile" rule.
 public struct TileLayout: Codable, Equatable, Sendable {
@@ -249,6 +330,16 @@ public struct TileLayout: Codable, Equatable, Sendable {
             active = remaining[min(max(0, idx - 1), remaining.count - 1)]
         }
         return old
+    }
+
+    /// Move a tile beside another, or swap them (see `SplitNode.moving`). The moved tile becomes
+    /// active and keeps its session. Returns false when nothing changed.
+    @discardableResult
+    public mutating func move(_ tile: TileID, to target: TileID, zone: TileDropZone) -> Bool {
+        guard let r = root.moving(tile, to: target, zone: zone) else { return false }
+        root = r
+        active = tile
+        return true
     }
 
     public mutating func setRatio(at path: [Int], _ ratio: Double) {

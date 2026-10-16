@@ -96,6 +96,80 @@ final class SplitTreeTests: XCTestCase {
     }
 }
 
+final class TileMoveTests: XCTestCase {
+    private func h(_ a: SplitNode, _ b: SplitNode, _ r: Double = 0.5) -> SplitNode { .split(axis: .horizontal, ratio: r, first: a, second: b) }
+    private func v(_ a: SplitNode, _ b: SplitNode, _ r: Double = 0.5) -> SplitNode { .split(axis: .vertical, ratio: r, first: a, second: b) }
+    private let l1 = SplitNode.leaf(1), l2 = SplitNode.leaf(2), l3 = SplitNode.leaf(3), l4 = SplitNode.leaf(4)
+
+    func testZones() {
+        let r = CGRect(x: 100, y: 50, width: 400, height: 200)
+        XCTAssertEqual(TileDropZone.at(CGPoint(x: 300, y: 150), in: r), .swap)
+        XCTAssertEqual(TileDropZone.at(CGPoint(x: 110, y: 150), in: r), .edge(.left))
+        XCTAssertEqual(TileDropZone.at(CGPoint(x: 490, y: 150), in: r), .edge(.right))
+        XCTAssertEqual(TileDropZone.at(CGPoint(x: 300, y: 55), in: r), .edge(.up))
+        XCTAssertEqual(TileDropZone.at(CGPoint(x: 300, y: 245), in: r), .edge(.down))
+        // A corner goes to the nearer edge.
+        XCTAssertEqual(TileDropZone.at(CGPoint(x: 105, y: 80), in: r), .edge(.left))
+        XCTAssertEqual(TileDropZone.edge(.right).indicatorRect(in: r), CGRect(x: 300, y: 50, width: 200, height: 200))
+        XCTAssertEqual(TileDropZone.edge(.down).indicatorRect(in: r), CGRect(x: 100, y: 150, width: 400, height: 100))
+        XCTAssertEqual(TileDropZone.swap.indicatorRect(in: r), r)
+    }
+
+    func testMoveToEachEdge() {
+        // 1 | (2 / 3): move 3 to each side of 1.
+        let root = h(l1, v(l2, l3))
+        XCTAssertEqual(root.moving(3, to: 1, zone: .edge(.left)), h(h(l3, l1), l2))
+        XCTAssertEqual(root.moving(3, to: 1, zone: .edge(.right)), h(h(l1, l3), l2))
+        XCTAssertEqual(root.moving(3, to: 1, zone: .edge(.up)), h(v(l3, l1), l2))
+        XCTAssertEqual(root.moving(3, to: 1, zone: .edge(.down)), h(v(l1, l3), l2))
+    }
+
+    func testSwapKeepsRatios() {
+        let root = h(l1, v(l2, l3, 0.3), 0.7)
+        XCTAssertEqual(root.moving(1, to: 3, zone: .swap), h(l3, v(l2, l1, 0.3), 0.7))
+    }
+
+    func testNoOps() {
+        let root = h(l1, l2, 0.7)
+        XCTAssertNil(root.moving(1, to: 1, zone: .swap), "onto itself")
+        XCTAssertNil(root.moving(1, to: 1, zone: .edge(.left)), "onto its own edge")
+        XCTAssertNil(root.moving(2, to: 1, zone: .edge(.right)), "where it already is (ratio aside)")
+        XCTAssertNil(root.moving(1, to: 2, zone: .edge(.left)))
+        XCTAssertEqual(root.moving(2, to: 1, zone: .edge(.left)), h(l2, l1))
+        XCTAssertEqual(root.moving(2, to: 1, zone: .edge(.down)), v(l1, l2))
+        XCTAssertNil(root.moving(5, to: 1, zone: .swap), "a tile not in the tree")
+    }
+
+    func testMoveInGridKeepsOtherTilesAndTheirRatios() {
+        // (1 / 2) | (3 / 4), move 1 below 4: the left column collapses to 2.
+        let root = h(v(l1, l2, 0.4), v(l3, l4, 0.6), 0.3)
+        let moved = root.moving(1, to: 4, zone: .edge(.down))
+        XCTAssertEqual(moved, h(l2, v(l3, v(l4, l1), 0.6), 0.3))
+        XCTAssertEqual(Set(moved!.leaves), [1, 2, 3, 4])
+    }
+
+    func testLayoutMoveKeepsSessionsAndActivatesMovedTile() {
+        var t = TileLayout()
+        t.assign("a", to: 1)
+        let two = t.splitActive(.horizontal)!
+        t.assign("b", to: two)
+        let three = t.splitActive(.vertical)!
+        t.assign("c", to: three)
+        t.activate(1)
+        XCTAssertTrue(t.move(three, to: 1, zone: .edge(.left)))
+        XCTAssertEqual(t.active, three)
+        XCTAssertEqual(t.session(in: three), "c")
+        XCTAssertEqual(t.session(in: 1), "a")
+        XCTAssertEqual(t.tiles, [three, 1, two])
+        let before = t
+        XCTAssertFalse(t.move(three, to: 1, zone: .edge(.left)), "same place again is a no-op")
+        XCTAssertEqual(t, before)
+        XCTAssertTrue(t.move(two, to: three, zone: .swap))
+        XCTAssertEqual(t.tiles, [two, 1, three])
+        XCTAssertEqual(t.active, two)
+    }
+}
+
 final class KeyChordTests: XCTestCase {
     func testParse() throws {
         XCTAssertEqual(try KeyChord.parse("Shift+Up"), KeyChord(key: .up, mods: [.shift]))
