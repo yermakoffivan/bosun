@@ -1626,7 +1626,8 @@ async fn refresh_focused(
     );
     let detected = registry.detect(&ctx);
     let smoother = refresh_state.smoothers.entry(s.name.clone()).or_default();
-    let (smoothed, _, _) = settle_status(config, &s, detected, now, smoother);
+    let prompt = claude_prompt_on_screen(config, &s, &ctx);
+    let (smoothed, _, _) = settle_status(config, &s, detected, prompt, now, smoother);
     let publish = if smoothed == Status::Unknown {
         Status::Idle
     } else {
@@ -1806,8 +1807,9 @@ async fn refresh_all(
         );
         let detected = registry.detect(&ctx);
         let smoother = state.smoothers.entry(s.name.clone()).or_default();
+        let prompt = claude_prompt_on_screen(config, &s, &ctx);
         let (smoothed, status_source, status_detail) =
-            settle_status(config, &s, detected, now, smoother);
+            settle_status(config, &s, detected, prompt, now, smoother);
 
         // Only hold onto the preview buffer for the focused session — the
         // others get None so we don't keep megabytes of pane history alive.
@@ -1836,6 +1838,22 @@ async fn refresh_all(
     Ok(out)
 }
 
+/// Whether Claude's own detector sees a permission or question prompt
+/// in a Claude session with hook state: the one detector verdict that
+/// can overrule a hook's Running (see `agent_hooks::resolve`). Skipped,
+/// and false, everywhere else.
+fn claude_prompt_on_screen(
+    config: &Config,
+    s: &crate::tmux::TmuxSession,
+    ctx: &DetectContext<'_>,
+) -> bool {
+    use crate::tmux::detector::StatusDetector;
+    config.agent_hooks
+        && s.agent.as_deref() == Some("claude")
+        && s.hook.as_ref().is_some_and(|h| h.status == Status::Running)
+        && crate::tmux::detector::claude::ClaudeDetector.detect(ctx) == Status::Waiting
+}
+
 /// Combine the detector's answer with what the agent reported through
 /// its hooks (see `agent_hooks::resolve`). A hook state that wins skips
 /// the smoother: the agent said so, there's nothing to debounce. The
@@ -1849,6 +1867,7 @@ fn settle_status(
     config: &Config,
     s: &crate::tmux::TmuxSession,
     detected: Status,
+    prompt_on_screen: bool,
     now: SystemTime,
     smoother: &mut Smoother,
 ) -> (Status, StatusSource, Option<String>) {
@@ -1870,7 +1889,7 @@ fn settle_status(
         agent: s.agent.as_deref(),
         pane_title: s.pane_title.as_deref(),
         pane_command: s.pane_command.as_deref(),
-        detected,
+        prompt_on_screen,
         quiet_ms,
         now_ms,
     };
@@ -2272,7 +2291,7 @@ mod build_cmd_tests {
             now,
         );
         assert_eq!(
-            settle_status(&config, &s, Status::Idle, now, &mut sm),
+            settle_status(&config, &s, Status::Idle, false, now, &mut sm),
             (
                 Status::Waiting,
                 StatusSource::Hook,
@@ -2291,7 +2310,7 @@ mod build_cmd_tests {
         let mut sm = Smoother::new();
         sm.observe(Status::Running);
         assert_eq!(
-            settle_status(&config, &s, Status::Running, now, &mut sm),
+            settle_status(&config, &s, Status::Running, false, now, &mut sm),
             (Status::Idle, StatusSource::Hook, None)
         );
     }
@@ -2312,11 +2331,11 @@ mod build_cmd_tests {
         sm.observe(Status::Running);
         // First Idle poll is held by hysteresis, second lands.
         assert_eq!(
-            settle_status(&config, &s, Status::Idle, now, &mut sm).0,
+            settle_status(&config, &s, Status::Idle, false, now, &mut sm).0,
             Status::Running
         );
         assert_eq!(
-            settle_status(&config, &s, Status::Idle, now, &mut sm),
+            settle_status(&config, &s, Status::Idle, false, now, &mut sm),
             (Status::Idle, StatusSource::Detector, None)
         );
         // Agent exited to the shell: hook ignored.
@@ -2333,8 +2352,66 @@ mod build_cmd_tests {
             now,
         );
         assert_eq!(
-            settle_status(&config, &s, Status::Idle, now, &mut Smoother::new()).1,
+            settle_status(&config, &s, Status::Idle, false, now, &mut Smoother::new()).1,
             StatusSource::Detector
+        );
+    }
+
+    #[test]
+    fn only_claudes_own_prompt_detection_overrules_hook_running() {
+        let config = Config::default();
+        let now = SystemTime::now();
+        let s = hook_session(
+            Some(hook_at(Status::Running, now, Duration::from_secs(5), None)),
+            "⠙ task",
+            "2_1_301",
+            Duration::from_secs(5),
+            now,
+        );
+        let ctx_for = |plain: &'static str| {
+            DetectContext::from_parts(
+                plain.as_bytes(),
+                plain,
+                s.last_activity,
+                now,
+                None,
+                &s.name,
+                s.pane_title.as_deref(),
+                s.pane_command.as_deref(),
+            )
+        };
+        // A permission dialog Claude's detector recognises.
+        let dialog = "╭──────╮\n│ Bash command │\n│ rm -rf node_modules │\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n╰──────╯";
+        assert!(claude_prompt_on_screen(&config, &s, &ctx_for(dialog)));
+        assert_eq!(
+            settle_status(
+                &config,
+                &s,
+                Status::Waiting,
+                true,
+                now,
+                &mut Smoother::new()
+            ),
+            (Status::Waiting, StatusSource::Detector, None)
+        );
+        // Ordinary output: the generic detector's quiet-pane Waiting
+        // must not knock the hook's Running out.
+        assert!(!claude_prompt_on_screen(
+            &config,
+            &s,
+            &ctx_for("building...\nok")
+        ));
+        assert_eq!(
+            settle_status(
+                &config,
+                &s,
+                Status::Waiting,
+                false,
+                now,
+                &mut Smoother::new()
+            )
+            .0,
+            Status::Running
         );
     }
 
@@ -2353,7 +2430,7 @@ mod build_cmd_tests {
             now,
         );
         assert_eq!(
-            settle_status(&config, &s, Status::Idle, now, &mut Smoother::new()),
+            settle_status(&config, &s, Status::Idle, false, now, &mut Smoother::new()),
             (Status::Idle, StatusSource::Detector, None)
         );
     }

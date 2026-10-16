@@ -365,8 +365,10 @@ pub struct ResolveInput<'a> {
     pub agent: Option<&'a str>,
     pub pane_title: Option<&'a str>,
     pub pane_command: Option<&'a str>,
-    /// What the detectors make of the pane right now.
-    pub detected: Status,
+    /// Claude's detector sees a permission or question prompt in the
+    /// bottom of the pane right now. Only Claude's: the generic
+    /// detector's Waiting just means the pane has been quiet a while.
+    pub prompt_on_screen: bool,
     /// Milliseconds since the pane last produced output.
     pub quiet_ms: u64,
     pub now_ms: u64,
@@ -386,8 +388,10 @@ pub struct ResolveInput<'a> {
 ///   * A `running` pane that has been quiet for a minute is stale for
 ///     the same kind of reason (an API error or crash with no hook).
 ///   * Parallel tool calls can fire `PreToolUse` for one tool while
-///     another's permission prompt is on screen; when the detector
-///     positively sees a prompt, it wins over `running`.
+///     another's permission prompt is on screen; when Claude's detector
+///     positively sees a prompt, it wins over `running`. (Only Claude's:
+///     the generic detector calls any pane quiet for a few seconds
+///     Waiting, which says nothing about a prompt.)
 ///   * A `waiting` state whose agent visibly resumed (spinner title)
 ///     missed the event that ended the wait.
 pub fn resolve(hook: Option<&HookState>, input: &ResolveInput<'_>) -> Option<Status> {
@@ -397,21 +401,18 @@ pub fn resolve(hook: Option<&HookState>, input: &ResolveInput<'_>) -> Option<Sta
     }
     // Only Claude's title is known to carry a working/not-working
     // spinner, so only Claude sessions get the title cross-check.
-    let title_signal = if input.agent == Some("claude") {
-        input.pane_title
-    } else {
-        None
-    };
+    let claude = input.agent == Some("claude");
+    let title_signal = if claude { input.pane_title } else { None };
     let age = input.now_ms.saturating_sub(hook.at_ms);
     match hook.status {
         Status::Running => {
-            if input.detected == Status::Waiting {
+            if claude && input.prompt_on_screen {
                 return None;
             }
             if input.quiet_ms >= RUNNING_QUIET_STALE_MS {
                 return None;
             }
-            if age >= RUNNING_TITLE_GRACE_MS && title_signal.is_some_and(|t| !title_is_working(t)) {
+            if age >= RUNNING_TITLE_GRACE_MS && title_signal.is_some_and(title_shows_idle) {
                 return None;
             }
             Some(Status::Running)
@@ -425,6 +426,19 @@ pub fn resolve(hook: Option<&HookState>, input: &ResolveInput<'_>) -> Option<Sta
         Status::Done | Status::Idle => Some(hook.status),
         Status::Error | Status::Unknown => None,
     }
+}
+
+/// Claude's title positively says it isn't working: it leads with one
+/// of its star glyphs (`✳ Fix the parser bug`) rather than a braille
+/// spinner frame. A title that is neither (a hostname, an older Claude
+/// that sets none) says nothing either way, so it doesn't overrule a
+/// hook.
+fn title_shows_idle(title: &str) -> bool {
+    title
+        .trim_start()
+        .chars()
+        .next()
+        .is_some_and(|c| ('\u{2722}'..='\u{273f}').contains(&c))
 }
 
 /// A login shell, i.e. the agent has exited back to the prompt.
@@ -634,7 +648,7 @@ mod tests {
             agent: Some("claude"),
             pane_title: title,
             pane_command: cmd,
-            detected,
+            prompt_on_screen: detected == Status::Waiting,
             quiet_ms: 0,
             now_ms: 100_000,
         }
@@ -699,6 +713,20 @@ mod tests {
     }
 
     #[test]
+    fn only_a_positive_idle_title_overrules_running() {
+        let h = hook(Status::Running, 90_000);
+        for title in ["hades-2.local", "claude", ""] {
+            assert_eq!(
+                resolve(Some(&h), &input(Some(title), Some("2_1_301"), Status::Idle)),
+                Some(Status::Running),
+                "{title:?}"
+            );
+        }
+        assert!(title_shows_idle("✳ Fix the parser bug"));
+        assert!(!title_shows_idle("⠙ Fix the parser bug"));
+    }
+
+    #[test]
     fn title_cross_check_is_claude_only() {
         let h = hook(Status::Running, 90_000);
         let mut i = input(Some("codex"), Some("node"), Status::Idle);
@@ -739,6 +767,10 @@ mod tests {
             ),
             None
         );
+        // Another agent's detector Waiting is just "quiet for a bit".
+        let mut i = input(None, Some("node"), Status::Waiting);
+        i.agent = Some("codex");
+        assert_eq!(resolve(Some(&h), &i), Some(Status::Running));
     }
 
     #[test]
