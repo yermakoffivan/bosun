@@ -873,8 +873,26 @@ final class TileChromeView: NSView {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// The terminal a Cmd+click on this inactive tile went on to, which gets the mouse-up too.
+    private var forwardedClick: TerminalView?
+
     override func mouseDown(with event: NSEvent) {
         workspace.tileClicked(tile)
+        // Cmd+click opens the link under it in a pane that wasn't active too (libghostty decides
+        // whether there is one); a plain click only activates.
+        if event.modifierFlags.contains(.command), let t = workspace.terminal(in: tile) {
+            forwardedClick = t
+            t.mouseDown(with: event)
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        forwardedClick?.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        forwardedClick?.mouseUp(with: event)
+        forwardedClick = nil
     }
 
     override func scrollWheel(with event: NSEvent) {

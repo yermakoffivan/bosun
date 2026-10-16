@@ -59,6 +59,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         buildWindow()
         buildMenu()
         installMonitors()
+        LinkOpener.sessionPath = { [weak self] in self?.daemon.state.sessions[$0]?.path }
 
         daemon.onChanges.append { [weak self] in self?.stateChanged($0) }
         daemon.onStatus.append { [weak self] in self?.statusChanged($0) }

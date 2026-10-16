@@ -685,3 +685,44 @@ final class MiscCoreTests: XCTestCase {
         XCTAssertTrue(Stats.percentile([], 50).isNaN)
     }
 }
+
+final class LinkTargetTests: XCTestCase {
+    private let files: Set<String> = ["/proj/src/app.rs", "/proj/README.md", "/home/me/notes.txt", "/abs/file.swift", "/proj/dir"]
+    private func resolve(_ s: String, cwd: String? = "/proj") -> LinkTarget? {
+        LinkTarget.resolve(s, cwd: cwd, home: "/home/me", exists: { self.files.contains($0) })
+    }
+
+    func testURLs() {
+        XCTAssertEqual(resolve("https://example.com/a?b=1"), .url(URL(string: "https://example.com/a?b=1")!))
+        XCTAssertEqual(resolve("mailto:a@b.c"), .url(URL(string: "mailto:a@b.c")!))
+        // Foundation would read `app.rs:42` as a URL with the scheme `app.rs`; libghostty means a path.
+        XCTAssertFalse(LinkTarget.isURL("app.rs:42"))
+        XCTAssertNil(resolve("app.rs:42"))
+    }
+
+    func testPaths() {
+        XCTAssertEqual(resolve("/abs/file.swift"), .file("/abs/file.swift"))
+        XCTAssertEqual(resolve("/abs/file.swift:12"), .file("/abs/file.swift"))
+        XCTAssertEqual(resolve("src/app.rs:42"), .file("/proj/src/app.rs"))
+        XCTAssertEqual(resolve("src/app.rs:42:7"), .file("/proj/src/app.rs"))
+        XCTAssertEqual(resolve("./README.md"), .file("/proj/README.md"))
+        XCTAssertEqual(resolve("../proj/dir"), .file("/proj/dir"))
+        XCTAssertEqual(resolve("~/notes.txt"), .file("/home/me/notes.txt"))
+        XCTAssertEqual(resolve("$HOME/notes.txt:3", cwd: nil), .file("/home/me/notes.txt"))
+    }
+
+    func testMissingOrUnresolvable() {
+        XCTAssertNil(resolve("src/missing.rs:1"))
+        XCTAssertNil(resolve("src/app.rs", cwd: nil))
+        XCTAssertNil(resolve("$PROJ/src/app.rs"))
+        XCTAssertNil(resolve(""))
+    }
+
+    func testStripLineSuffix() {
+        XCTAssertEqual(LinkTarget.stripLineSuffix("a.rs:1:2"), "a.rs")
+        XCTAssertEqual(LinkTarget.stripLineSuffix("a.rs:12"), "a.rs")
+        XCTAssertEqual(LinkTarget.stripLineSuffix("a.rs"), "a.rs")
+        XCTAssertEqual(LinkTarget.stripLineSuffix("a:b"), "a:b")
+        XCTAssertEqual(LinkTarget.stripLineSuffix(":12"), ":12")
+    }
+}

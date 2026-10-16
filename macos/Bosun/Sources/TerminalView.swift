@@ -32,6 +32,8 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
     var windowKey = false {
         didSet { syncFocus() }
     }
+    /// tmux `-L` socket this view's client is on (nil: the default socket). Set by the pool.
+    var tmuxSocket: String?
     private(set) var exited = false
     /// Set while the app detaches this client itself, so the exit isn't reported as the session ending.
     private(set) var detaching = false
@@ -47,7 +49,8 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
     private var keyTextAccumulator: [String]?
     private var lastPerformKeyEvent: TimeInterval?
     private var trackingArea: NSTrackingArea?
-    private var mouseCursor: NSCursor = .iBeam
+    /// The pointer libghostty asked for over this view (a hand over a Cmd-hovered link).
+    private(set) var mouseCursor: NSCursor = .iBeam
 
     init(session: String, command: String, frame: NSRect) {
         self.session = session
@@ -164,6 +167,20 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
         return painted
     }
 
+    /// The middle of a viewport cell, in this view's coordinates, given where the cursor is (which
+    /// libghostty's IME point locates, padding included). Used by the test modes to point at text.
+    func cellCenter(col: Int, row: Int, cursorCol: Int, cursorRow: Int) -> NSPoint? {
+        guard let surface else { return nil }
+        let size = ghostty_surface_size(surface)
+        let scale = window?.backingScaleFactor ?? 2
+        let cw = Double(size.cell_width_px) / scale, ch = Double(size.cell_height_px) / scale
+        var x = 0.0, y = 0.0, w = 0.0, h = 0.0
+        ghostty_surface_ime_point(surface, &x, &y, &w, &h)
+        // The IME point is the middle of the cursor cell across and its bottom edge down.
+        let left = x - (Double(cursorCol) + 0.5) * cw, top = y - Double(cursorRow + 1) * ch
+        return NSPoint(x: left + (Double(col) + 0.5) * cw, y: bounds.height - (top + (Double(row) + 0.5) * ch))
+    }
+
     func viewportText() -> String {
         guard let surface else { return "" }
         var text = ghostty_text_s()
@@ -245,6 +262,8 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
         default: mouseCursor = .iBeam
         }
         window?.invalidateCursorRects(for: self)
+        // Cursor rects only update when the pointer moves; Cmd pressed over a link should show the hand now.
+        if lastPointer != nil, window?.isKeyWindow == true { mouseCursor.set() }
     }
 
     override func resetCursorRects() {
@@ -377,29 +396,53 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
 
     override func updateTrackingAreas() {
         if let trackingArea { removeTrackingArea(trackingArea) }
-        let ta = NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .inVisibleRect, .activeInKeyWindow],
+        // Always, as in Ghostty's own app: Cmd-hovering a link works before the window is key too.
+        let ta = NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .inVisibleRect, .activeAlways],
                                 owner: self, userInfo: nil)
         addTrackingArea(ta)
         trackingArea = ta
         super.updateTrackingAreas()
     }
 
+    /// Where the pointer last was over this view (view coordinates), nil once it left.
+    private var lastPointer: NSPoint?
+
+    /// The modifiers libghostty gets with the pointer and left button. While a program has the
+    /// mouse (tmux always does: `mouse on`), libghostty only looks for links under the pointer when
+    /// Shift is held, Shift being how a click is taken back from the program, and then matches
+    /// them with Shift left out. So Cmd alone never found a link inside tmux. Cmd adds Shift here:
+    /// Cmd+hover underlines the link and Cmd+click opens it, and the click never reaches tmux.
+    private func mouseMods(_ flags: NSEvent.ModifierFlags) -> ghostty_input_mods_e {
+        var f = flags
+        if f.contains(.command), !f.contains(.shift), let surface, ghostty_surface_mouse_captured(surface) { f.insert(.shift) }
+        return TerminalView.mods(f)
+    }
+
     private func sendMousePos(_ event: NSEvent) {
         guard let surface else { return }
         let p = convert(event.locationInWindow, from: nil)
-        ghostty_surface_mouse_pos(surface, p.x, frame.height - p.y, TerminalView.mods(event.modifierFlags))
+        lastPointer = p
+        ghostty_surface_mouse_pos(surface, p.x, frame.height - p.y, mouseMods(event.modifierFlags))
+    }
+
+    /// Cmd pressed or let go with the pointer still: have libghostty look at the link under it again.
+    private func refreshLinkHover(_ flags: NSEvent.ModifierFlags) {
+        guard let surface, let p = lastPointer, bounds.contains(p), NSEvent.pressedMouseButtons == 0 else { return }
+        // libghostty skips the check when the pointer is on the cell it checked last; leaving first clears that.
+        ghostty_surface_mouse_pos(surface, -1, -1, mouseMods(flags))
+        ghostty_surface_mouse_pos(surface, p.x, frame.height - p.y, mouseMods(flags))
     }
 
     override func mouseDown(with event: NSEvent) {
         if window?.firstResponder !== self { window?.makeFirstResponder(self) }
         guard let surface else { return }
         sendMousePos(event)
-        _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, TerminalView.mods(event.modifierFlags))
+        _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mouseMods(event.modifierFlags))
     }
 
     override func mouseUp(with event: NSEvent) {
         guard let surface else { return }
-        _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, TerminalView.mods(event.modifierFlags))
+        _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, mouseMods(event.modifierFlags))
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -425,10 +468,12 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func mouseMoved(with event: NSEvent) { sendMousePos(event) }
+    override func mouseEntered(with event: NSEvent) { sendMousePos(event) }
     override func mouseDragged(with event: NSEvent) { sendMousePos(event) }
     override func rightMouseDragged(with event: NSEvent) { sendMousePos(event) }
 
     override func mouseExited(with event: NSEvent) {
+        lastPointer = nil
         guard let surface else { return }
         // Tell libghostty the pointer left so hover effects (links) clear.
         ghostty_surface_mouse_pos(surface, -1, -1, TerminalView.mods(event.modifierFlags))
@@ -596,6 +641,7 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
             if sidePressed { action = GHOSTTY_ACTION_PRESS }
         }
         _ = keyAction(action, event: event)
+        if mod == GHOSTTY_MODS_SUPER.rawValue { refreshLinkHover(event.modifierFlags) }
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {

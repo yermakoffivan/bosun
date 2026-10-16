@@ -56,6 +56,7 @@ final class TerminalPool {
         let v = TerminalView(session: session, command: attachCommand(for: session), frame: frame)
         v.isHidden = hidden
         v.windowKey = windowKey
+        v.tmuxSocket = tmuxSocket
         if hidden { v.setRendererVisible(false) }
         v.onExit = { [weak self] view in
             guard let self, self.views[view.session] === view else { return }

@@ -164,10 +164,7 @@ final class GhosttyRuntime {
             let u = action.action.open_url
             guard let p = u.url else { return false }
             let s = String(decoding: UnsafeRawBufferPointer(start: p, count: Int(u.len)), as: UTF8.self)
-            DispatchQueue.main.async {
-                if let url = URL(string: s), url.scheme != nil { NSWorkspace.shared.open(url) }
-                else { NSWorkspace.shared.open(URL(fileURLWithPath: s)) }
-            }
+            DispatchQueue.main.async { MainActor.assumeIsolated { LinkOpener.open(s, from: view) } }
             return true
         case GHOSTTY_ACTION_RING_BELL:
             return true
@@ -249,6 +246,47 @@ final class GhosttyRuntime {
                     view.denyClipboard(state: st)
                 }
             }
+        }
+    }
+}
+
+/// Opens what a Cmd+click on a terminal link hit (libghostty's OPEN_URL): a URL, or a file or
+/// directory. Inside tmux libghostty never learns the shell's directory (no OSC 7 through tmux),
+/// so a relative path arrives as typed; it's resolved against the pane's current directory, which
+/// tmux knows. A path that doesn't exist opens nothing.
+@MainActor
+enum LinkOpener {
+    /// The test modes set this, and then nothing is ever opened: every target goes here instead.
+    static var recorder: ((LinkTarget) -> Void)?
+    /// The session's directory from the daemon's snapshot, for when tmux doesn't answer.
+    static var sessionPath: ((String) -> String?)?
+
+    static func open(_ text: String, from view: TerminalView?) {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        guard LinkTarget.isRelativePath(text), let view else {
+            if let t = LinkTarget.resolve(text, cwd: nil, home: home) { deliver(t) }
+            return
+        }
+        let tty = view.ttyName, socket = view.tmuxSocket, session = view.session
+        let fallback = sessionPath?(session)
+        DispatchQueue.global(qos: .userInitiated).async {
+            var cwd: String?
+            if let tty {
+                let out = ShellEnv.run(Paths.tmux, (socket.map { ["-L", $0] } ?? []) + ["display-message", "-p", "-c", tty, "#{pane_current_path}"],
+                                       timeout: 1)
+                cwd = out?.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if cwd?.isEmpty ?? true { cwd = fallback }
+            let target = LinkTarget.resolve(text, cwd: cwd, home: home)
+            DispatchQueue.main.async { MainActor.assumeIsolated { if let target { deliver(target) } } }
+        }
+    }
+
+    private static func deliver(_ t: LinkTarget) {
+        if testMode { recorder?(t); return }
+        switch t {
+        case .url(let u): NSWorkspace.shared.open(u)
+        case .file(let p): NSWorkspace.shared.open(URL(fileURLWithPath: p))
         }
     }
 }
