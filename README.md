@@ -205,6 +205,7 @@ machinery starts.
 | `bosun editor` | Print the currently configured editor |
 | `bosun editor <cmd>` | Set the editor used by the `E` key (e.g. `bosun editor zed`) |
 | `bosun editor ""` | Clear the configured editor |
+| `bosun hook <agent> <event>` | Record an agent's state on its tmux pane. Run by the hooks bosun installs at launch (see [Agent status from hooks](#agent-status-from-hooks)), not by hand |
 | `bosun help` / `--help` / `-h` | Print usage |
 | `bosun --version` / `-V` | Print version |
 
@@ -358,7 +359,7 @@ that branch instead of the plain path.
 
 `s` (or `,`) opens a panel over the options that live in `config.toml`:
 theme, banner font, default agent, worktree location, single-window
-mode, group-in-tab-title, remove-exited-sessions and the live preview.
+mode, group-in-tab-title, remove-exited-sessions, the live preview and agent status hooks.
 `↑`/`↓` pick a row, `←`/`→` (or space) change it, `esc` closes. There is
 no save step — each change applies immediately and is written to
 `config.toml`, so the panel and the file always agree.
@@ -445,6 +446,27 @@ Transitions are smoothed:
 - → Idle: requires two consecutive matching polls. Filters the brief
   quiet windows between agent bursts so the Running glyph doesn't
   flicker off mid-response.
+
+### Agent status from hooks
+
+Guessing state from a pane's title and screen is never fully reliable, so agents that support hooks report their own state. Bosun launches them with hooks that run `bosun hook <agent> <event>`, which writes the state onto the session's tmux pane as `@bosun_state` (`running`, `waiting`, `done` or `idle`), `@bosun_state_at` (epoch ms) and an optional `@bosun_state_detail` such as `permission: Bash`. The status poll reads those in the same `tmux list-sessions` call it already makes. A hook takes a few milliseconds, prints nothing and always exits 0, so it can't break the agent.
+
+Claude Code is the agent with hooks today. Bosun never edits `~/.claude/settings.json` or a project's `.claude/` files: it writes its own settings file with just the hooks (in bosun's data dir, under `hooks/`) and adds `--settings <that file>` to the launch command, including on restart and resume. Claude merges hooks from every settings source, so your own hooks keep running. If your extra args already pass `--settings`, bosun leaves yours alone and that session falls back to detection. The mapping:
+
+| Claude Code event | Status |
+|---|---|
+| `SessionStart` | Idle |
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | Running (a tool running after a permission prompt ends the wait) |
+| `PermissionRequest`, `Notification` (permission prompt, MCP input request), `PreToolUse` for `AskUserQuestion` / `ExitPlanMode` | Waiting, with what it's waiting on |
+| `Notification` (`idle_prompt`) | Running or Waiting settle to Idle; Done is left alone |
+| `Stop` | Done (shown until you look at the session, as before) |
+| `SessionEnd` | state cleared |
+
+Hook state wins over the detectors, and the detectors stay as a cross-check for what hooks miss. Claude fires no hook when you interrupt it with Esc, so a Running state whose pane title has lost Claude's spinner goes back to the detector, as does a Running state on a pane that has printed nothing for a minute. Hook state is ignored once the agent has exited to the shell, and a detected permission prompt beats a hook's Running. Hook-reported changes show at once, without the two-poll smoothing. When a session is waiting, the section overview shows what it's waiting on next to its row.
+
+The other agents keep their detectors for now. Codex's hooks need a trust flag that would also run untrusted project hooks, and its `notify` setting would replace yours. OpenCode 2.x only reads injected config in a private-server mode that changes how it runs. Qwen Code's only injection point is the admin-level system settings file. Kimi Code reads hooks only from its user config file.
+
+Turn it off with `agent_hooks = false` in `config.toml`, `BOSUN_AGENT_HOOKS=0`, or the "agent status hooks" row in the settings panel. Sessions pick up the change on their next launch or restart. Set `BOSUN_HOOK_LOG=/path/to/file` in bosun's environment to log every hook invocation when checking which events an agent fires.
 
 ## Mouse interaction
 
@@ -555,6 +577,8 @@ remove_dead_sessions = false    # true drops a session's sidebar row when its tm
                                 # instead of keeping it as an "exited" row that R can restart.
                                 # Rows that were already gone when bosun started (tmux server
                                 # went away with the machine) are kept either way.
+agent_hooks      = true         # agents with hook support report their own status (Claude Code today);
+                                # false leaves status to pane detection. Applies on next launch.
 
 # Optional per-agent binary overrides. The value replaces the agent's
 # binary in the launch command, so you can point an agent at a wrapper
@@ -603,6 +627,7 @@ Environment overrides:
 | `BOSUN_HIDE_SINGLE_TAB_STRIP` | `hide_single_tab_strip` (`1` / `true` / `yes` / `on` to enable) |
 | `BOSUN_DEFAULT_AGENT` | `default_agent` |
 | `BOSUN_REMOVE_DEAD_SESSIONS` | `remove_dead_sessions` (`0` / `false` / `off` / `no` to disable) |
+| `BOSUN_AGENT_HOOKS` | `agent_hooks` (`0` / `false` / `off` / `no` to disable) |
 | `BOSUN_LOG` | Tracing filter, e.g. `BOSUN_LOG=info` |
 
 An environment variable wins over `config.toml`, which makes it a way
