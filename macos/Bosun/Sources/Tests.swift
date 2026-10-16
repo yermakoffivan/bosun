@@ -358,7 +358,7 @@ final class FocusTest: TestKit {
         await showRow(api)
         r.check("start: the active terminal is first responder", firstResponderIsActiveTerminal)
 
-        // --only a,b runs just those sections (rows, panes, newpanes, clientmoves, done, sheet, empty, tiledrag, sidebardrag, shortcuts).
+        // --only a,b runs just those sections (rows, panes, newpanes, clientmoves, done, notify, sheet, empty, tiledrag, sidebardrag, shortcuts).
         if let only = argValue("--only") {
             let parts = Set(only.split(separator: ",").map(String.init))
             if parts.contains("rows") { await rows(f) }
@@ -366,6 +366,7 @@ final class FocusTest: TestKit {
             if parts.contains("newpanes") { await newPanes(f) }
             if parts.contains("clientmoves") { await clientMoves(f) }
             if parts.contains("done") { await doneState(f) }
+            if parts.contains("notify") { await notifications(f) }
             await layoutSections(parts)
             await finish()
             return
@@ -700,6 +701,9 @@ final class FocusTest: TestKit {
 
         // 16b. Done from the agent's Stop hook, on screen, until the user types into the pane.
         await doneState(f)
+
+        // 16c. Notifications, the Dock badge and Cmd+Shift+U.
+        await notifications(f)
 
         // 17. tmux moving a terminal's client (Bosun's TUI bindings typed inside it, or anything else).
         await clientMoves(f)
