@@ -63,7 +63,9 @@ Both run inside the app against the fixture (`./dev.sh up` first) and drive it t
 ./dev.sh run --selftest --results /some/file.txt
 ```
 
-`--focustest` checks the focus model end to end: where keys land after sidebar clicks, rename, the palette and the sheet; splits and tile focus; focus following the mouse and its guards; drops on tiles, dividers and sidebar rows; every app shortcut and the `[keybindings]` nav keys (and that they never reach tmux's Shift+arrow bindings); create and kill, with nothing but the launch command typed into a new session; themes; the tmux status line (no TUI hints, and no line at all on a session only the app shows); tiles following a tmux client that something moved (Bosun's `prefix 1-9` typed inside a terminal), moving it back when its new session is in another tile or the view is hidden, and attaching again after a detach (`Ctrl+q`); and that no tmux client is left on another session than its tile says. It saves screenshots of the main states when `--shots` is given.
+`--no-activate` opens the window without activating the app, so a test run never takes the keyboard from what you're doing. `--focustest --only sheet,empty,tiledrag,sidebardrag,shortcuts` runs just those sections. Test modes never save their window frame.
+
+`--focustest` checks the focus model end to end: where keys land after sidebar clicks, rename, the palette and the sheet; splits and tile focus; focus following the mouse and its guards; drops on tiles, dividers and sidebar rows; every app shortcut and the `[keybindings]` nav keys (and that they never reach tmux's Shift+arrow bindings); create and kill, with nothing but the launch command typed into a new session; themes; the tmux status line (no TUI hints, and no line at all on a session only the app shows); tiles following a tmux client that something moved (Bosun's `prefix 1-9` typed inside a terminal), moving it back when its new session is in another tile or the view is hidden, and attaching again after a detach (`Ctrl+q`); and that no tmux client is left on another session than its tile says. Then layout and dragging: every control in the new-session sheet lies inside it, with 1, 2 and 4 tiles and in the smallest window; empty tiles keep their text inside at every width; tiles dragged by their header to each edge and swapped, cancelled with Esc or by letting go outside, with the same terminal views and the keyboard following the dragged tile; sidebar rows, sections and tabs dragged through AppKit's own table tracking (a test hook keeps the drag session from the window server, so it never follows the real mouse) and dropped through the outline's own drop code; and the keyboard shortcuts panel. It saves screenshots of the main states when `--shots` is given.
 
 `--selftest` reports p50/p90/p99 for warm switch, cold attach, status change to badge, daemon round trip, divider drag layout, launch to sidebar painted and launch to first live terminal (from ten fresh processes), plus idle CPU and memory, against the budgets in the design doc.
 
@@ -82,11 +84,13 @@ The terminal keeps the keyboard. Only the rename field, the palette and the new-
 | Cmd+D / Cmd+Shift+D | Split right / down |
 | Cmd+Option+arrows | Focus the tile in that direction |
 | Cmd+W | Close tile |
+| Drag a tile's header | Move it beside another tile (near an edge) or swap the two (the middle) |
+| Cmd+/ | Keyboard shortcuts |
 | Shift+Up / Shift+Down | Previous / next session (from `[keybindings]`) |
 | Shift+Left / Shift+Right | Previous / next tab (from `[keybindings]`) |
 | Ctrl+v | Send the next key to the terminal as is (from `[keybindings]`) |
 
-The nav keys follow the `[keybindings]` table in Bosun's config.toml and update live when it changes. Everything else goes to the terminal; Ghostty's own bindings that would clash with these are removed.
+Help → Keyboard Shortcuts (Cmd+/) lists all of these, and every key is also on its menu item. The nav keys follow the `[keybindings]` table in Bosun's config.toml and update live when it changes. Everything else goes to the terminal; Ghostty's own bindings that would clash with these are removed.
 
 Bosun's tmux bindings for the TUI and Moshi still work inside a terminal (`prefix 1-9` jumps, `Ctrl+q` detaches). The app follows them: when a terminal's tmux client is moved to another session, its tile shows that session (header, sidebar and all), or, if another tile already shows it, the client goes back and that tile becomes active. After a detach the tile attaches again.
 
@@ -101,5 +105,5 @@ Bosun → Settings (Cmd+,): focus follows the mouse (on by default, only with tw
 ## Layout of the code
 
 - `Core/` (BosunCore, no AppKit): protocol types and decoding, the state store, sidebar operations, the split tree, key chords, the focus state machine, the done rule, shell escaping. Unit tested in `Tests/`.
-- `Sources/`: the app. `DaemonClient` (socket, framing, reconnect, snapshot cache), `Ghostty` and `TerminalView` (libghostty), `TerminalPool` (warm pool), `Workspace` (tiles, dividers, drops), `Sidebar`, `NewSessionSheet`, `AppController` (menus, commands, key routing), `Tests` (the test modes).
+- `Sources/`: the app. `DaemonClient` (socket, framing, reconnect, snapshot cache), `Ghostty` and `TerminalView` (libghostty), `TerminalPool` (warm pool), `Workspace` (tiles, dividers, drops, moving tiles), `Sidebar`, `NewSessionSheet`, `ShortcutsPanel`, `AppController` (menus, commands, key routing), `Tests` and `LayoutTests` (the test modes).
 - `fixture/`: the fake agent and the fixture builder used by `dev.sh`.
