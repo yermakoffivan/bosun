@@ -25,15 +25,14 @@ case "$TMUX_SOCK" in
   ""|bosun|default) echo "refusing to use tmux socket '$TMUX_SOCK': pick a throwaway name" >&2; exit 1 ;;
 esac
 
-bin() {
-  if [[ -n "${BOSUN_DEV_BIN:-}" ]]; then echo "$BOSUN_DEV_BIN"; return; fi
-  local target="$HERE/build/cargo-target"
-  if [[ ! -x "$target/release/bosun" ]]; then
-    echo "building a dev bosun into $target …" >&2
-    (cd "$REPO" && CARGO_TARGET_DIR="$target" cargo build --release --locked >&2)
-  fi
-  echo "$target/release/bosun"
-}
+# Always build the dev bosun once per run: cargo is a quick no-op when nothing
+# changed, and a stale binary silently runs an old daemon against new code.
+DEV_TARGET="$HERE/build/cargo-target"
+if [[ -z "${BOSUN_DEV_BIN:-}" ]]; then
+  (cd "$REPO" && CARGO_TARGET_DIR="$DEV_TARGET" cargo build --release --locked --quiet >&2) || exit 1
+fi
+
+bin() { echo "${BOSUN_DEV_BIN:-$DEV_TARGET/release/bosun}"; }
 
 denv() {
   env -u TMUX -u TMUX_PANE -u XDG_CONFIG_HOME -u XDG_DATA_HOME -u BOSUN_PREFIX -u BOSUN_THEME \
@@ -47,6 +46,11 @@ up() {
   mkdir -p "$DEV_HOME"
   local s; s="$(sock)"
   if [[ ${#s} -ge 104 ]]; then echo "socket path too long (${#s} bytes): $s; set a shorter BOSUN_DEV_HOME" >&2; exit 1; fi
+  # A daemon started before the binary was last rebuilt is running old code: restart it.
+  if [[ -f "$LOCK" && "$(bin)" -nt "$LOCK" ]]; then
+    echo "restarting the test daemon on the rebuilt bosun" >&2
+    stop_daemon
+  fi
   if ! python3 -c 'import socket,sys; c=socket.socket(socket.AF_UNIX); c.connect(sys.argv[1])' "$s" 2>/dev/null; then
     # Keep the daemon alive between app runs (it normally exits 30 s after its last client).
     denv nohup "$(bin)" serve --idle-timeout 86400 >"$DEV_HOME/serve.log" 2>&1 &
@@ -67,15 +71,20 @@ up() {
   echo "tmux socket:   -L $TMUX_SOCK"
 }
 
-down() {
-  local lock="$DEV_HOME/Library/Application Support/dev.yetidevworks.bosun/bosun-serve.lock"
-  if [[ -f "$lock" ]]; then
-    local pid; pid="$(tr -dc 0-9 < "$lock")"
+LOCK="$DEV_HOME/Library/Application Support/dev.yetidevworks.bosun/bosun-serve.lock"
+
+stop_daemon() {
+  if [[ -f "$LOCK" ]]; then
+    local pid; pid="$(tr -dc 0-9 < "$LOCK")"
     if [[ -n "$pid" ]] && ps -p "$pid" -o command= | grep -q "bosun serve"; then
       kill "$pid" 2>/dev/null || true
       for _ in $(seq 1 60); do ps -p "$pid" >/dev/null || break; sleep 0.05; done
     fi
   fi
+}
+
+down() {
+  stop_daemon
   "$TMUX_BIN" -L "$TMUX_SOCK" kill-server 2>/dev/null || true
   echo "stopped the test daemon and tmux -L $TMUX_SOCK"
 }
