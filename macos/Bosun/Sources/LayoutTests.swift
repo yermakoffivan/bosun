@@ -11,6 +11,7 @@ extension FocusTest {
         if wants("sheet") { await sheetLayout() }
         if wants("empty") { await emptyState() }
         if wants("tiledrag") { await tileDrag() }
+        if wants("sidebardrag") { await sidebarDrag() }
     }
 
     // MARK: Sheet layout
@@ -399,4 +400,141 @@ extension FocusTest {
         for _ in 0..<10 where ws.layout.count > 1 { ws.closeActive() }
         await showOnly(api)
     }
+
+    // MARK: Sidebar drag and drop
+
+    /// A point in a sidebar item's row (fraction 0 = top, 1 = bottom), in window coordinates.
+    func rowPoint(_ item: SidebarItem?, _ fy: CGFloat, x: CGFloat = 60) -> NSPoint? {
+        guard let item else { return nil }
+        let o = app.sidebar.outline
+        let row = o.row(forItem: item)
+        guard row >= 0 else { return nil }
+        let r = o.rect(ofRow: row)
+        return o.convert(NSPoint(x: r.minX + x, y: r.minY + r.height * fy), to: nil)
+    }
+
+    func sectionItem(_ name: String) -> SidebarItem? {
+        let o = app.sidebar.outline
+        guard let id = app.daemon.state.sidebar.sections.first(where: { $0.name == name })?.id else { return nil }
+        return (0..<o.numberOfRows).compactMap { o.item(atRow: $0) as? SidebarItem }.first { $0.kind == .section(id) }
+    }
+
+    func rowItem(_ session: String) -> SidebarItem? {
+        let o = app.sidebar.outline
+        guard let c = app.daemon.state.sidebar.container(holding: session) else { return nil }
+        return (0..<o.numberOfRows).compactMap { o.item(atRow: $0) as? SidebarItem }.first { $0.kind == .row(c.id) }
+    }
+
+    /// Press on `from` and move: AppKit's own table tracking decides whether a drag starts and builds
+    /// the dragging items. Then the drop side is played through the outline's own NSDraggingDestination
+    /// (which proposes the drop item and index from the location), ending at `to`.
+    func outlineDrag(from: NSPoint, to: NSPoint) async -> (started: Bool, op: NSDragOperation, accepted: Bool) {
+        let o = app.sidebar.outline
+        var captured: (NSDraggingSession, [NSDraggingItem])?
+        o.dragCapture = { s, items, _ in captured = (s, items) }
+        defer { o.dragCapture = nil }
+        post(.leftMouseDown, from)
+        for i in 1...6 { post(.leftMouseDragged, NSPoint(x: from.x + CGFloat(i), y: from.y + CGFloat(i) * 2)) }
+        await waitUntil(2) { captured != nil }
+        guard let (session, items) = captured else {
+            post(.leftMouseUp, from)
+            await sleep(100)
+            return (false, [], false)
+        }
+        let pb = NSPasteboard(name: NSPasteboard.Name("dev.yetidevworks.bosun.test-sidebar-drag"))
+        pb.clearContents()
+        pb.writeObjects(items.compactMap { $0.item as? NSPasteboardWriting })
+        let info = FakeDrag(location: from, pasteboard: pb, window: w, source: o, mask: .move)
+        var op = o.draggingEntered(info)
+        for i in 1...6 {
+            let f = CGFloat(i) / 6
+            info.location = NSPoint(x: from.x + (to.x - from.x) * f, y: from.y + (to.y - from.y) * f)
+            op = o.draggingUpdated(info)
+            await sleep(15)
+        }
+        var ok = false
+        if op != [] {
+            _ = o.prepareForDragOperation(info)
+            ok = o.performDragOperation(info)
+            o.concludeDragOperation(info)
+        } else {
+            o.draggingExited(info)
+        }
+        o.draggingSession(session, endedAt: w.convertPoint(toScreen: to), operation: ok ? .move : [])
+        await sleep(150)
+        return (true, op, ok)
+    }
+
+    private func names(_ cs: [Container]) -> [String] { cs.map { app.displayName($0.active) } }
+
+    func sidebarDrag() async {
+        guard let api = session("api"), let docs = session("docs"), let parser = session("parser"),
+              let web = session("web"), let webTests = session("web tests") else { return }
+        let original = app.daemon.state.sidebar
+        await showOnly(review1Session ?? api)
+        let shownBefore = ws.activeSession
+
+        // a) A row onto the lower edge of the next row: reordered among the ungrouped rows.
+        if let from = rowPoint(rowItem(api), 0.5), let to = rowPoint(rowItem(docs), 0.92) {
+            let res = await outlineDrag(from: from, to: to)
+            r.check("sidebar: pressing a row and moving starts a drag (AppKit's own tracking)", res.started)
+            r.check("…a row dropped below the next one is accepted", res.op == .move && res.accepted, "op \(res.op.rawValue)")
+            await waitUntil(1) { names(app.daemon.state.sidebar.ungrouped) == ["docs", "api"] }
+            r.check("…and the rows are reordered", names(app.daemon.state.sidebar.ungrouped) == ["docs", "api"],
+                    "\(names(app.daemon.state.sidebar.ungrouped))")
+            r.check("…a drag isn't a click: the tile still shows what it did", ws.activeSession == shownBefore)
+        }
+        // b) A row dropped on the middle of a row in a section: it goes into that section, beside that row.
+        if let from = rowPoint(rowItem(api), 0.5), let to = rowPoint(rowItem(parser), 0.4) {
+            let res = await outlineDrag(from: from, to: to)
+            let work = app.daemon.state.sidebar.sections.first { $0.name == "Work" }
+            r.check("sidebar: a row dropped on the middle of another row is accepted (not refused)", res.op == .move && res.accepted, "op \(res.op.rawValue)")
+            r.check("…and lands in that row's section next to it", work.map { names($0.members).prefix(2).contains("api") } ?? false,
+                    "Work: \(work.map { names($0.members) } ?? [])")
+        }
+        // c) A section header dragged above another section.
+        if let from = rowPoint(sectionItem("Reviews"), 0.5), let to = rowPoint(sectionItem("Work"), 0.15) {
+            let res = await outlineDrag(from: from, to: to)
+            let order = app.daemon.state.sidebar.sections.map(\.name)
+            r.check("sidebar: a section dragged above another moves there", res.started && res.accepted && order.first == "Reviews", "\(order) op \(res.op.rawValue)")
+        }
+        // d) A tab dragged above the row's other tab.
+        if let tabItem = app.sidebar.itemFor(session: webTests), let webItem = app.sidebar.itemFor(session: web),
+           let from = rowPoint(tabItem, 0.5, x: 80), let to = rowPoint(webItem, 0.1, x: 80) {
+            let res = await outlineDrag(from: from, to: to)
+            let tabs = app.daemon.state.sidebar.container(holding: web)?.tabs.map { app.displayName($0.session) } ?? []
+            r.check("sidebar: a tab dragged above its sibling reorders the row's tabs", res.accepted && tabs == ["web tests", "web"], "\(tabs) op \(res.op.rawValue)")
+        }
+        // e) A row dropped over a multi-tab row's tabs goes beside that row, not inside it (refused before).
+        if let shell = session("shell"), let webTab = app.sidebar.itemFor(session: web),
+           let from = rowPoint(rowItem(shell), 0.5), let to = rowPoint(webTab, 0.5, x: 80) {
+            let res = await outlineDrag(from: from, to: to)
+            let work = app.daemon.state.sidebar.sections.first { $0.name == "Work" }.map { names($0.members) } ?? []
+            r.check("sidebar: a row dropped over another row's tabs lands beside that row", res.accepted && work.contains("shell"),
+                    "Work: \(work) op \(res.op.rawValue)")
+        }
+        // f) Finder-style rename tells a click from a drag: dragging the selected row's name never renames.
+        await showOnly(docs)
+        if let from = sidebarPoint(docs), let to = rowPoint(sectionItem("Reviews"), 0.9) {
+            let res = await outlineDrag(from: from, to: to)
+            await sleep(NSEvent.doubleClickInterval * 1000 + 300)
+            r.check("sidebar: dragging the selected row's name starts a drag, not a rename",
+                    res.started && app.focus.exception == nil && !app.sidebar.isRenaming)
+            r.check("…and the keyboard stays in the terminal", firstResponderIsActiveTerminal)
+        }
+        // A plain click on the selected row's name still renames (the drag fix mustn't break it).
+        if let p = sidebarPoint(docs) {
+            await click(p)
+            await waitUntil(2) { app.focus.exception == .rename }
+            r.check("sidebar: a click on the selected row's name still starts a rename", app.focus.exception == .rename)
+            await key(53, "\u{1b}")
+            await waitUntil(1) { firstResponderIsActiveTerminal }
+        }
+        app.daemon.saveSidebar(original)
+        await sleep(300)
+        r.check("sidebar: put back as it was", app.daemon.state.sidebar == original)
+        await showOnly(api)
+    }
+
+    private var review1Session: String? { session("review-1") }
 }

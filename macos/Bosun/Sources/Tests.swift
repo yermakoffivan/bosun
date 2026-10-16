@@ -239,23 +239,27 @@ class TestKit {
 
 /// A drag that never left the app: what AppKit hands a drop destination.
 final class FakeDrag: NSObject, NSDraggingInfo {
-    let location: NSPoint
+    var location: NSPoint
     let pasteboard: NSPasteboard
     weak var window: NSWindow?
+    weak var source: AnyObject?
+    let mask: NSDragOperation
 
-    init(location: NSPoint, pasteboard: NSPasteboard, window: NSWindow) {
+    init(location: NSPoint, pasteboard: NSPasteboard, window: NSWindow, source: AnyObject? = nil, mask: NSDragOperation = .copy) {
         self.location = location
         self.pasteboard = pasteboard
         self.window = window
+        self.source = source
+        self.mask = mask
     }
 
     var draggingDestinationWindow: NSWindow? { window }
-    var draggingSourceOperationMask: NSDragOperation { .copy }
+    var draggingSourceOperationMask: NSDragOperation { mask }
     var draggingLocation: NSPoint { location }
     var draggedImageLocation: NSPoint { location }
     var draggedImage: NSImage? { nil }
     var draggingPasteboard: NSPasteboard { pasteboard }
-    var draggingSource: Any? { nil }
+    var draggingSource: Any? { source }
     var draggingSequenceNumber: Int { 1 }
     func slideDraggedImage(to screenPoint: NSPoint) {}
     var draggingFormation: NSDraggingFormation = .default

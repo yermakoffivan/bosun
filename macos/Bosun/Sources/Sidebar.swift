@@ -479,9 +479,25 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             return .copy
         }
         let ungroupedCount = app.daemon.state.sidebar.ungrouped.count
+        let pointerY = outlineView.convert(info.draggingLocation, from: nil).y
+        /// Whether the pointer is in the lower half of `item`'s own row.
+        func below(_ item: SidebarItem) -> Bool {
+            let row = outlineView.row(forItem: item)
+            return row >= 0 && pointerY > outlineView.rect(ofRow: row).midY
+        }
         switch dragged.kind {
         case .row:
-            if target == nil {
+            // Over a multi-tab row or one of its tabs (the outline proposes dropping inside it): drop beside
+            // that row in its own list instead, above or below by the pointer.
+            var over = target
+            if let t = over, case .tab = t.kind { over = t.parent }
+            if let t = over, case .row = t.kind {
+                let list = t.parent?.children ?? roots
+                guard let i = list.firstIndex(where: { $0 === t }) else { return [] }
+                outlineView.setDropItem(t.parent, dropChildIndex: i + (below(t) ? 1 : 0))
+                return .move
+            }
+            if over == nil {
                 if index == NSOutlineViewDropOnItemIndex { return [] }
                 if index <= ungroupedCount { return .move }
                 // Between sections: land at the end of the section above.
@@ -493,13 +509,22 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                 }
                 return []
             }
-            if case .section = target!.kind {
-                if index == NSOutlineViewDropOnItemIndex { outlineView.setDropItem(target, dropChildIndex: target!.children.count) }
+            if let t = over, case .section = t.kind {
+                if index == NSOutlineViewDropOnItemIndex { outlineView.setDropItem(t, dropChildIndex: t.children.count) }
                 return .move
             }
             return []
         case .section:
-            guard target == nil, index != NSOutlineViewDropOnItemIndex else { return [] }
+            // Sections only go between top-level items, but the outline proposes drops inside whatever is
+            // under the pointer: take the top-level item there and go before or after it.
+            var top = target
+            while let p = top?.parent { top = p }
+            if let top {
+                guard let i = roots.firstIndex(where: { $0 === top }) else { return [] }
+                outlineView.setDropItem(nil, dropChildIndex: max(ungroupedCount, i + (below(top) ? 1 : 0)))
+                return .move
+            }
+            guard index != NSOutlineViewDropOnItemIndex, index >= 0 else { return [] }
             if index < ungroupedCount { outlineView.setDropItem(nil, dropChildIndex: ungroupedCount) }
             return .move
         case .tab:
@@ -530,7 +555,8 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         case .tab(let s):
             changed = sb.moveTab(session: s, toIndex: index)
         }
-        if changed { app.daemon.saveSidebar(sb) }
+        // Saved on the next turn: saving reloads the outline, which mustn't happen inside its own drop handling.
+        if changed { DispatchQueue.main.async { [app] in MainActor.assumeIsolated { app.daemon.saveSidebar(sb) } } }
         return changed
     }
 }
@@ -540,6 +566,17 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
 final class SidebarOutlineView: NSOutlineView {
     weak var controller: SidebarController?
     private var tracking: NSTrackingArea?
+    /// Focus test hook: a drag that AppKit's own tracking starts is handed here instead of to the
+    /// window server, so the test plays the drop side in-process and the drag never follows the real mouse.
+    var dragCapture: ((NSDraggingSession, [NSDraggingItem], NSEvent) -> Void)?
+
+    override func beginDraggingSession(with items: [NSDraggingItem], event: NSEvent, source: any NSDraggingSource) -> NSDraggingSession {
+        guard let capture = dragCapture else { return super.beginDraggingSession(with: items, event: event, source: source) }
+        let session = NSDraggingSession()
+        source.draggingSession?(session, willBeginAt: window?.convertPoint(toScreen: event.locationInWindow) ?? .zero)
+        capture(session, items, event)
+        return session
+    }
 
     override var acceptsFirstResponder: Bool { false }
     /// A click on a row in a background window acts straight away (the keyboard stays in the terminal anyway).
