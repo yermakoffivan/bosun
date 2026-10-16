@@ -1135,7 +1135,12 @@ impl AppState {
                     view.preview = Some(bytes);
                 }
             }
-            AppMsg::StatusRefreshed { name, status } => {
+            AppMsg::StatusRefreshed {
+                name,
+                status,
+                source,
+                detail,
+            } => {
                 // Sibling of `PreviewRefreshed` — push-style status
                 // update from the actor's fast tick. Updates the
                 // matching SessionView's `status` field in place; no
@@ -1149,6 +1154,8 @@ impl AppState {
                 // too keeps a short burst from being missed entirely.
                 if let Some(view) = self.sessions.iter_mut().find(|v| v.name() == name) {
                     view.status = status;
+                    view.status_source = source;
+                    view.status_detail = detail;
                 }
                 if status == Status::Running {
                     if let Some(seen) = self.seen_content.get_mut(&name) {
@@ -4901,6 +4908,33 @@ mod tests {
         s.apply(refreshed(vec![ses_h("a", 1), ses_hs("b", 3, Status::Idle)]));
         let b = s.session_by_name("b").unwrap().clone();
         assert_eq!(s.display_status(&b), Status::Done);
+    }
+
+    #[test]
+    fn status_push_carries_source_and_detail() {
+        use crate::agent_hooks::StatusSource;
+        let mut s = state_with(vec![], 0);
+        s.apply(refreshed(vec![ses_h("a", 1)]));
+        s.apply(AppMsg::StatusRefreshed {
+            name: "a".into(),
+            status: Status::Waiting,
+            source: StatusSource::Hook,
+            detail: Some("permission: Bash".into()),
+        });
+        let a = s.session_by_name("a").unwrap();
+        assert_eq!(a.status, Status::Waiting);
+        assert_eq!(a.status_source, StatusSource::Hook);
+        assert_eq!(a.status_detail.as_deref(), Some("permission: Bash"));
+        // Back to the detectors: the old detail goes with the hook.
+        s.apply(AppMsg::StatusRefreshed {
+            name: "a".into(),
+            status: Status::Idle,
+            source: StatusSource::Detector,
+            detail: None,
+        });
+        let a = s.session_by_name("a").unwrap();
+        assert_eq!(a.status_source, StatusSource::Detector);
+        assert_eq!(a.status_detail, None);
     }
 
     /// A session whose status came from its agent's hook reporting

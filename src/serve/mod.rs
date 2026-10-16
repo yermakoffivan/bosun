@@ -158,6 +158,9 @@ pub async fn run(opts: ServeOptions) -> std::result::Result<(), StartError> {
     );
     // No preview to keep live: park the actor's fast capture tick.
     let _ = cmd_tx.send(Command::EmbedActive(true));
+    // Hook-reported states reach clients within 250 ms instead of on
+    // the 1 s refresh (see `Command::FastStatusPoll`).
+    let _ = cmd_tx.send(Command::FastStatusPoll(true));
 
     let mut daemon = Daemon::new(config, store, client, cmd_tx.clone());
     let result = daemon.serve(listener, evt_rx, opts).await;

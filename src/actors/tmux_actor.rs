@@ -98,6 +98,11 @@ const SELF_HEAL_EVERY: Duration = Duration::from_secs(30);
 /// agents are parked at a prompt — skip the exec.
 const CAPTURE_REUSE_AFTER: Duration = Duration::from_secs(2);
 
+/// How often the status poll runs when it's on (`bosun serve`, see
+/// [`Command::FastStatusPoll`]). The Mac app's budget for an agent
+/// state change reaching its sidebar is 250 ms.
+const STATUS_POLL_EVERY: Duration = Duration::from_millis(250);
+
 /// Per-session state that outlives a single refresh pass.
 #[derive(Default)]
 struct RefreshState {
@@ -107,15 +112,52 @@ struct RefreshState {
     /// doesn't cost a `tmux` exec on every 1Hz tick. See
     /// [`CAPTURE_REUSE_AFTER`].
     captures: HashMap<String, CachedCapture>,
+    /// The cheap status inputs each session's status was last worked
+    /// out from, so the status poll only looks again when one changed.
+    inputs: HashMap<String, StatusInputs>,
+    /// The status last sent to the app for each session, so the status
+    /// poll only sends a change.
+    sent: HashMap<String, Settled>,
 }
 
 impl RefreshState {
     /// Drop per-session state for sessions that are no longer listed.
     fn retain(&mut self, views: &[SessionView]) {
-        self.smoothers
-            .retain(|name, _| views.iter().any(|v| v.name() == name));
-        self.captures
-            .retain(|name, _| views.iter().any(|v| v.name() == name));
+        let live = |name: &String| views.iter().any(|v| v.name() == name);
+        self.smoothers.retain(|name, _| live(name));
+        self.captures.retain(|name, _| live(name));
+        self.inputs.retain(|name, _| live(name));
+        self.sent.retain(|name, _| live(name));
+    }
+
+    /// Note what a full status pass (capture plus detectors) worked
+    /// out for `s`, so the status poll has the right baseline.
+    fn record(&mut self, s: &crate::tmux::TmuxSession, settled: Settled) {
+        self.inputs.insert(s.name.clone(), StatusInputs::of(s));
+        self.sent.insert(s.name.clone(), settled);
+    }
+}
+
+/// A published status: the state, where it came from, and the hook's
+/// detail.
+type Settled = (Status, StatusSource, Option<String>);
+
+/// The parts of a `list-sessions` row that a hook-reported status
+/// depends on and that cost nothing to read: no capture needed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusInputs {
+    pane_title: Option<String>,
+    pane_command: Option<String>,
+    hook: Option<agent_hooks::HookState>,
+}
+
+impl StatusInputs {
+    fn of(s: &crate::tmux::TmuxSession) -> Self {
+        Self {
+            pane_title: s.pane_title.clone(),
+            pane_command: s.pane_command.clone(),
+            hook: s.hook.clone(),
+        }
     }
 }
 
@@ -123,6 +165,9 @@ impl RefreshState {
 /// from it. Held behind `Arc`s so reusing it is a refcount bump, not
 /// a copy of the pane.
 struct CachedCapture {
+    /// When the capture was taken. The status poll only lets a capture
+    /// overrule a hook report made before it.
+    taken_at: SystemTime,
     /// tmux's `session_activity` at the moment of the capture.
     activity: Option<SystemTime>,
     /// The pane width the capture was taken at. A resize reflows the
@@ -143,6 +188,7 @@ impl CachedCapture {
         // tmux exec.
         let hash = content_hash(&plain);
         Self {
+            taken_at: SystemTime::now(),
             activity,
             width,
             ansi: Arc::from(ansi.into_boxed_slice()),
@@ -216,6 +262,9 @@ pub fn spawn(
         // tick has nothing left to contribute. See the fast branch
         // in the select! below.
         let mut embed_active = false;
+        // The 250 ms status poll, on while `bosun serve` hosts this
+        // actor (`Command::FastStatusPoll`). See its select! branch.
+        let mut status_poll: Option<time::Interval> = None;
         let mut last_bar_state: Vec<BarSession> = Vec::new();
         let mut globals = GlobalsGuard {
             socket: socket.clone(),
@@ -402,6 +451,13 @@ pub fn spawn(
                 }
                 Command::EmbedActive(active) => {
                     embed_active = active;
+                }
+                Command::FastStatusPoll(on) => {
+                    status_poll = on.then(|| {
+                        let mut t = time::interval(STATUS_POLL_EVERY);
+                        t.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                        t
+                    });
                 }
                 Command::SetAgentHooks(on) => {
                     // Settings panel toggle. Applies to launches from
@@ -957,6 +1013,31 @@ pub fn spawn(
                         &evt_tx,
                     )
                     .await;
+                }
+                _ = async {
+                    match status_poll.as_mut() {
+                        Some(t) => { t.tick().await; }
+                        None => { std::future::pending::<()>().await; }
+                    }
+                } => {
+                    // Status poll (`bosun serve` only): one
+                    // `list-sessions` re-reads every session's pane
+                    // title, command and `@bosun_state*` options, and a
+                    // hook-reported change goes out straight away rather
+                    // than on the next 1Hz refresh. It never captures a
+                    // pane, so the content detectors stay on the 1Hz
+                    // cadence above.
+                    //
+                    // Over the control channel a poll is a pipe write
+                    // and a parse. Over exec it would be four `tmux`
+                    // processes a second, forever (the Gatekeeper cost
+                    // described on the fast tick above), so while the
+                    // channel is down the poll sits out and statuses
+                    // ride the 1Hz refresh as they always did.
+                    if !client.control_channel_up() {
+                        continue;
+                    }
+                    poll_statuses(&*client, &config, &mut refresh_state, &evt_tx).await;
                 }
             }
         }
@@ -1630,15 +1711,18 @@ async fn refresh_focused(
     let detected = registry.detect(&ctx);
     let smoother = refresh_state.smoothers.entry(s.name.clone()).or_default();
     let prompt = claude_prompt_on_screen(config, &s, &ctx);
-    let (smoothed, _, _) = settle_status(config, &s, detected, prompt, now, smoother);
+    let (smoothed, source, detail) = settle_status(config, &s, detected, prompt, now, smoother);
     let publish = if smoothed == Status::Unknown {
         Status::Idle
     } else {
         smoothed
     };
+    refresh_state.record(&s, (publish, source, detail.clone()));
     let _ = evt_tx.send(AppMsg::StatusRefreshed {
         name: s.name.clone(),
         status: publish,
+        source,
+        detail,
     });
     let _ = evt_tx.send(AppMsg::PreviewRefreshed {
         name: s.name,
@@ -1821,17 +1905,15 @@ async fn refresh_all(
         } else {
             None
         };
-        let mut view = SessionView::new(
-            s,
-            if smoothed == Status::Unknown {
-                // Never surface Unknown to the UI — fall back to Idle so the
-                // glyph is stable instead of blinking.
-                Status::Idle
-            } else {
-                smoothed
-            },
-            preview,
-        );
+        // Never surface Unknown to the UI — fall back to Idle so the
+        // glyph is stable instead of blinking.
+        let publish = if smoothed == Status::Unknown {
+            Status::Idle
+        } else {
+            smoothed
+        };
+        state.record(&s, (publish, status_source, status_detail.clone()));
+        let mut view = SessionView::new(s, publish, preview);
         view.content_hash = content_hash;
         view.status_source = status_source;
         view.status_detail = status_detail;
@@ -1873,16 +1955,31 @@ fn settle_status(
     prompt_on_screen: bool,
     now: SystemTime,
     smoother: &mut Smoother,
-) -> (Status, StatusSource, Option<String>) {
-    let hook = if config.agent_hooks {
-        s.hook.as_ref()
-    } else {
-        None
-    };
-    let now_ms = now
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+) -> Settled {
+    match hook_status(config, s, prompt_on_screen, now) {
+        Some((publish, detail)) => {
+            smoother.force(publish);
+            (publish, StatusSource::Hook, detail)
+        }
+        None => (smoother.observe(detected), StatusSource::Detector, None),
+    }
+}
+
+/// The hook-reported status to publish for `s`, and its detail, when
+/// the hook wins over the detectors (see `agent_hooks::resolve`).
+/// `None` when the setting is off, there's no hook state, or the
+/// cross-checks reject it.
+fn hook_status(
+    config: &Config,
+    s: &crate::tmux::TmuxSession,
+    prompt_on_screen: bool,
+    now: SystemTime,
+) -> Option<(Status, Option<String>)> {
+    if !config.agent_hooks {
+        return None;
+    }
+    let hook = s.hook.as_ref()?;
+    let now_ms = epoch_ms(now);
     let quiet_ms = s
         .last_activity
         .and_then(|t| now.duration_since(t).ok())
@@ -1896,18 +1993,110 @@ fn settle_status(
         quiet_ms,
         now_ms,
     };
-    match (agent_hooks::resolve(hook, &input), hook) {
-        (Some(status), Some(hook)) => {
-            let publish = if status == Status::Done {
-                Status::Idle
-            } else {
-                status
-            };
-            smoother.force(publish);
-            (publish, StatusSource::Hook, hook.detail.clone())
+    let status = agent_hooks::resolve(Some(hook), &input)?;
+    let publish = if status == Status::Done {
+        Status::Idle
+    } else {
+        status
+    };
+    Some((publish, hook.detail.clone()))
+}
+
+/// One pass of the status poll (`Command::FastStatusPoll`): a single
+/// `list-sessions`, then [`poll_one`] for each managed session, and a
+/// `StatusRefreshed` for every status that changed. No captures.
+async fn poll_statuses(
+    client: &dyn TmuxClient,
+    config: &Config,
+    state: &mut RefreshState,
+    evt_tx: &mpsc::UnboundedSender<AppMsg>,
+) {
+    let raw = match client.list_sessions().await {
+        Ok(raw) => raw,
+        Err(e) => {
+            tracing::debug!("status poll list-sessions: {}", e);
+            return;
         }
-        _ => (smoother.observe(detected), StatusSource::Detector, None),
+    };
+    let now = SystemTime::now();
+    for s in raw.iter().filter(|s| config.manages(&s.name)) {
+        if let Some((status, source, detail)) = poll_one(config, s, state, now) {
+            let _ = evt_tx.send(AppMsg::StatusRefreshed {
+                name: s.name.clone(),
+                status,
+                source,
+                detail,
+            });
+        }
     }
+}
+
+/// The status poll's decision for one session: the new status to send,
+/// or `None` when there's nothing to send.
+///
+/// Only a hook-reported status is published from here. When the hook
+/// loses to the detectors (the agent exited to a shell, Claude's title
+/// stopped spinning, a prompt is on screen) the answer needs the
+/// detectors and their hysteresis, which need a fresh capture, so that
+/// case waits for the 1Hz refresh as before. Sessions the 1Hz refresh
+/// hasn't seen yet are left to it too, so a new row arrives through
+/// `SessionsRefreshed` first.
+///
+/// Claude's prompt cross-check reads the capture the last refresh took,
+/// but only when that capture is newer than the hook's report: a screen
+/// read from before the agent said "running" can't overrule it (after a
+/// permission prompt is answered, the old capture still shows the
+/// prompt).
+fn poll_one(
+    config: &Config,
+    s: &crate::tmux::TmuxSession,
+    state: &mut RefreshState,
+    now: SystemTime,
+) -> Option<Settled> {
+    if !state.smoothers.contains_key(&s.name) {
+        return None;
+    }
+    let inputs = StatusInputs::of(s);
+    if state.inputs.get(&s.name) == Some(&inputs) {
+        return None;
+    }
+    state.inputs.insert(s.name.clone(), inputs);
+
+    let hook_at = s.hook.as_ref().map(|h| h.at_ms)?;
+    let prompt = state
+        .captures
+        .get(&s.name)
+        .filter(|c| epoch_ms(c.taken_at) >= hook_at)
+        .is_some_and(|c| {
+            let prev = state.smoothers.get(&s.name).map(|sm| sm.current());
+            let ctx = DetectContext::from_parts(
+                &c.ansi,
+                &c.plain,
+                s.last_activity,
+                now,
+                prev,
+                &s.name,
+                s.pane_title.as_deref(),
+                s.pane_command.as_deref(),
+            );
+            claude_prompt_on_screen(config, s, &ctx)
+        });
+    let (status, detail) = hook_status(config, s, prompt, now)?;
+    let settled = (status, StatusSource::Hook, detail);
+    if state.sent.get(&s.name) == Some(&settled) {
+        return None;
+    }
+    if let Some(sm) = state.smoothers.get_mut(&s.name) {
+        sm.force(status);
+    }
+    state.sent.insert(s.name.clone(), settled.clone());
+    Some(settled)
+}
+
+fn epoch_ms(t: SystemTime) -> u64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Layout-independent fingerprint of a pane's visible plain text, used
@@ -2316,6 +2505,137 @@ mod build_cmd_tests {
             settle_status(&config, &s, Status::Running, false, now, &mut sm),
             (Status::Idle, StatusSource::Hook, None)
         );
+    }
+
+    /// A `RefreshState` as the 1Hz refresh leaves it after seeing `s`
+    /// settle on `status` from the detectors.
+    fn refreshed(s: &crate::tmux::TmuxSession, status: Status) -> RefreshState {
+        let mut state = RefreshState::default();
+        let mut sm = Smoother::new();
+        sm.observe(status);
+        state.smoothers.insert(s.name.clone(), sm);
+        state.record(s, (status, StatusSource::Detector, None));
+        state
+    }
+
+    #[test]
+    fn status_poll_sends_each_hook_change_once() {
+        let config = Config::default();
+        let now = SystemTime::now();
+        let quiet = Duration::from_secs(1);
+        let before = hook_session(None, "✳ task", "2_1_301", quiet, now);
+        let mut state = refreshed(&before, Status::Idle);
+        // Nothing moved since the refresh: nothing to send.
+        assert_eq!(poll_one(&config, &before, &mut state, now), None);
+
+        let waiting = hook_session(
+            Some(hook_at(
+                Status::Waiting,
+                now,
+                Duration::from_millis(10),
+                Some("permission: Bash"),
+            )),
+            "✳ task",
+            "2_1_301",
+            quiet,
+            now,
+        );
+        assert_eq!(
+            poll_one(&config, &waiting, &mut state, now),
+            Some((
+                Status::Waiting,
+                StatusSource::Hook,
+                Some("permission: Bash".into())
+            ))
+        );
+        // The smoother follows, as it does when the refresh sees a hook.
+        assert_eq!(state.smoothers["bosun-a"].current(), Status::Waiting);
+        // Same inputs again, or only the title moved: no repeat.
+        assert_eq!(poll_one(&config, &waiting, &mut state, now), None);
+        let mut retitled = waiting.clone();
+        retitled.pane_title = Some("✻ task".into());
+        assert_eq!(poll_one(&config, &retitled, &mut state, now), None);
+
+        // A finished turn goes out as Idle with the hook as its source.
+        let done = hook_session(
+            Some(hook_at(Status::Done, now, Duration::ZERO, None)),
+            "✳ task",
+            "2_1_301",
+            quiet,
+            now,
+        );
+        assert_eq!(
+            poll_one(&config, &done, &mut state, now),
+            Some((Status::Idle, StatusSource::Hook, None))
+        );
+    }
+
+    #[test]
+    fn status_poll_leaves_detector_answers_to_the_refresh() {
+        let now = SystemTime::now();
+        let quiet = Duration::from_secs(1);
+        let waiting = Some(hook_at(Status::Waiting, now, Duration::ZERO, None));
+        let config = Config::default();
+
+        // A session the refresh hasn't listed yet.
+        let s = hook_session(waiting.clone(), "✳ task", "2_1_301", quiet, now);
+        let mut state = RefreshState::default();
+        assert_eq!(poll_one(&config, &s, &mut state, now), None);
+
+        // The agent exited to a shell: the hook loses, and working out
+        // what replaces it needs a capture.
+        let base = hook_session(None, "✳ task", "2_1_301", quiet, now);
+        let mut state = refreshed(&base, Status::Idle);
+        let shell = hook_session(waiting.clone(), "✳ task", "zsh", quiet, now);
+        assert_eq!(poll_one(&config, &shell, &mut state, now), None);
+        assert_eq!(state.smoothers["bosun-a"].current(), Status::Idle);
+
+        // Hooks switched off in settings.
+        let off = Config {
+            agent_hooks: false,
+            ..Config::default()
+        };
+        let mut state = refreshed(&base, Status::Idle);
+        let s = hook_session(waiting, "✳ task", "2_1_301", quiet, now);
+        assert_eq!(poll_one(&off, &s, &mut state, now), None);
+    }
+
+    #[test]
+    fn status_poll_prompt_check_only_trusts_captures_newer_than_the_hook() {
+        let config = Config::default();
+        let now = SystemTime::now();
+        let quiet = Duration::from_secs(1);
+        let dialog = "╭──────╮\n│ Bash command │\n│ rm -rf node_modules │\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n╰──────╯";
+        let base = hook_session(None, "⠙ task", "2_1_301", quiet, now);
+        // Running reported a second ago, e.g. right after the user
+        // answered the permission prompt.
+        let running = hook_session(
+            Some(hook_at(Status::Running, now, Duration::from_secs(1), None)),
+            "⠙ task",
+            "2_1_301",
+            quiet,
+            now,
+        );
+        let with_capture = |taken_ago: Duration| {
+            let mut state = refreshed(&base, Status::Waiting);
+            let mut cap = CachedCapture::new(base.last_activity, 80, dialog.as_bytes().to_vec());
+            cap.taken_at = now - taken_ago;
+            state.captures.insert(base.name.clone(), cap);
+            state
+        };
+
+        // The capture still showing the prompt predates the report: the
+        // agent's word wins.
+        let mut state = with_capture(Duration::from_secs(2));
+        assert_eq!(
+            poll_one(&config, &running, &mut state, now),
+            Some((Status::Running, StatusSource::Hook, None))
+        );
+        // A capture taken after the report still shows a prompt: the
+        // detector's Waiting stands until the refresh says otherwise.
+        let mut state = with_capture(Duration::ZERO);
+        assert_eq!(poll_one(&config, &running, &mut state, now), None);
+        assert_eq!(state.smoothers["bosun-a"].current(), Status::Waiting);
     }
 
     #[test]

@@ -176,6 +176,13 @@ pub trait TmuxClient: Send + Sync {
     /// worktree placed inside the repo's working tree stays out of
     /// `git status`. Local-only (never committed); a no-op if already present.
     async fn ensure_excluded(&self, repo: &str, pattern: &str) -> Result<()>;
+
+    /// Whether tmux commands are currently carried by the control-mode
+    /// channel, so one costs a pipe write rather than a `tmux` exec.
+    /// Pollers that would be too expensive over exec check this first.
+    fn control_channel_up(&self) -> bool {
+        false
+    }
 }
 
 /// Production implementation. tmux commands go over a long-lived
@@ -432,6 +439,10 @@ impl Default for TokioTmuxClient {
 
 #[async_trait]
 impl TmuxClient for TokioTmuxClient {
+    fn control_channel_up(&self) -> bool {
+        self.channel.is_up()
+    }
+
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>> {
         let output = self
             .run(&["list-sessions", "-F", LIST_SESSIONS_FORMAT], Retry::Safe)

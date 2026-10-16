@@ -271,6 +271,12 @@ pub enum Command {
     /// Settings panel toggled `agent_hooks`; the tmux actor rebuilds its
     /// launch hooks and starts or stops honoring hook-reported state.
     SetAgentHooks(bool),
+    /// Poll the cheap status inputs (pane title, command and the hook
+    /// options) every 250 ms and push a `StatusRefreshed` as soon as a
+    /// hook-reported state changes. `bosun serve` turns this on; the TUI
+    /// leaves it off. Only runs while the control-mode command channel
+    /// is up, so it never costs a `tmux` exec.
+    FastStatusPoll(bool),
     /// Persist the display_name → section_name history to config.toml.
     /// Intercepted by the app loop — never forwarded to the tmux actor.
     SaveSessionHistory(std::collections::HashMap<String, String>),
@@ -379,14 +385,20 @@ pub enum AppMsg {
     /// `PreviewRefreshed` — emitted by the tmux actor's fast tick
     /// once it has captured + classified a pane, so the sidebar
     /// glyph updates at the fast-tick cadence instead of waiting
-    /// for the 1Hz `SessionsRefreshed` reconcile. The app handler
-    /// updates the matching `SessionView.session.status` in place
-    /// and does nothing else — no list reconcile, no statusbar
+    /// for the 1Hz `SessionsRefreshed` reconcile. Under `bosun serve`
+    /// it also comes from the 250 ms status poll
+    /// (`Command::FastStatusPoll`) when a hook-reported state changes.
+    /// The app handler updates the matching `SessionView`'s status,
+    /// source and detail in place and does nothing else — no list reconcile, no statusbar
     /// diff, no detector re-run. A no-op if the named session is
     /// no longer in the list.
     StatusRefreshed {
         name: String,
         status: crate::tmux::detector::Status,
+        /// Whether `status` came from the agent's hook or the detectors.
+        source: crate::agent_hooks::StatusSource,
+        /// The hook's note that goes with `status` (hook states only).
+        detail: Option<String>,
     },
     /// A chunk of bytes read from an embedded terminal's PTY (2.0+).
     /// `session` is the internal tmux session name the embed was
