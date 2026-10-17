@@ -300,13 +300,13 @@ mod tests {
         let names: Vec<String> = (0..28).map(|i| format!("theme-{i:02}")).collect();
         let mut m = ThemeModal::new(names.clone(), "theme-00".into());
         // Walk the whole list; the highlighted row must always be drawn.
-        for i in 0..28 {
+        for name in &names {
             let rows = draw(&m, 100, 24);
             let marker = rows
                 .iter()
                 .find(|r| r.contains('▸'))
-                .unwrap_or_else(|| panic!("no selection marker with theme-{i:02} selected"));
-            assert!(marker.contains(&names[i]), "{marker:?} for {}", names[i]);
+                .unwrap_or_else(|| panic!("no selection marker with {name} selected"));
+            assert!(marker.contains(name.as_str()), "{marker:?} for {name}");
             m.handle(key(KeyCode::Down));
         }
         // And walking back up from the end.

@@ -215,7 +215,7 @@ pub enum ServerMsg {
     },
     Theme {
         seq: u64,
-        theme: ThemeWire,
+        theme: Box<ThemeWire>,
     },
     Themes {
         seq: u64,
@@ -1385,7 +1385,10 @@ mod tests {
             theme_light: None,
             theme_dark: None,
         });
-        round_trip_server(ServerMsg::Theme { seq: 7, theme });
+        round_trip_server(ServerMsg::Theme {
+            seq: 7,
+            theme: Box::new(theme),
+        });
         round_trip_server(ServerMsg::Themes { seq: 8, themes });
         round_trip_server(ServerMsg::Keybindings {
             seq: 10,
