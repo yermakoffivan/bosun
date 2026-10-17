@@ -14,3 +14,15 @@ status_waiting = "#e5c07b"
 status_idle    = "#5c6370"
 status_error   = "#e06c75"
 status_done    = "#56b6c2"
+
+[terminal]
+ghostty        = "Atom One Dark"
+background     = "#21252b"
+foreground     = "#abb2bf"
+cursor         = "#abb2bf"
+selection_bg   = "#323844"
+selection_fg   = "#abb2bf"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#21252b", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#abb2bf",
+  "#767676", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#abb2bf",
+]

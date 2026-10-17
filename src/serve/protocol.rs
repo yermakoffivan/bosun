@@ -567,6 +567,25 @@ pub struct ThemeWire {
     /// Resolved: themes that don't set it fall back to `accent`, the
     /// same as the TUI.
     pub status_done: String,
+    /// The theme's `[terminal]` table, if it has one. Optional and left
+    /// out when absent, so older clients and daemons are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TerminalWire>,
+}
+
+/// A theme's terminal colours as `#rrggbb`: what a graphical client
+/// paints its terminals with. `palette` is ANSI 0-7 then 8-15.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalWire {
+    /// The Ghostty theme the colours came from, for reference only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ghostty: Option<String>,
+    pub background: String,
+    pub foreground: String,
+    pub cursor: String,
+    pub selection_bg: String,
+    pub selection_fg: String,
+    pub palette: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1002,6 +1021,21 @@ impl From<&crate::ui::Theme> for ThemeWire {
             status_idle: color_hex(t.status_idle),
             status_error: color_hex(t.status_error),
             status_done: color_hex(t.done_color()),
+            terminal: t.terminal.as_ref().map(TerminalWire::from),
+        }
+    }
+}
+
+impl From<&crate::ui::theme::TerminalTheme> for TerminalWire {
+    fn from(t: &crate::ui::theme::TerminalTheme) -> Self {
+        Self {
+            ghostty: t.ghostty.clone(),
+            background: color_hex(t.background),
+            foreground: color_hex(t.foreground),
+            cursor: color_hex(t.cursor),
+            selection_bg: color_hex(t.selection_bg),
+            selection_fg: color_hex(t.selection_fg),
+            palette: t.palette.iter().map(|c| color_hex(*c)).collect(),
         }
     }
 }
@@ -1582,6 +1616,38 @@ mod tests {
                 theme_dark: None
             }
         );
+    }
+
+    #[test]
+    fn theme_wire_carries_the_terminal_table_when_there_is_one() {
+        let w = ThemeWire::from(&crate::ui::Theme::builtin("nord").unwrap());
+        let v = serde_json::to_value(&w).unwrap();
+        let t = &v["terminal"];
+        assert_eq!(t["ghostty"], "Nord");
+        assert_eq!(t["background"], "#2e3440");
+        assert_eq!(t["foreground"], "#d8dee9");
+        assert_eq!(t["cursor"], "#eceff4");
+        assert_eq!(t["selection_bg"], "#eceff4");
+        assert_eq!(t["selection_fg"], "#4c566a");
+        assert_eq!(t["palette"].as_array().unwrap().len(), 16);
+        assert_eq!(t["palette"][1], "#bf616a");
+        let back: ThemeWire = serde_json::from_value(v).unwrap();
+        assert_eq!(back, w);
+        // A theme without a `ghostty` name leaves the key out.
+        let opencode =
+            serde_json::to_value(ThemeWire::from(&crate::ui::Theme::default_opencode())).unwrap();
+        assert!(opencode["terminal"].get("ghostty").is_none(), "{opencode}");
+    }
+
+    #[test]
+    fn theme_wire_without_a_terminal_table_leaves_the_key_out() {
+        let mut theme = crate::ui::Theme::default_opencode();
+        theme.terminal = None;
+        let v = serde_json::to_value(ThemeWire::from(&theme)).unwrap();
+        assert!(v.get("terminal").is_none(), "{v}");
+        // An older daemon's theme (no key at all) still decodes.
+        let back: ThemeWire = serde_json::from_value(v).unwrap();
+        assert_eq!(back.terminal, None);
     }
 
     #[test]

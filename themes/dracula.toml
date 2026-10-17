@@ -14,3 +14,15 @@ status_waiting = "#f1fa8c"
 status_idle    = "#6272a4"
 status_error   = "#ff5555"
 status_done    = "#8be9fd"
+
+[terminal]
+ghostty        = "Dracula"
+background     = "#282a36"
+foreground     = "#f8f8f2"
+cursor         = "#f8f8f2"
+selection_bg   = "#44475a"
+selection_fg   = "#ffffff"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#21222c", "#ff5555", "#50fa7b", "#f1fa8c", "#bd93f9", "#ff79c6", "#8be9fd", "#f8f8f2",
+  "#6272a4", "#ff6e6e", "#69ff94", "#ffffa5", "#d6acff", "#ff92df", "#a4ffff", "#ffffff",
+]

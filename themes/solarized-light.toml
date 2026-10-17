@@ -14,3 +14,15 @@ status_waiting = "#b58900"
 status_idle    = "#93a1a1"
 status_error   = "#dc322f"
 status_done    = "#2aa198"
+
+[terminal]
+ghostty        = "iTerm2 Solarized Light"
+background     = "#fdf6e3"
+foreground     = "#657b83"
+cursor         = "#657b83"
+selection_bg   = "#eee8d5"
+selection_fg   = "#586e75"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#bbb5a2",
+  "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
+]

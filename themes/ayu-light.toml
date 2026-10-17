@@ -14,3 +14,15 @@ status_waiting = "#f2ae49"
 status_idle    = "#8a9199"
 status_error   = "#f07171"
 status_done    = "#4cbf99"
+
+[terminal]
+ghostty        = "Ayu Light"
+background     = "#f8f9fa"
+foreground     = "#5c6166"
+cursor         = "#ffaa33"
+selection_bg   = "#035bd6"
+selection_fg   = "#f8f9fa"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#000000", "#ea6c6d", "#6cbf43", "#eca944", "#3199e1", "#9e75c7", "#46ba94", "#bababa",
+  "#686868", "#f07171", "#86b300", "#f2ae49", "#399ee6", "#a37acc", "#4cbf99", "#d1d1d1",
+]

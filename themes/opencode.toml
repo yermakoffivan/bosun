@@ -14,3 +14,14 @@ status_waiting = "#f4c169"
 status_idle    = "#7c8495"
 status_error   = "#ff5d6b"
 status_done    = "#6ec8ff"
+
+[terminal]
+background     = "#0b0d12"
+foreground     = "#e6e9ef"
+cursor         = "#7c5cff"
+selection_bg   = "#1e2433"
+selection_fg   = "#e6e9ef"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#25272d", "#ff5d6b", "#62d98c", "#f4c169", "#6ec8ff", "#b692b5", "#68d0c6", "#e6e9ef",
+  "#7c8495", "#ff7a86", "#7ee0a1", "#f6cc84", "#88d2ff", "#c4a6c2", "#83d9d0", "#ebedf2",
+]

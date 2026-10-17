@@ -14,3 +14,15 @@ status_waiting = "#ffd580"
 status_idle    = "#5c6773"
 status_error   = "#f28779"
 status_done    = "#95e6cb"
+
+[terminal]
+ghostty        = "Ayu Mirage"
+background     = "#1f2430"
+foreground     = "#cccac2"
+cursor         = "#ffcc66"
+selection_bg   = "#409fff"
+selection_fg   = "#1f2430"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#171b24", "#ed8274", "#87d96c", "#facc6e", "#6dcbfa", "#dabafa", "#90e1c6", "#c7c7c7",
+  "#686868", "#f28779", "#d5ff80", "#ffd173", "#73d0ff", "#dfbfff", "#95e6cb", "#ffffff",
+]

@@ -14,3 +14,15 @@ status_waiting = "#f9e2af"
 status_idle    = "#6c7086"
 status_error   = "#f38ba8"
 status_done    = "#89dceb"
+
+[terminal]
+ghostty        = "Catppuccin Mocha"
+background     = "#1e1e2e"
+foreground     = "#cdd6f4"
+cursor         = "#f5e0dc"
+selection_bg   = "#f5e0dc"
+selection_fg   = "#1e1e2e"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de",
+  "#585b70", "#f7aec2", "#c2ecbf", "#fcd682", "#aeccfc", "#f398da", "#b1eae1", "#a6adc8",
+]
