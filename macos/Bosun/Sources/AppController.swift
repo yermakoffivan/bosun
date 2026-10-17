@@ -51,6 +51,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     private var appearanceObservation: NSKeyValueObservation?
     /// The Settings window's Light/Dark pickers.
     let themePairModel = ThemePairModel()
+    let editorModel = EditorModel()
     /// Launch measurements (seconds since process start).
     private(set) var sidebarPaintedAt: Double?
     private(set) var firstTerminalAt: Double?
@@ -84,6 +85,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         buildMenu()
         installMonitors()
         LinkOpener.sessionPath = { [weak self] in self?.daemon.state.sessions[$0]?.path }
+        LinkOpener.editor = { [weak self] in self?.daemon.state.config.value("editor")?.stringValue }
 
         daemon.onChanges.append { [weak self] in self?.stateChanged($0) }
         daemon.onStatus.append { [weak self] in self?.statusChanged($0) }
@@ -107,6 +109,9 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         themePairModel.onPreviewEnd = { [weak self] chosen in self?.endThemePreview(chosen: chosen) }
         themePairModel.onSet = { [weak self] key, name in
             self?.daemon.command(.applySetting(key: key, value: name.map { .string($0) } ?? .null)) { [weak self] in self?.report($0) }
+        }
+        editorModel.onSet = { [weak self] editor in
+            self?.daemon.command(.applySetting(key: "editor", value: editor.map { .string($0) } ?? .null)) { [weak self] in self?.report($0) }
         }
 
         // 1. First frame from the cached snapshot: no I/O beyond one small file.
@@ -819,6 +824,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 }
             case .config, .themes:
                 themePairModel.update(from: st)
+                editorModel.update(from: st)
             case .recents:
                 break
             }
@@ -1032,6 +1038,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     private func applyTheme() {
         theme = AppTheme(previewPalette ?? daemon.state.palette(for: appearance))
         themePairModel.update(from: daemon.state)
+        editorModel.update(from: daemon.state)
         for bw in windows { bw.applyTheme() }
         applyTerminalTheme()
     }
@@ -1442,7 +1449,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     @objc func showSettings() {
         if settingsWindow == nil {
-            let w = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(themePair: themePairModel)))
+            let w = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(themePair: themePairModel, editor: editorModel)))
             w.title = "Bosun Settings"
             w.styleMask = [.titled, .closable]
             w.isReleasedWhenClosed = false

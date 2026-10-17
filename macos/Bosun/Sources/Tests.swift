@@ -440,10 +440,14 @@ final class FocusTest: TestKit {
         if let p = sectionPoint(work) { await click(p) }
         await waitUntil(2) { app.daemon.state.sidebar.sections.first { $0.id == work }?.collapsed == false }
 
-        // 4. Rename in place (click the selected row's name), Return, then type.
+        // 4. Rename in place (double-click the row's name), Return, then type. A single click on the selected
+        // row's name only selects it.
         if let p = sidebarPoint(docs) { await click(p) }
+        await sleep(NSEvent.doubleClickInterval * 1000 + 300)
+        r.check("a single click on the selected row's name doesn't rename", app.focus.exception == nil && firstResponderIsActiveTerminal)
+        if let p = sidebarPoint(docs) { await doubleClick(p) }
         await waitUntil(2) { app.focus.exception == .rename }
-        r.check("clicking the selected row's name starts a rename", app.focus.exception == .rename)
+        r.check("double-clicking the row's name starts a rename", app.focus.exception == .rename)
         r.check("the rename field has the keyboard", w.firstResponder is NSText)
         await type("Docs Two")
         shot("02-rename-in-progress")
@@ -803,7 +807,7 @@ final class FocusTest: TestKit {
         r.check("…typing reaches it", await paneShows(f.webTests, "got: remembered"))
         // The sidebar marks the active pane's tab under the selected row.
         let tabRow = app.sidebar.itemFor(session: f.webTests).map { app.sidebar.outline.row(forItem: $0) } ?? -1
-        r.check("…the sidebar marks web tests as the active pane", tabRow >= 0 && app.sidebar.isSelectedForRename(app.sidebar.outline.item(atRow: tabRow) as! SidebarItem))
+        r.check("…the sidebar marks web tests as the active pane", tabRow >= 0 && app.sidebar.isShownSelection(app.sidebar.outline.item(atRow: tabRow) as! SidebarItem))
         await sleep(150)
         shot("05-back-to-three-panes")
 

@@ -491,6 +491,7 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
 /// App preferences (focus follows mouse, pool size, the Light/Dark themes and terminal colours, notifications).
 struct SettingsView: View {
     @ObservedObject var themePair: ThemePairModel
+    @ObservedObject var editor: EditorModel
     @AppStorage("focusFollowsMouse") private var focusFollowsMouse = true
     @AppStorage("poolSize") private var poolSize = AppSettings.defaultPoolSize
     @AppStorage(AppSettings.Key.notifyWhenWaiting) private var notifyWhenWaiting = true
@@ -506,6 +507,7 @@ struct SettingsView: View {
             Text("One per pane, including the ones on screen, so recently shown rows switch back in one frame. About 14 MB each.")
                 .font(.caption).foregroundStyle(.secondary)
             ThemePairSection(model: themePair)
+            EditorSection(model: editor)
             Section("Notifications") {
                 Toggle("Notify when an agent is waiting for you", isOn: $notifyWhenWaiting)
                 Toggle("Notify when an agent finishes its turn", isOn: $notifyWhenDone)

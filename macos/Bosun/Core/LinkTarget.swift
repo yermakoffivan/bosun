@@ -1,9 +1,10 @@
 import Foundation
 
-/// What a Cmd+click on a terminal link opens: a URL, or a file or directory on disk.
+/// What a Cmd+click on a terminal link opens: a URL, or a file or directory on disk (with the line and
+/// column a `:line:col` suffix named).
 public enum LinkTarget: Equatable, Sendable {
     case url(URL)
-    case file(String)
+    case file(String, line: Int? = nil, column: Int? = nil)
 
     /// The URL schemes libghostty's link regex matches (src/config/url.zig). Anything else it
     /// matches is a path, even when it looks like `name.rs:42` (a valid URL scheme to Foundation).
@@ -23,21 +24,18 @@ public enum LinkTarget: Equatable, Sendable {
     }
 
     /// Resolve the matched text. A path is tried as is, then without a trailing `:line` or
-    /// `:line:col`; relative ones against `cwd`. Returns nil for a path that doesn't exist (or a
-    /// relative one with no `cwd`), so nothing opens rather than the wrong thing.
+    /// `:line:col` (kept in the result); relative ones against `cwd`. Returns nil for a path that doesn't
+    /// exist (or a relative one with no `cwd`), so nothing opens rather than the wrong thing.
     public static func resolve(_ text: String, cwd: String?, home: String,
                                exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> LinkTarget? {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
         if isURL(text) { return URL(string: text).map { .url($0) } }
-        var candidates = [text]
+        if let full = absolute(text, cwd: cwd, home: home), exists(full) { return .file(full) }
         let stripped = stripLineSuffix(text)
-        if stripped != text { candidates.append(stripped) }
-        for c in candidates {
-            guard let full = absolute(c, cwd: cwd, home: home) else { continue }
-            if exists(full) { return .file(full) }
-        }
-        return nil
+        guard stripped != text, let full = absolute(stripped, cwd: cwd, home: home), exists(full) else { return nil }
+        let numbers = text.dropFirst(stripped.count + 1).split(separator: ":").map { Int($0) }
+        return .file(full, line: numbers.first.flatMap { $0 }, column: numbers.count > 1 ? numbers[1] : nil)
     }
 
     /// `src/app.rs:42` and `src/app.rs:42:7` become `src/app.rs`.

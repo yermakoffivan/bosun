@@ -247,6 +247,8 @@ Changes one settings-panel option and writes it to `config.toml`, the same as th
 
 Setting either never changes `theme`; see [Light and dark themes](#light-and-dark-themes).
 
+`editor` takes any command (it isn't checked against `PATH`, which differs between a terminal and a GUI app), or `null` (or `""`) to unset it.
+
 #### `client_flags`
 
 ```json
@@ -362,7 +364,7 @@ Specs used before, most recent first (up to 200). `last_used_at` is Unix millise
   {"key":"tmux_socket","value":"bosun","read_only":true}]}
 ```
 
-The settings panel as data. Keys: `theme`, `theme_light` and `theme_dark` (a theme name, or `null` when unset), `banner_font`, `default_agent`, `worktree_location` (`subdir` or `sibling`), `single_window`, `show_group_in_title`, `hide_single_tab_strip`, `remove_dead_sessions`, `embed_enabled`, plus the read-only install settings `session_prefix` and `tmux_socket` (null for tmux's default socket). `choices` is present for choice settings. `pinned_by` names the environment variable that pins a setting; environment variables beat `config.toml`, so a pinned setting is read-only, as it is in the TUI.
+The settings panel as data. Keys: `theme`, `theme_light` and `theme_dark` (a theme name, or `null` when unset), `banner_font`, `default_agent`, `editor` (a command such as `zed` or `code`, or `null` when unset: what the TUI's `e` key runs and what Bosun for Mac opens file links in), `worktree_location` (`subdir` or `sibling`), `single_window`, `show_group_in_title`, `hide_single_tab_strip`, `remove_dead_sessions`, `embed_enabled`, plus the read-only install settings `session_prefix` and `tmux_socket` (null for tmux's default socket). `choices` is present for choice settings. `pinned_by` names the environment variable that pins a setting; environment variables beat `config.toml`, so a pinned setting is read-only, as it is in the TUI.
 
 #### Theme
 

@@ -294,6 +294,8 @@ enum LinkOpener {
     static var recorder: ((LinkTarget) -> Void)?
     /// The session's directory from the daemon's snapshot, for when tmux doesn't answer.
     static var sessionPath: ((String) -> String?)?
+    /// The `editor` setting from the daemon's config: what files open in (nil: the default app).
+    static var editor: (() -> String?)?
 
     static func open(_ text: String, from view: TerminalView?) {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -320,7 +322,38 @@ enum LinkOpener {
         if testMode { recorder?(t); return }
         switch t {
         case .url(let u): NSWorkspace.shared.open(u)
-        case .file(let p): NSWorkspace.shared.open(URL(fileURLWithPath: p))
+        case .file(let p, let line, let column): openFile(p, line: line, column: column)
+        }
+    }
+
+    /// A file opens in the `editor` setting, at its line; a folder, no setting, or an editor that can't be
+    /// started opens with the default app for its type instead.
+    private static func openFile(_ path: String, line: Int?, column: Int?) {
+        var isDir: ObjCBool = false
+        guard let editor = editor?(), FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue,
+              let cmd = EditorCommand.arguments(editor: editor, path: path, line: line, column: column) else {
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            return
+        }
+        // The login shell's PATH can take a moment the first time: start it off the main thread.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let searchPath = ShellEnv.path()
+            var launched = false
+            if let exe = EditorCommand.resolve(cmd.program, searchPath: searchPath) {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: exe)
+                p.arguments = cmd.args
+                var env = ProcessInfo.processInfo.environment
+                env["PATH"] = searchPath
+                p.environment = env
+                p.standardInput = FileHandle.nullDevice
+                p.standardOutput = FileHandle.nullDevice
+                p.standardError = FileHandle.nullDevice
+                launched = (try? p.run()) != nil
+            }
+            if !launched {
+                DispatchQueue.main.async { MainActor.assumeIsolated { _ = NSWorkspace.shared.open(URL(fileURLWithPath: path)) } }
+            }
         }
     }
 }

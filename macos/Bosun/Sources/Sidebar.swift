@@ -44,7 +44,6 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     private var reloading = false
     private var hoverTimer: Timer?
     private var hoverRow: String?
-    private var renameTimer: Timer?
     private var renaming: (item: SidebarItem, field: NSTextField, original: String)?
     /// Rows whose badge changed state recently (selftest hook): session → state.
     var onBadgeApplied: ((String, AgentState) -> Void)?
@@ -249,9 +248,8 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
     }
 
-    /// Whether a click on this item's name renames it (Finder style: it's already what's selected):
-    /// the shown row, or the active pane's tab under it.
-    func isSelectedForRename(_ item: SidebarItem) -> Bool {
+    /// Whether this item is what's selected: the shown row, or the active pane's tab under it.
+    func isShownSelection(_ item: SidebarItem) -> Bool {
         switch item.kind {
         case .row(let id): return id == owner.workspace.currentRow
         case .tab(let s): return rowID(for: item) == owner.workspace.currentRow && s == owner.workspace.layout.active
@@ -319,16 +317,12 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
     }
 
-    /// Finder-style rename: a click on the name of the row that's already selected, after the double-click interval.
-    func clickedSelected(row: Int, onName: Bool) {
-        renameTimer?.invalidate()
-        guard onName, let item = outline.item(atRow: row) as? SidebarItem, !isSection(item) else { return }
-        renameTimer = Timer.scheduledTimer(withTimeInterval: NSEvent.doubleClickInterval + 0.05, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.beginRename(item) }
-        }
+    /// A double-click on a row's or tab's name renames it. (Not a click on the selected one, Finder style: that
+    /// fired too easily on a click meant only to bring a row back to the front.)
+    func doubleClickedName(_ item: SidebarItem) {
+        guard !isSection(item), renaming == nil else { return }
+        beginRename(item)
     }
-
-    func cancelPendingRename() { renameTimer?.invalidate() }
 
     // MARK: Hover prewarm
 
@@ -704,7 +698,6 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     func outlineView(_ outlineView: NSOutlineView, draggingSession session: NSDraggingSession, willBeginAt screenPoint: NSPoint, forItems draggedItems: [Any]) {
         dragStarted = true
         if debugDrag { print("drag: began at \(screenPoint) items \(draggedItems.count)"); fflush(stdout) }
-        cancelPendingRename()
         setHover(nil)
         draggingKind = (draggedItems.first as? SidebarItem)?.kind
     }
@@ -949,23 +942,20 @@ final class SidebarOutlineView: NSOutlineView {
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         let row = self.row(at: p)
-        let wasSelected = row >= 0 && (item(atRow: row) as? SidebarItem).map { controller?.isSelectedForRename($0) ?? false } ?? false
+        let clicked = row >= 0 ? item(atRow: row) as? SidebarItem : nil
         var onName = false
         if row >= 0, let cell = view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarCellView {
             let q = cell.convert(event.locationInWindow, from: nil)
             onName = cell.nameField.frame.insetBy(dx: -2, dy: -3).contains(q)
                 && q.x <= cell.nameField.frame.minX + cell.nameField.intrinsicContentSize.width + 4
         }
-        if event.clickCount > 1 { controller?.cancelPendingRename() }
         controller?.dragStarted = false
         let onDisclosure = row >= 0 && frameOfOutlineCell(atRow: row).contains(p)
         // super runs AppKit's tracking loop (selection, drag start, disclosure) and returns on mouse up.
         super.mouseDown(with: event)
         guard row >= 0, controller?.dragStarted == false, !onDisclosure else { return }
         controller?.rowClicked(row)
-        if event.clickCount == 1, wasSelected {
-            controller?.clickedSelected(row: row, onName: onName)
-        }
+        if event.clickCount == 2, onName, let clicked { controller?.doubleClickedName(clicked) }
     }
 
     /// The section chevron (only sections have one) says what a click does.

@@ -502,7 +502,7 @@ extension FocusTest {
             r.check("sidebar: a tab dragged out to the edge of a row in a section becomes a row there",
                     res.accepted && at != nil && parserAt != nil && at! + 1 == parserAt!, "Work: \(work) op \(res.op.rawValue)")
         }
-        // f) Finder-style rename tells a click from a drag: dragging the selected row's name never renames.
+        // f) Dragging the selected row's name never renames.
         await showRow(docs)
         if let from = sidebarPoint(docs), let to = rowPoint(sectionItem("Reviews"), 0.9) {
             let res = await outlineDrag(from: from, to: to)
@@ -511,11 +511,11 @@ extension FocusTest {
                     res.started && app.focus.exception == nil && !app.sidebar.isRenaming)
             r.check("…and the keyboard stays in the terminal", firstResponderIsActiveTerminal)
         }
-        // A plain click on the selected row's name still renames (the drag fix mustn't break it).
+        // A double-click on the row's name still renames.
         if let p = sidebarPoint(docs) {
-            await click(p)
+            await doubleClick(p)
             await waitUntil(2) { app.focus.exception == .rename }
-            r.check("sidebar: a click on the selected row's name still starts a rename", app.focus.exception == .rename)
+            r.check("sidebar: a double-click on the row's name still starts a rename", app.focus.exception == .rename)
             await key(53, "\u{1b}")
             await waitUntil(1) { firstResponderIsActiveTerminal }
         }

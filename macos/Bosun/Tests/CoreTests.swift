@@ -877,13 +877,37 @@ final class LinkTargetTests: XCTestCase {
 
     func testPaths() {
         XCTAssertEqual(resolve("/abs/file.swift"), .file("/abs/file.swift"))
-        XCTAssertEqual(resolve("/abs/file.swift:12"), .file("/abs/file.swift"))
-        XCTAssertEqual(resolve("src/app.rs:42"), .file("/proj/src/app.rs"))
-        XCTAssertEqual(resolve("src/app.rs:42:7"), .file("/proj/src/app.rs"))
+        XCTAssertEqual(resolve("/abs/file.swift:12"), .file("/abs/file.swift", line: 12))
+        XCTAssertEqual(resolve("src/app.rs:42"), .file("/proj/src/app.rs", line: 42))
+        XCTAssertEqual(resolve("src/app.rs:42:7"), .file("/proj/src/app.rs", line: 42, column: 7))
         XCTAssertEqual(resolve("./README.md"), .file("/proj/README.md"))
         XCTAssertEqual(resolve("../proj/dir"), .file("/proj/dir"))
         XCTAssertEqual(resolve("~/notes.txt"), .file("/home/me/notes.txt"))
-        XCTAssertEqual(resolve("$HOME/notes.txt:3", cwd: nil), .file("/home/me/notes.txt"))
+        XCTAssertEqual(resolve("$HOME/notes.txt:3", cwd: nil), .file("/home/me/notes.txt", line: 3))
+    }
+
+    func testEditorArguments() {
+        func args(_ editor: String, _ line: Int? = 42, _ column: Int? = 7) -> [String]? {
+            EditorCommand.arguments(editor: editor, path: "/p/a.rs", line: line, column: column).map { [$0.program] + $0.args }
+        }
+        XCTAssertEqual(args("zed"), ["zed", "/p/a.rs:42:7"])
+        XCTAssertEqual(args("zed", 42, nil), ["zed", "/p/a.rs:42"])
+        XCTAssertEqual(args("zed", nil, nil), ["zed", "/p/a.rs"])
+        XCTAssertEqual(args("code"), ["code", "-g", "/p/a.rs:42:7"])
+        XCTAssertEqual(args("code -n"), ["code", "-n", "-g", "/p/a.rs:42:7"])
+        XCTAssertEqual(args("/usr/local/bin/cursor", nil, nil), ["/usr/local/bin/cursor", "/p/a.rs"])
+        XCTAssertEqual(args("xed"), ["xed", "-l", "42", "/p/a.rs"])
+        XCTAssertEqual(args("bbedit"), ["bbedit", "+42", "/p/a.rs"])
+        XCTAssertEqual(args("nvim"), ["nvim", "/p/a.rs"])
+        XCTAssertNil(args("  "))
+    }
+
+    func testEditorResolve() {
+        let installed: Set<String> = ["/opt/homebrew/bin/zed", "/Users/me/bin/tool"]
+        let exe = { installed.contains($0) }
+        XCTAssertEqual(EditorCommand.resolve("zed", searchPath: "/usr/bin:/opt/homebrew/bin", isExecutable: exe), "/opt/homebrew/bin/zed")
+        XCTAssertNil(EditorCommand.resolve("code", searchPath: "/usr/bin:/opt/homebrew/bin", isExecutable: exe))
+        XCTAssertEqual(EditorCommand.resolve("/Users/me/bin/tool", searchPath: "", isExecutable: exe), "/Users/me/bin/tool")
     }
 
     func testMissingOrUnresolvable() {

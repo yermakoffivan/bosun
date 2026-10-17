@@ -528,6 +528,7 @@ impl Daemon {
                         .collect(),
                 ),
             ),
+            row("editor", optional(&self.app.editor), None),
             row(
                 "worktree_location",
                 worktree_str(self.app.worktree_location).into(),
@@ -1079,6 +1080,25 @@ impl Daemon {
         written.map_err(|e| format!("settings: failed to save: {e}"))
     }
 
+    /// `apply_setting` for `editor`: a command, or null (or "") to unset it.
+    fn set_editor(&mut self, value: &serde_json::Value) -> std::result::Result<(), String> {
+        let editor = match value {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) if s.trim().is_empty() => None,
+            serde_json::Value::String(s) => {
+                protocol::check_text("editor", s, false)?;
+                Some(s.trim().to_string())
+            }
+            _ => return Err("editor needs a command or null".to_string()),
+        };
+        let written = crate::config::write_editor(editor.as_deref());
+        self.app.editor = editor;
+        // Our own write isn't an outside edit; don't reload it.
+        self.config_mtime = config_mtime();
+        self.file_config = Config::load();
+        written.map_err(|e| format!("settings: failed to save: {e}"))
+    }
+
     /// The settings panel's `apply_setting`, for the daemon's state.
     fn apply_setting(
         &mut self,
@@ -1090,6 +1110,9 @@ impl Daemon {
         }
         if key == "theme_light" || key == "theme_dark" {
             return self.set_theme_pair_side(key, value);
+        }
+        if key == "editor" {
+            return self.set_editor(value);
         }
         let as_bool = || {
             value
@@ -1454,6 +1477,9 @@ impl Daemon {
         }
         if new.default_agent != old.default_agent {
             self.app.default_agent = new.default_agent.clone();
+        }
+        if new.editor != old.editor {
+            self.app.editor = new.editor.clone();
         }
         if new.worktree_location != old.worktree_location {
             self.app.worktree_location = new.worktree_location;

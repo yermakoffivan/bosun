@@ -95,12 +95,14 @@ extension FocusTest {
 
         let a = await cmdClick(abs, cmdFirst: true)
         r.check("Cmd pressed with the pointer already on an absolute path shows the hand", a.hand)
-        r.check("Cmd+click on an absolute path opens the file", a.opened.map { if case .file(let p) = $0 { real(p) } else { "\($0)" } } == [real(abs)],
+        r.check("Cmd+click on an absolute path opens the file", a.opened.map { if case .file(let p, _, _) = $0 { real(p) } else { "\($0)" } } == [real(abs)],
                 "\(a.opened)")
 
         let rl = await cmdClick(rel)
         r.check("Cmd+click on a relative path with :line opens the file in the shell's directory",
-                rl.opened.map { if case .file(let p) = $0 { real(p) } else { "\($0)" } } == [real(dir + "/src/app.rs")], "\(rl.opened)")
+                rl.opened.map { if case .file(let p, _, _) = $0 { real(p) } else { "\($0)" } } == [real(dir + "/src/app.rs")], "\(rl.opened)")
+        r.check("…and keeps the line, for the editor setting", rl.opened.map { (t: LinkTarget) -> Int? in if case .file(_, let line, _) = t { line } else { nil } } == [42],
+                "\(rl.opened)")
 
         let m = await cmdClick(missing)
         r.check("Cmd+click on a path that doesn't exist opens nothing", m.opened.isEmpty, "\(m.opened)")

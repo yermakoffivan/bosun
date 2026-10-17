@@ -4,6 +4,17 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.4] — 2026-10-17
+
+### Added
+
+- **File links open in your editor, at the line.** Bosun for Mac's Settings has a Files section: choose the editor that Cmd+click on a path opens files in (it lists Zed, VS Code, Cursor, Windsurf, VSCodium, Sublime Text, Xcode and BBEdit when they're on your PATH, or takes any command), and `src/app.rs:42:7` opens at that line and column. It's the same `editor` setting in `config.toml` that the TUI's `e` key runs. Without one, files open with the default app for their type as before, and folders still open in Finder.
+- **`editor` in `bosun serve`.** The setting is in `config.settings`, `apply_setting` changes it (`null` unsets it), and an edit made elsewhere arrives as a `config` delta. See `docs/protocol.md`.
+
+### Changed
+
+- **Rename is a double-click in Bosun for Mac.** A double-click on a row's or tab's name renames it, and Rename is in the right-click menu as before. A single click on the selected row's name no longer starts a rename, so clicking the row on screen to get back to it doesn't drop you into the name field.
+
 ## [2.2.3] — 2026-10-17
 
 ### Added

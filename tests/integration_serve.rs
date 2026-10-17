@@ -444,6 +444,73 @@ fn serve_keybindings_follow_config_toml() {
     );
 }
 
+/// `editor` (what the TUI's `e` key runs, and what the Mac app opens
+/// file links in): in the settings, set and unset through
+/// `apply_setting`, and picked up from an edit made elsewhere.
+#[test]
+fn serve_editor_setting() {
+    let mut fx = fixture();
+    let config = fx.config_path();
+    write_config(&config, "editor = 'zed'\n");
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    let snap = c.recv().expect("snapshot");
+    let editor = |config: &Value| -> Value {
+        config["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["key"] == "editor")
+            .unwrap_or_else(|| panic!("no editor in {config}"))["value"]
+            .clone()
+    };
+    assert_eq!(editor(&snap["config"]), "zed");
+
+    let seen = command(
+        &mut c,
+        1,
+        json!({"op": "apply_setting", "key": "editor", "value": " code "}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    let cfg = seen
+        .iter()
+        .find(|v| v["t"] == "config")
+        .expect("config delta");
+    assert_eq!(editor(&cfg["config"]), "code");
+    let body = std::fs::read_to_string(&config).unwrap();
+    assert!(body.contains("editor = \"code\""), "{body}");
+
+    let seen = command(
+        &mut c,
+        2,
+        json!({"op": "apply_setting", "key": "editor", "value": null}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    let cfg = seen
+        .iter()
+        .find(|v| v["t"] == "config")
+        .expect("config delta");
+    assert_eq!(editor(&cfg["config"]), Value::Null);
+    let body = std::fs::read_to_string(&config).unwrap();
+    assert!(!body.contains("editor"), "{body}");
+
+    for (id, value) in [(3, json!(true)), (4, json!("zed\u{7}"))] {
+        let seen = command(
+            &mut c,
+            id,
+            json!({"op": "apply_setting", "key": "editor", "value": value}),
+        );
+        assert_eq!(seen.last().unwrap()["ok"], false, "{seen:#?}");
+    }
+
+    write_config(&config, "editor = 'subl'\n");
+    let seen = c.until("config delta", |v| {
+        v["t"] == "config" && editor(&v["config"]) == "subl"
+    });
+    assert!(!seen.is_empty());
+}
+
 /// The Mac app's Light/Dark pair: palettes in the snapshot and in
 /// `theme_pair` deltas, set through `apply_setting` and by editing
 /// `config.toml`, and never touching `theme` (the TUI's).
