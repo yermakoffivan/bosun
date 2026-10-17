@@ -618,6 +618,22 @@ impl TmuxClient for TokioTmuxClient {
                 tracing::warn!("set -g {} {}: {}", opt, val, e);
             }
         }
+        // Passthrough, so a program in a pane can reach the real
+        // terminal: kitty graphics (inline images in Bosun for Mac,
+        // Ghostty, kitty) need it. Only on bosun's own server: with
+        // `tmux_socket = "default"` the server is the user's, and
+        // their passthrough setting is theirs to choose.
+        if self.socket.is_some() {
+            if let Err(e) = self
+                .run(
+                    &["set-option", "-g", "allow-passthrough", "on"],
+                    Retry::Safe,
+                )
+                .await
+            {
+                tracing::warn!("set -g allow-passthrough on: {}", e);
+            }
+        }
 
         // Step 2: set the pretty display name on the freshly-created
         // session via a per-session user option. Best-effort — if

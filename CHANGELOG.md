@@ -4,6 +4,12 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.2] — 2026-10-17
+
+### Changed
+
+- **Passthrough is on in Bosun's tmux server.** Bosun now sets `allow-passthrough on` on its own server, so programs in a session can reach the real terminal: inline images over the kitty graphics protocol (in Bosun for Mac, Ghostty or kitty) now draw instead of being dropped by tmux. Only Bosun's own server is changed; with `tmux_socket = "default"` your tmux keeps its own setting. A server started before this version picks it up the next time Bosun creates a session there.
+
 ## [2.2.1] — 2026-10-17
 
 ### Added
