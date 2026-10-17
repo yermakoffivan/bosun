@@ -385,6 +385,7 @@ final class FocusTest: TestKit {
             if parts.contains("filter") { await filter(f) }
             await layoutSections(parts)
             if parts.contains("windows") { await windows(f) }
+            if parts.contains("remove") { await removeFromSidebar() }
             await finish()
             return
         }
@@ -739,6 +740,7 @@ final class FocusTest: TestKit {
         // 18–22. Sheet layout, placeholders, pane drag, sidebar drag, the shortcuts panel.
         await layoutSections(nil)
         await windows(f)
+        await removeFromSidebar()
         await finish()
     }
 

@@ -170,3 +170,94 @@ extension FocusTest {
         app.saveLayouts()
     }
 }
+
+// Focus-test section for Remove from Sidebar: always in a row's and a tab's menu, and for a live session it
+// kills and removes in one step (one confirmation), instead of Kill… then Remove from Sidebar.
+extension FocusTest {
+    /// A throwaway row of `count` plain terminals, by session.
+    private func tempRow(_ name: String, count: Int) async -> (row: String, sessions: [String])? {
+        var made: [String] = []
+        var row: String?
+        for _ in 0..<count {
+            let ack = await app.daemon.request(.create(spec: Spec(name: name, path: "~", agent: "terminal", containerID: row), deferLaunch: false))
+            guard ack.ok, let s = ack.session else { return nil }
+            made.append(s)
+            if row == nil {
+                await waitUntil(4) { rowID(s) != nil }
+                row = rowID(s)
+            }
+        }
+        guard let row, await waitUntil(5, { tabs(row).count == made.count && made.allSatisfy(app.isAlive) }) else { return nil }
+        return (row, made)
+    }
+
+    private func menuItem(_ title: String, session s: String, item: SidebarItem?) -> NSMenuItem? {
+        app.sessionMenu(for: s, rowItem: item).items.first { $0.title == title }
+    }
+
+    private func fire(_ item: NSMenuItem) { NSApp.sendAction(item.action!, to: item.target, from: item) }
+
+    /// Answer the sheet now attached to the window with its Kill button or Cancel (Esc).
+    private func buttons(in view: NSView?) -> [NSButton] {
+        guard let view else { return [] }
+        return (view as? NSButton).map { [$0] } ?? view.subviews.flatMap { buttons(in: $0) }
+    }
+
+    private func answerSheet(confirm: Bool) async -> Bool {
+        guard await waitUntil(2, { w.attachedSheet != nil }), let sheet = w.attachedSheet else { return false }
+        if confirm {
+            // Click the destructive button: AppKit gives a button with hasDestructiveAction no Return key.
+            guard let kill = buttons(in: sheet.contentView).first(where: { $0.title.contains("Kill") }) else { return false }
+            kill.performClick(nil)
+        } else { await key(53, "\u{1b}", window: sheet) }
+        await waitUntil(2) { w.attachedSheet == nil }
+        return true
+    }
+
+    func removeFromSidebar() async {
+        guard let one = await tempRow("rm-one", count: 1), let two = await tempRow("rm-two", count: 2) else {
+            r.check("remove: throwaway rows for the test", false)
+            return
+        }
+        let s1 = one.sessions[0]
+        // A live one-tab row: the item is there (with … since it asks), Cancel changes nothing.
+        let rowMenuItem = menuItem("Remove from Sidebar…", session: s1, item: rowItem(s1))
+        r.check("remove: a live row's menu has Remove from Sidebar… (no separate Kill first)", rowMenuItem != nil)
+        if let rowMenuItem {
+            fire(rowMenuItem)
+            r.check("…it asks once", await answerSheet(confirm: false))
+            r.check("…Cancel leaves the session running and the row in place", app.isAlive(s1) && app.daemon.state.sidebar.container(id: one.row) != nil)
+            fire(rowMenuItem)
+            _ = await answerSheet(confirm: true)
+            let gone = await waitUntil(5) { !app.isAlive(s1) && app.daemon.state.sidebar.container(id: one.row) == nil }
+            r.check("…Kill and Remove kills the session and takes the row out of the sidebar", gone, "alive \(app.isAlive(s1)) row \(app.daemon.state.sidebar.container(id: one.row) != nil)")
+            r.check("…and the keyboard is back in a terminal", await waitUntil(2) { firstResponderIsActiveTerminal })
+        }
+
+        // A tab of a two-tab row: only that tab goes.
+        let (t1, t2) = (two.sessions[0], two.sessions[1])
+        let tabItem = app.sidebar.itemFor(session: t2)
+        if let item = menuItem("Remove from Sidebar…", session: t2, item: tabItem) {
+            fire(item)
+            _ = await answerSheet(confirm: true)
+            let ok = await waitUntil(5) { !app.isAlive(t2) && tabs(two.row) == [t1] }
+            r.check("remove: on a tab, it kills that tab's session and the row keeps its other tab", ok, "tabs \(tabs(two.row).map(app.displayName))")
+        } else {
+            r.check("remove: a tab's menu has Remove from Sidebar…", false)
+        }
+
+        // An exited row: no question.
+        _ = await app.daemon.request(.kill(session: t1))
+        await waitUntil(4) { !app.isAlive(t1) }
+        await sleep(300)
+        if app.daemon.state.sidebar.container(id: two.row) != nil, let item = menuItem("Remove from Sidebar", session: t1, item: rowItem(t1)) {
+            fire(item)
+            let asked = await waitUntil(0.6) { w.attachedSheet != nil }
+            let gone = await waitUntil(3) { app.daemon.state.sidebar.container(id: two.row) == nil }
+            r.check("remove: an exited row goes straight away, without asking", !asked && gone)
+        } else {
+            r.check("remove: an exited row's menu has Remove from Sidebar", false, "row \(app.daemon.state.sidebar.container(id: two.row) != nil) alive \(app.isAlive(t1)) items \(app.sidebar.itemFor(session: t1).map { _ in "yes" } ?? "none")")
+            app.removeRow(two.row)
+        }
+    }
+}

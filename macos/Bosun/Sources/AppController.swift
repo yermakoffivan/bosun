@@ -1170,6 +1170,60 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         if sb.removeRow(id: id) != nil { daemon.saveSidebar(sb) }
     }
 
+    /// Remove from Sidebar on a row: its live sessions are killed (after one confirmation) and the row goes,
+    /// rather than Kill… then Remove from Sidebar as two steps. A row with nothing running just goes.
+    func removeRowKilling(_ id: String) {
+        guard let c = daemon.state.sidebar.container(id: id) else { return }
+        let live = c.tabs.map(\.session).filter(isAlive)
+        guard !live.isEmpty else { removeRow(id); return }
+        let alert = NSAlert()
+        alert.messageText = "Remove “\(rowLabel(c))” from the sidebar?"
+        alert.informativeText = live.count == 1
+            ? "Its tmux session and the agent in it stop. This can't be undone."
+            : "Its \(live.count) tmux sessions and the agents in them stop. This can't be undone."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Kill and Remove")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].hasDestructiveAction = true
+        runSheet(alert) { [weak self] ok in
+            guard ok, let self else { return }
+            let command: Command = live.count == 1 ? .kill(session: live[0]) : .killContainer(sessions: live)
+            self.daemon.command(command) { [weak self] ack in
+                guard let self else { return }
+                self.report(ack)
+                // The row stays (as exited) if the kill failed, so nothing is lost silently.
+                if ack.ok { self.removeRow(id) }
+            }
+        }
+    }
+
+    /// Remove from Sidebar on a tab: that session is killed (after a confirmation, if it's running) and its
+    /// tab leaves the row. A row's last tab takes the row with it.
+    func removeTab(_ s: String) {
+        guard let c = daemon.state.sidebar.container(holding: s) else { return }
+        if c.tabs.count == 1 { removeRowKilling(c.id); return }
+        let drop = { [weak self] in
+            guard let self else { return }
+            var sb = self.daemon.state.sidebar
+            if sb.removeTab(session: s) { self.daemon.saveSidebar(sb) }
+        }
+        guard isAlive(s) else { drop(); return }
+        let alert = NSAlert()
+        alert.messageText = "Remove “\(displayName(s))” from the sidebar?"
+        alert.informativeText = "Its tmux session and the agent in it stop. This can't be undone."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Kill and Remove")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].hasDestructiveAction = true
+        runSheet(alert) { [weak self] ok in
+            guard ok, let self else { return }
+            self.daemon.command(.kill(session: s)) { [weak self] ack in
+                self?.report(ack)
+                if ack.ok { drop() }
+            }
+        }
+    }
+
     func newSection() {
         askText(title: "New Section", message: "Sessions can be dragged into it.", initial: "", button: "Add") { [weak self] name in
             self?.daemon.command(.insertSection(name: name)) { [weak self] in self?.report($0) }
@@ -1603,8 +1657,15 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             if daemon.state.sessions[s]?.worktreePath != nil, daemon.state.sessions[s]?.branch != nil {
                 _ = item("Kill and Remove Worktree…") { [weak self] in self?.confirmKillRemoveWorktree(s) }
             }
-        } else if let c = container {
-            _ = item("Remove from Sidebar") { [weak self] in self?.removeRow(c.id) }
+        }
+        // Always there, live or not: a tab's item removes that tab, anything else the whole row, killing
+        // whatever still runs in it on the way (one confirmation when something does).
+        if let c = container {
+            let isTab: Bool = { if case .tab = rowItem?.kind { return true }; return false }()
+            let live = isTab ? (alive ? [s] : []) : c.tabs.map(\.session).filter(isAlive)
+            _ = item(live.isEmpty ? "Remove from Sidebar" : "Remove from Sidebar…") { [weak self] in
+                if isTab { self?.removeTab(s) } else { self?.removeRowKilling(c.id) }
+            }
         }
         return m
     }
@@ -1747,6 +1808,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         add(session, "Rename", #selector(menuSession(_:)), target: self, tag: 3)
         session.addItem(.separator())
         add(session, "Kill…", #selector(menuSession(_:)), target: self, tag: 4)
+        add(session, "Remove Row from Sidebar…", #selector(menuSession(_:)), target: self, tag: 5)
 
         let win = sub("Window")
         add(win, "New Window", #selector(menuNewWindow), "n", target: self)
@@ -1853,6 +1915,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         case 2: modify(s)
         case 3: startRename(s)
         case 4: confirmKill(s)
+        case 5: if let row = workspace.currentRow { removeRowKilling(row) }
         default: break
         }
     }

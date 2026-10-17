@@ -17,6 +17,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Remove from Sidebar in Bosun for Mac takes one step.** It's always in a row's and a tab's right-click menu (and Session → Remove Row from Sidebar). With sessions still running it asks once, "Kill and Remove", and kills them before taking the row out; a row with nothing running goes straight away. On a tab, only that tab goes. Before, a live row needed Kill… first, and only then showed Remove from Sidebar.
 - **Weak spots in the existing themes.** Selected rows on `github-light`, `ayu-light` and `solarized-light` were almost the panel colour; muted text in `one-light`, `solarized-light`, `one-dark-pro`, `nord`, `dracula`, `tokyonight`, `ayu-mirage` and `quiet-light` was hard to read, and `one-dark-pro`'s text was dull. `gruvbox-dark`'s panel and panel_alt were the wrong way round, and `rose-pine`'s done colour matched its accent. All are lifted one step. Copies of these themes in your own themes directory are unchanged.
 
 ### Fixed
