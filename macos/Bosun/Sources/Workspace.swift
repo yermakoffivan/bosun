@@ -3,17 +3,42 @@ import BosunCore
 import os
 import UniformTypeIdentifiers
 
-/// The main area (design section 6): the shown sidebar row's panes, one per live tab, laid out from
-/// that row's split tree by hand (no Auto Layout), with the warm pool's views positioned inside them,
-/// per-pane chrome, dividers, click/hover activation and drops. Every row keeps its own tree and its
-/// active pane; showing another row swaps the whole area for that row's panes.
+/// What every window's workspace shares: each row's layout (a row is shown in one window at a time, but
+/// its layout is the same whichever window shows it), and the bookkeeping for panes the app asked for,
+/// closed or is launching an agent in.
+@MainActor
+final class RowStore {
+    /// Every row's layout, by container id. A row gets one the first time it's shown (or prewarmed).
+    var rows: [String: RowLayout] = [:]
+    /// Sessions whose deferred agent launch waits for their terminal to attach.
+    var pendingLaunch: [String: Bool?] = [:]
+    /// Panes the app asked for (Cmd+D, New Tab…): where the row's next new tab goes, until it arrives.
+    var pendingSplits: [String: (split: PendingSplit, at: Date)] = [:]
+    /// A tab the app created that should become its row's active pane once it has one.
+    var activateWhenPlaced: [String: String] = [:]
+    /// Panes closed with Cmd+W whose kill hasn't landed: a delta that still lists them as alive
+    /// mustn't bring the pane back.
+    var closing: Set<String> = []
+}
+
+/// One window's main area (design section 6): the shown sidebar row's panes, one per live tab, laid out
+/// from that row's split tree by hand (no Auto Layout), with the warm pool's views positioned inside
+/// them, per-pane chrome, dividers, click/hover activation and drops. Every row keeps its own tree and
+/// its active pane; showing another row swaps the whole area for that row's panes. A row is on screen
+/// in one window at most.
 @MainActor
 final class Workspace {
     unowned let app: AppController
+    /// The window this area is in (its focus model, sidebar and key state).
+    unowned var owner: BosunWindow!
     let area = MainAreaView()
-    let pool: TerminalPool
-    /// Every row's layout, by container id. A row gets one the first time it's shown (or prewarmed).
-    private(set) var rows: [String: RowLayout] = [:]
+    var pool: TerminalPool { app.pool }
+    private var store: RowStore { app.rowStore }
+    /// Every row's layout, by container id (shared by every window).
+    private(set) var rows: [String: RowLayout] {
+        get { store.rows }
+        set { store.rows = newValue }
+    }
     /// The row on screen (a container id), nil before there is any.
     private(set) var currentRow: String?
     private var chrome: [TileID: TileChromeView] = [:]
@@ -29,22 +54,28 @@ final class Workspace {
     /// A pane being dragged by its header, and where it would land (see `tileDragMoved`).
     private var tileDrag: (tile: TileID, target: TileID?, zone: TileDropZone?)?
     let dropIndicator = TileDropIndicatorView()
-    /// Sessions whose deferred agent launch waits for their terminal to attach.
-    private var pendingLaunch: [String: Bool?] = [:]
-    /// Panes the app asked for (Cmd+D, New Tab…): where the row's next new tab goes, until it arrives.
-    private var pendingSplits: [String: (split: PendingSplit, at: Date)] = [:]
-    /// A tab the app created that should become its row's active pane once it has one.
-    private var activateWhenPlaced: [String: String] = [:]
-    /// Panes closed with Cmd+W whose kill hasn't landed: a delta that still lists them as alive
-    /// mustn't bring the pane back.
-    private var closing: Set<String> = []
+    private var pendingLaunch: [String: Bool?] {
+        get { store.pendingLaunch }
+        set { store.pendingLaunch = newValue }
+    }
+    private var pendingSplits: [String: (split: PendingSplit, at: Date)] {
+        get { store.pendingSplits }
+        set { store.pendingSplits = newValue }
+    }
+    private var activateWhenPlaced: [String: String] {
+        get { store.activateWhenPlaced }
+        set { store.activateWhenPlaced = newValue }
+    }
+    private var closing: Set<String> {
+        get { store.closing }
+        set { store.closing = newValue }
+    }
     /// The row order at the last reconcile, to find the neighbour of a row that went.
     private var lastRowOrder: [String] = []
     /// The old single-tree layout file's active session: its row is shown first after the change.
     private var legacyActive: String?
     /// Views attach only once the app has the daemon's tmux socket (`startAttaching`).
     private var attaching = false
-    private var saveTimer: Timer?
     /// When the current row switch started (the warm and cold measurements count from here).
     private var switchStart: CFTimeInterval?
     /// Hooks for the self-test: (session, warm, seconds to first frame / first painted frame).
@@ -54,10 +85,6 @@ final class Workspace {
 
     init(app: AppController) {
         self.app = app
-        pool = TerminalPool(daemon: app.daemon, capacity: AppSettings.shared.poolSize)
-        pool.container = area
-        pool.onExit = { [weak self] s in self?.terminalExited(s) }
-        pool.onInput = { [weak self] s in self?.app.terminalInput(s) }
         area.workspace = self
         area.registerForDraggedTypes(DropReader.types)
     }
@@ -113,38 +140,22 @@ final class Workspace {
         c.tabs.filter { $0.alive && app.isAlive($0.session) && !closing.contains($0.session) }.map(\.session)
     }
 
-    // MARK: Persistence
+    // MARK: Persistence (the app writes one file for every window's rows)
 
-    private var layoutURL: URL { Paths.supportDir.appendingPathComponent("rows-\(Paths.key(for: app.daemon.socketPath)).json") }
-    /// The one-tree-per-window layout of earlier builds.
-    private var legacyURL: URL { Paths.supportDir.appendingPathComponent("layout-\(Paths.key(for: app.daemon.socketPath)).json") }
-
-    func restore() {
-        if let data = try? Data(contentsOf: layoutURL), let saved = SavedLayouts.decode(data) {
-            rows = saved.rows
-            currentRow = saved.current
-        } else if let data = try? Data(contentsOf: legacyURL) {
-            legacyActive = SavedLayouts.legacyActiveSession(data)
-        }
+    /// Start on `row` (from the saved layouts, or a tear-off), or on the old single-tree file's session.
+    func restore(row: String?, legacySession: String? = nil) {
+        currentRow = row
+        legacyActive = legacySession
         reconcile(focus: false)
     }
 
-    func save() {
-        saveTimer?.invalidate()
-        saveTimer = nil
-        guard let data = SavedLayouts(current: currentRow, rows: rows).encoded() else { return }
-        try? data.write(to: layoutURL, options: .atomic)
-        // The old layout can't be carried over (its tiles mixed rows); once the new file exists it goes.
-        if FileManager.default.fileExists(atPath: legacyURL.path) { try? FileManager.default.removeItem(at: legacyURL) }
-    }
+    func save() { app.saveLayouts() }
 
     /// Save soon: pane activation (hover included) changes the model often, the file needn't follow every step.
-    private func scheduleSave() {
-        guard saveTimer == nil else { return }
-        saveTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.save() }
-        }
-    }
+    private func scheduleSave() { app.scheduleSaveLayouts() }
+
+    /// Whether row `id` is free for this window: not on screen in another one.
+    private func free(_ id: String) -> Bool { !app.isShown(row: id, elsewhereThan: owner) }
 
     // MARK: Rows
 
@@ -152,6 +163,12 @@ final class Workspace {
     /// else to the pane that was active when the row was last shown.
     func selectRow(_ id: String, pane: TileID? = nil, focus: Bool = true) {
         guard app.daemon.state.sidebar.container(id: id) != nil else { return }
+        // A row is on screen in one window at most: another window showing it comes forward instead.
+        if let other = app.window(showing: id), other !== owner {
+            app.bringForward(other)
+            other.workspace.selectRow(id, pane: pane, focus: focus)
+            return
+        }
         if id == currentRow {
             if let pane, layout.contains(pane) { activate(pane, focus: focus) } else if focus { focusActiveTerminal() }
             return
@@ -173,6 +190,18 @@ final class Workspace {
         signposter.endInterval("RowSwitch", sp)
         save()
         onRowShown?(id, warm, spent)
+    }
+
+    /// This window's row is moving to another window: show the next row no window shows (in sidebar
+    /// order, else the one before). Returns false when there's none, and nothing changes.
+    func leaveRow() -> Bool {
+        guard let cur = currentRow else { return true }
+        let order = app.daemon.state.sidebar.allRows.filter { !liveTabs($0).isEmpty }.map(\.id)
+        let i = order.firstIndex(of: cur) ?? 0
+        guard let next = order.dropFirst(i + 1).first(where: { $0 != cur && free($0) })
+                ?? order.prefix(i).last(where: { $0 != cur && free($0) }) else { return false }
+        selectRow(next, focus: false)
+        return true
     }
 
     /// Show `session`'s row with that pane active (a dead tab just shows its row).
@@ -223,24 +252,33 @@ final class Workspace {
 
         // Keep a row on screen: the old file's session's row on the first run after the change, the
         // neighbour of a row that went (once the state is live, not from the cache), or the first row.
+        // Rows another window shows aren't candidates (one window per row).
         var target = currentRow
-        if let legacy = legacyActive, let c = sb.container(holding: legacy) {
+        if let legacy = legacyActive, let c = sb.container(holding: legacy), free(c.id) {
             target = c.id
             legacyActive = nil
         }
-        if let t = target, !order.contains(t), st.live, let s = shownActive, let moved = sb.container(holding: s) {
+        if let t = target, order.contains(t), !free(t), st.live { target = nil }
+        if let t = target, !order.contains(t), st.live, let s = shownActive, let moved = sb.container(holding: s), free(moved.id) {
             target = moved.id
             activateWhenPlaced[moved.id] = s
         } else if let t = target, !order.contains(t), st.live {
             let i = lastRowOrder.firstIndex(of: t) ?? 0
-            let later = lastRowOrder.dropFirst(i + 1).first { order.contains($0) }
-            let earlier = lastRowOrder.prefix(i).last { order.contains($0) }
-            target = later ?? earlier ?? order.first
+            let later = lastRowOrder.dropFirst(i + 1).first { order.contains($0) && free($0) }
+            let earlier = lastRowOrder.prefix(i).last { order.contains($0) && free($0) }
+            target = later ?? earlier ?? order.first(where: free)
         }
         if target == nil {
-            target = sb.allRows.first { !liveTabs($0).isEmpty }?.id ?? order.first
+            target = sb.allRows.first { !liveTabs($0).isEmpty && free($0.id) }?.id ?? order.first(where: free)
         }
         if !order.isEmpty { lastRowOrder = order }
+        // A window other than the first with no row left to show (every other one is on screen elsewhere) closes.
+        if target == nil, st.live, app.windows.first !== owner {
+            currentRow = nil
+            apply(previous: before, focus: false)
+            app.closeWindowSoon(owner)
+            return
+        }
         if target != currentRow {
             if let t = target { reconcileRow(t, create: true) }
             currentRow = target
@@ -263,17 +301,18 @@ final class Workspace {
         let shown = layout.shown
         let panes = shown.filter { $0 != layout.active } + shown.filter { $0 == layout.active }
         for s in panes {
-            if let v = pool.view(for: s), !v.exited, !v.isHidden { pool.touch(s); continue }
+            if let v = pool.view(for: s), !v.exited, !v.isHidden, v.superview === area { pool.touch(s); continue }
             attachVisible(s)
         }
-        // Panes that left the screen: another row's, or the others of a row that zoomed one.
-        for s in previous where !shown.contains(s) { pool.hide(s) }
-        pool.evict(keeping: visibleSessions)
-        app.focus.setTiles(count: tiles.count, active: activeTile)
+        // Panes that left the screen: another row's, or the others of a row that zoomed one. A view
+        // another window has taken meanwhile (its row moved there) is that window's now.
+        for s in previous where !shown.contains(s) && pool.view(for: s)?.superview === area { pool.hide(s) }
+        pool.evict(keeping: app.visibleSessions)
+        owner.focus.setTiles(count: tiles.count, active: activeTile)
         syncChrome()
         CATransaction.commit()
         if focus { focusActiveTerminal() }
-        app.workspaceChanged()
+        app.workspaceChanged(self)
     }
 
     /// The app got the daemon's tmux socket: attach the shown row's panes.
@@ -288,15 +327,15 @@ final class Workspace {
     /// Start attaching a row's panes in the background (hover, keyboard stepping), so showing it is warm.
     /// The active pane first, then the others.
     func prewarm(row id: String) {
-        guard attaching, id != currentRow, app.daemon.state.sidebar.container(id: id) != nil else { return }
+        guard attaching, id != currentRow, free(id), app.daemon.state.sidebar.container(id: id) != nil else { return }
         reconcileRow(id, create: true)
         guard let l = rows[id], let root = l.shownRoot else { return }
         let rects = root.layout(in: area.bounds, gap: Workspace.gap).tiles
         let order = l.shown.filter { $0 == l.active } + l.shown.filter { $0 != l.active }
         for s in order where app.isAlive(s) {
-            pool.prewarm(s, size: Workspace.terminalRect(in: rects[s] ?? area.bounds).size)
+            pool.prewarm(s, size: Workspace.terminalRect(in: rects[s] ?? area.bounds).size, in: area, windowKey: windowKey)
         }
-        pool.evict(keeping: visibleSessions)
+        pool.evict(keeping: app.visibleSessions)
     }
 
     // MARK: Showing sessions
@@ -306,7 +345,7 @@ final class Workspace {
         guard attaching, app.isAlive(session) else { return }
         let rect = terminalRect(for: session)
         let t0 = switchStart ?? CACurrentMediaTime()
-        let (v, warm) = pool.acquire(session, frame: rect, hidden: false)
+        let (v, warm) = pool.acquire(session, frame: rect, hidden: false, in: area, windowKey: windowKey)
         let label: StaticString = warm ? "WarmSwitch" : "ColdAttach"
         let sp = signposter.beginInterval(label, id: signposter.makeSignpostID(), "\(session, privacy: .public)")
         if v.frame != rect { v.frame = rect }
@@ -357,9 +396,9 @@ final class Workspace {
         }
     }
 
-    private func terminalExited(_ session: String) {
-        // The tmux client ended on its own: the session was killed or the client detached elsewhere.
-        pool.drop(session)
+    /// A terminal's tmux client ended on its own (the session was killed, or the client detached
+    /// elsewhere) and the app dropped its view: a pane on screen here attaches again.
+    func terminalExited(_ session: String) {
         if visibleSessions.contains(session), app.isAlive(session) {
             // Still alive (detached by someone else, or Ctrl+q): attach again.
             attachVisible(session)
@@ -392,8 +431,7 @@ final class Workspace {
     }
 
     /// Sessions went away: free their views, then match the layouts to the new state.
-    func stateChanged(removed: Set<String>) {
-        for s in removed { pool.drop(s) }
+    func stateChanged() {
         reconcile()
     }
 
@@ -445,7 +483,7 @@ final class Workspace {
         if debugFrames, changed { print(String(format: "activate %.3f %@", CACurrentMediaTime(), tile)) }
         let before = layout.shown
         rows[id]?.activate(tile)
-        app.focus.activate(tile)
+        owner.focus.activate(tile)
         if changed, layout.isZoomed {
             // The zoom follows the active pane: the old one leaves the screen and this one fills it.
             apply(previous: before, focus: focus)
@@ -455,14 +493,14 @@ final class Workspace {
         if changed {
             pool.touch(tile)
             updateChromeState()
-            app.workspaceChanged()
+            app.workspaceChanged(self)
             scheduleSave()
         }
         if focus { focusActiveTerminal() }
     }
 
     func focusActiveTerminal() {
-        guard app.focus.terminalOwnsKeyboard, let w = area.window else { return }
+        guard owner.focus.terminalOwnsKeyboard, let w = area.window else { return }
         if let t = activeTerminal {
             if w.firstResponder !== t { w.makeFirstResponder(t) }
         } else if w.firstResponder is TerminalView {
@@ -594,7 +632,7 @@ final class Workspace {
 
     func windowKeyChanged(_ key: Bool) {
         windowKey = key
-        pool.windowKey = key
+        for v in pool.views.values where v.superview === area { v.windowKey = key }
         updateChromeState()
     }
 
@@ -654,6 +692,17 @@ final class Workspace {
     // MARK: Moving panes by their header
 
     var tileDragActive: Bool { tileDrag != nil }
+    /// The pane being dragged is outside the window: letting go opens it in a new window.
+    private(set) var tileDragOutside = false
+    private let tearOffPreview = TearOffPreview()
+    var tearOffPreviewShown: Bool { tearOffPreview.isShown }
+
+    /// A point in the area's coordinates on screen, and whether it's outside this window.
+    private func screenPoint(_ p: NSPoint) -> (NSPoint, outside: Bool) {
+        guard let w = area.window else { return (p, false) }
+        let s = w.convertPoint(toScreen: area.convert(p, to: nil))
+        return (s, !w.frame.contains(s))
+    }
     /// Where the dragged pane would land right now (for the test modes): nil while a drop would do nothing.
     var tileDropTarget: (target: TileID, zone: TileDropZone)? {
         guard let d = tileDrag, let t = d.target, let z = d.zone else { return nil }
@@ -662,7 +711,7 @@ final class Workspace {
 
     /// A header drag passed the threshold. Only with two or more panes, and never while the keyboard is lent out.
     func tileDragBegan(_ tile: TileID) -> Bool {
-        guard tiles.count > 1, layout.contains(tile), app.focus.exception == nil else { return false }
+        guard tiles.count > 1, layout.contains(tile), owner.focus.exception == nil else { return false }
         tileDrag = (tile, nil, nil)
         area.addSubview(dropIndicator, positioned: .above, relativeTo: nil)
         dropIndicator.frame = area.bounds
@@ -678,7 +727,14 @@ final class Workspace {
         var rect: CGRect?
         d.target = nil
         d.zone = nil
-        if let t = tile(at: p), let r = lastLayout.tiles[t] {
+        let (screen, outside) = screenPoint(p)
+        tileDragOutside = outside
+        if outside {
+            tearOffPreview.show(name: app.displayName(d.tile), at: screen, theme: app.theme)
+        } else {
+            tearOffPreview.hide()
+        }
+        if !outside, let t = tile(at: p), let r = lastLayout.tiles[t] {
             let zone = TileDropZone.at(p, in: r)
             if layout.root?.moving(d.tile, to: t, zone: zone) != nil {
                 d.target = t
@@ -695,8 +751,14 @@ final class Workspace {
         guard tileDrag != nil else { return }
         tileDragMoved(to: p)
         let d = tileDrag!
+        let outside = tileDragOutside
         endTileDrag()
-        if let target = d.target, let zone = d.zone { moveTile(d.tile, to: target, zone: zone) }
+        if outside {
+            // Let go outside the window: the pane becomes a row of its own in a new window there.
+            app.movePaneToNewWindow(d.tile, at: screenPoint(p).0)
+        } else if let target = d.target, let zone = d.zone {
+            moveTile(d.tile, to: target, zone: zone)
+        }
     }
 
     /// Esc during a drag.
@@ -707,6 +769,8 @@ final class Workspace {
 
     private func endTileDrag() {
         tileDrag = nil
+        tileDragOutside = false
+        tearOffPreview.hide()
         dropIndicator.show(nil, swap: false, theme: app.theme)
         dropIndicator.removeFromSuperview()
         NSCursor.pop()
@@ -715,10 +779,10 @@ final class Workspace {
     /// Move a pane within the row's tree. Its terminal view goes with it (no reattach); it stays active and keeps the keyboard.
     func moveTile(_ tile: TileID, to target: TileID, zone: TileDropZone) {
         guard let id = currentRow, rows[id]?.move(tile, to: target, zone: zone) == true else { return }
-        app.focus.setTiles(count: tiles.count, active: activeTile)
+        owner.focus.setTiles(count: tiles.count, active: activeTile)
         relayout()
         focusActiveTerminal()
-        app.workspaceChanged()
+        app.workspaceChanged(self)
         save()
     }
 
@@ -733,7 +797,7 @@ final class Workspace {
         let p = area.convert(event.locationInWindow, from: nil)
         let over = area.bounds.contains(p) ? tile(at: p) : nil
         let screen = area.window?.convertPoint(toScreen: event.locationInWindow) ?? NSEvent.mouseLocation
-        if let t = app.focus.pointerMoved(to: screen, over: over, buttonsDown: NSEvent.pressedMouseButtons != 0) {
+        if let t = owner.focus.pointerMoved(to: screen, over: over, buttonsDown: NSEvent.pressedMouseButtons != 0) {
             activate(t)
         }
     }
@@ -1170,6 +1234,55 @@ final class TileDropIndicatorView: NSView {
         label.contentsScale = window?.backingScaleFactor ?? 2
         label.frame = CGRect(x: 0, y: (box.bounds.height - 18) / 2, width: box.bounds.width, height: 18)
     }
+}
+
+/// What follows the pointer while a pane is dragged outside its window: a small card saying the pane
+/// will open in a new window. It never takes clicks or the keyboard.
+@MainActor
+final class TearOffPreview {
+    private var panel: NSPanel?
+    private let label = NSTextField(labelWithString: "")
+    private let sub = NSTextField(labelWithString: "New window")
+    /// Whether it's showing (for the test modes).
+    var isShown: Bool { panel?.isVisible == true }
+
+    func show(name: String, at p: NSPoint, theme: AppTheme) {
+        let size = NSSize(width: 220, height: 54)
+        if panel == nil {
+            let w = NSPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel],
+                            backing: .buffered, defer: true)
+            w.isOpaque = false
+            w.backgroundColor = .clear
+            w.hasShadow = true
+            w.ignoresMouseEvents = true
+            w.level = .floating
+            w.isReleasedWhenClosed = false
+            let v = NSView(frame: NSRect(origin: .zero, size: size))
+            v.wantsLayer = true
+            v.layer?.cornerRadius = 8
+            v.layer?.borderWidth = 2
+            label.font = .systemFont(ofSize: 12.5, weight: .semibold)
+            sub.font = .systemFont(ofSize: 11)
+            for l in [label, sub] {
+                l.lineBreakMode = .byTruncatingTail
+                v.addSubview(l)
+            }
+            label.frame = NSRect(x: 12, y: 28, width: size.width - 24, height: 17)
+            sub.frame = NSRect(x: 12, y: 10, width: size.width - 24, height: 15)
+            w.contentView = v
+            panel = w
+        }
+        guard let panel, let v = panel.contentView else { return }
+        v.layer?.backgroundColor = theme.panel.withAlphaComponent(0.94).cgColor
+        v.layer?.borderColor = theme.accent.cgColor
+        label.stringValue = name
+        label.textColor = theme.text
+        sub.textColor = theme.accent
+        panel.setFrameOrigin(NSPoint(x: p.x + 14, y: p.y - size.height - 10))
+        if !panel.isVisible { panel.orderFront(nil) }
+    }
+
+    func hide() { panel?.orderOut(nil) }
 }
 
 /// What an exited row (every tab ended) or an empty main area (no rows at all) shows. Text wraps and stays centred however narrow the

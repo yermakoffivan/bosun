@@ -270,6 +270,20 @@ final class RowLayoutTests: XCTestCase {
         XCTAssertEqual(unchanged.zoomed, "a", "the same tabs keep the zoom")
     }
 
+    func testOtherWindowsAreSavedAndPruned() throws {
+        var saved = SavedLayouts(current: "con-1")
+        saved.rows["con-1"] = RowLayout(root: a)
+        saved.windows = [.init(row: "con-2", frame: "{{10, 20}, {900, 600}}"), .init(row: "con-3", frame: nil)]
+        let back = try XCTUnwrap(SavedLayouts.decode(XCTUnwrap(saved.encoded())))
+        XCTAssertEqual(back, saved)
+        XCTAssertEqual(back.windows?.map(\.row), ["con-2", "con-3"])
+        var pruned = back
+        pruned.prune(keeping: ["con-1", "con-3"])
+        XCTAssertEqual(pruned.windows?.map(\.row), ["con-3"], "a window whose row is gone doesn't come back")
+        let old = #"{"version":2,"current":"con-1","rows":{}}"#
+        XCTAssertNil(try XCTUnwrap(SavedLayouts.decode(Data(old.utf8))).windows, "a file from one window")
+    }
+
     func testZoomIsSavedAndOldFilesReadUnzoomed() throws {
         var row = RowLayout(root: h(a, b), active: "b")
         row.toggleZoom()

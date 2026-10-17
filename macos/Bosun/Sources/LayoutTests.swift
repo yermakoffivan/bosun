@@ -206,7 +206,7 @@ extension FocusTest {
         return ws.area.convert(p, to: nil)
     }
 
-    private func post(_ type: NSEvent.EventType, _ p: NSPoint) {
+    func post(_ type: NSEvent.EventType, _ p: NSPoint) {
         if let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                                       windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
                                       pressure: type == .leftMouseUp ? 0 : 1) {
@@ -234,13 +234,13 @@ extension FocusTest {
     }
 
     /// Pane → its terminal view, to check that moves reuse the same views.
-    private var viewsByTile: [TileID: ObjectIdentifier] {
+    var viewsByTile: [TileID: ObjectIdentifier] {
         var out: [TileID: ObjectIdentifier] = [:]
         for t in ws.layout.panes { if let v = ws.terminal(in: t) { out[t] = ObjectIdentifier(v) } }
         return out
     }
 
-    private func keysLandIn(_ s: String, _ tag: String) async -> Bool {
+    func keysLandIn(_ s: String, _ tag: String) async -> Bool {
         await waitUntil(1) { firstResponderIsActiveTerminal }
         // Let the resize after a move settle (the agent redraws on SIGWINCH) before typing.
         await sleep(250)
@@ -547,7 +547,9 @@ extension FocusTest {
         func walk(_ m: NSMenu?) {
             for item in m?.items ?? [] {
                 // AppKit adds Dictation and Emoji & Symbols to the Edit menu itself; they aren't the app's.
+                // AppKit's own: dictation, emoji, and the Option alternates it adds (Close All under Close Window).
                 let system = [NSSelectorFromString("startDictation:"), #selector(NSApplication.orderFrontCharacterPalette(_:))].contains { $0 == item.action }
+                    || item.isAlternate
                 if !item.keyEquivalent.isEmpty, !listed.contains(item.title), item.title != "Exit Full Screen", !system {
                     let row = Int(item.title.split(separator: " ").last ?? "") ?? 0
                     if !(item.title.hasPrefix("Row ") && (1...9).contains(row)) { unlisted.append(item.title) }

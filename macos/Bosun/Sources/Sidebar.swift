@@ -30,6 +30,8 @@ private let rowDragType = NSPasteboard.PasteboardType("dev.yetidevworks.bosun.si
 @MainActor
 final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTextFieldDelegate {
     unowned let app: AppController
+    /// The window this sidebar is in: its selection follows that window's row.
+    unowned var owner: BosunWindow!
     let view = SidebarContainerView()
     let outline = SidebarOutlineView()
     private let scroll = NSScrollView()
@@ -172,7 +174,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     func session(for item: SidebarItem) -> String? {
         switch item.kind {
         case .tab(let s): return s
-        case .row(let id): return app.workspace.rememberedPane(row: id)
+        case .row(let id): return owner.workspace.rememberedPane(row: id)
         case .section: return nil
         }
     }
@@ -190,8 +192,8 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     /// the shown row, or the active pane's tab under it.
     func isSelectedForRename(_ item: SidebarItem) -> Bool {
         switch item.kind {
-        case .row(let id): return id == app.workspace.currentRow
-        case .tab(let s): return rowID(for: item) == app.workspace.currentRow && s == app.workspace.layout.active
+        case .row(let id): return id == owner.workspace.currentRow
+        case .tab(let s): return rowID(for: item) == owner.workspace.currentRow && s == owner.workspace.layout.active
         case .section: return false
         }
     }
@@ -201,7 +203,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     func syncSelection() {
         updatingSelection = true
         defer { updatingSelection = false }
-        guard let id = app.workspace.currentRow, let item = cache["r:\(id)"] else {
+        guard let id = owner.workspace.currentRow, let item = cache["r:\(id)"] else {
             outline.deselectAll(nil)
             return
         }
@@ -244,6 +246,8 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             app.setSectionCollapsed(id, outline.isItemExpanded(item))
             return
         }
+        // A click in a window that isn't key acts in that window.
+        app.setCurrent(owner)
         switch item.kind {
         case .row(let id): app.sidebarActivated(row: id)
         case .tab(let s): app.sidebarActivated(session: s)
@@ -272,7 +276,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         hoverTimer?.invalidate()
         guard let id else { return }
         hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.app.workspace.prewarm(row: id) }
+            MainActor.assumeIsolated { self?.owner.workspace.prewarm(row: id) }
         }
     }
 
@@ -286,7 +290,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         let field = cell.nameField
         let original = field.stringValue
         renaming = (item, field, original)
-        app.focus.begin(.rename)
+        owner.focus.begin(.rename)
         field.isEditable = true
         field.isSelectable = true
         field.delegate = self
@@ -317,7 +321,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         } else {
             r.field.stringValue = r.original
         }
-        if app.focus.end(.rename) { app.workspace.focusActiveTerminal() }
+        if owner.focus.end(.rename) { owner.workspace.focusActiveTerminal() }
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
@@ -407,8 +411,13 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             let name = app.rowLabel(con)
             let state: AgentState = multi ? aggregate(con) : app.displayState(session)
             if renaming?.item !== item { c.nameField.stringValue = name }
-            c.configure(state: state, exited: !alive, trailing: multi ? "\(con.tabs.count) tabs" : trailing(for: session),
-                        trailingColor: state == .waiting && !multi ? theme.waiting : theme.textMuted, indent: 0, theme: theme, tooltip: tooltip(session))
+            // A row another window shows says so: selecting it brings that window forward.
+            let elsewhere = app.isShown(row: id, elsewhereThan: owner)
+            var t = multi ? "\(con.tabs.count) tabs" : trailing(for: session)
+            if elsewhere { t = t.isEmpty ? "⧉" : "⧉ " + t }
+            c.configure(state: state, exited: !alive, trailing: t,
+                        trailingColor: state == .waiting && !multi ? theme.waiting : theme.textMuted, indent: 0, theme: theme,
+                        tooltip: elsewhere ? [tooltip(session), "Shown in another window"].compactMap { $0 }.joined(separator: "\n") : tooltip(session))
             c.badge.onApplied = { [weak self] s in self?.onBadgeApplied?(session, s) }
         case .tab(let s):
             guard let c = cell as? SidebarCellView else { return }
@@ -486,6 +495,18 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     func outlineView(_ outlineView: NSOutlineView, draggingSession session: NSDraggingSession, willBeginAt screenPoint: NSPoint, forItems draggedItems: [Any]) {
         dragStarted = true
         cancelPendingRename()
+        draggingKind = (draggedItems.first as? SidebarItem)?.kind
+    }
+
+    /// What's being dragged out of this sidebar, for a drag that ends outside every window.
+    private var draggingKind: SidebarItem.Kind?
+
+    /// A drag let go outside every Bosun window tears its row (or tab) off into a new window.
+    func outlineView(_ outlineView: NSOutlineView, draggingSession session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        defer { draggingKind = nil }
+        guard operation == [], let kind = draggingKind, !app.isOverBosunWindow(screenPoint) else { return }
+        // On the next turn: the drag's own cleanup runs first.
+        DispatchQueue.main.async { [app] in MainActor.assumeIsolated { app.sidebarDraggedOut(kind, at: screenPoint) } }
     }
 
     private func draggedItem(_ info: NSDraggingInfo) -> SidebarItem? {
@@ -638,6 +659,12 @@ final class SidebarOutlineView: NSOutlineView {
     /// window server, so the test plays the drop side in-process and the drag never follows the real mouse.
     var dragCapture: ((NSDraggingSession, [NSDraggingItem], NSEvent) -> Void)?
 
+    /// Outside the app's windows a let-go tears the item off, so the drag image shouldn't slide back there.
+    override func draggingSession(_ session: NSDraggingSession, movedTo screenPoint: NSPoint) {
+        super.draggingSession(session, movedTo: screenPoint)
+        if let app = controller?.app { session.animatesToStartingPositionsOnCancelOrFail = app.isOverBosunWindow(screenPoint) }
+    }
+
     override func beginDraggingSession(with items: [NSDraggingItem], event: NSEvent, source: any NSDraggingSource) -> NSDraggingSession {
         guard let capture = dragCapture else { return super.beginDraggingSession(with: items, event: event, source: source) }
         let session = NSDraggingSession()
@@ -721,7 +748,7 @@ final class SidebarRowView: NSTableRowView {
         guard let theme, let item, let controller, !isSelected else { return }
         // The shown row's tabs each have a pane on screen; the active pane's tab is marked (a fill and
         // an accent bar), so the row says which pane has the keyboard.
-        guard case .tab(let s) = item.kind, let ws = controller.app.workspace else { return }
+        guard case .tab(let s) = item.kind, let ws = controller.owner?.workspace else { return }
         guard controller.rowID(for: item) == ws.currentRow, s == ws.layout.active, ws.layout.count > 1 else { return }
         let r = bounds.insetBy(dx: 6.5, dy: 0.5)
         theme.panelAlt.setFill()
@@ -750,6 +777,8 @@ final class SidebarCellView: NSTableCellView {
     let badge = StatusBadge(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
     let nameField = NSTextField(labelWithString: "")
     private let trailing = NSTextField(labelWithString: "")
+    /// The text on the right (for the test modes).
+    var trailingText: String { trailing.stringValue }
     private var indent: CGFloat = 0
 
     init() {

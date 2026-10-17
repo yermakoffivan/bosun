@@ -4,24 +4,21 @@ import BosunCore
 /// The warm pool (design section 5): an LRU of attached terminal views keyed by session, sized in
 /// views (panes), not rows. A row's panes are touched together when it's shown, so recently shown
 /// rows stay warm as a whole. Showing a pooled session is a view swap. Hidden views are occluded (their renderer stops,
-/// their pty keeps draining) and marked `ignore-size` so they never size a session.
+/// their pty keeps draining) and marked `ignore-size` so they never size a session. One pool serves
+/// every window: a view lives in the main area of the window that last showed it, and moves (is
+/// reparented, never reattached) when another window shows its session.
 @MainActor
 final class TerminalPool {
     private(set) var views: [String: TerminalView] = [:]
     /// Least recently used first.
     private(set) var lru: [String] = []
     var capacity: Int
-    weak var container: NSView?
     let daemon: DaemonClient
     /// tmux `-L` socket name terminals attach with (nil: tmux's default socket).
     var tmuxSocket: String?
     var onExit: ((String) -> Void)?
     /// The user gave a terminal input (see `TerminalView.onInput`): its session.
     var onInput: ((String) -> Void)?
-    /// Whether the window is key; every view gets it, since libghostty's focus needs both it and the first responder.
-    var windowKey = false {
-        didSet { for v in views.values { v.windowKey = windowKey } }
-    }
     /// Views whose client currently has tmux's ignore-size flag set.
     private var ignoringSize: Set<String> = []
 
@@ -46,10 +43,19 @@ final class TerminalPool {
         return parts.joined(separator: " ")
     }
 
-    /// A view for `session`, creating (cold attach) if needed. Returns whether it was warm.
-    func acquire(_ session: String, frame: NSRect, hidden: Bool) -> (TerminalView, warm: Bool) {
+    /// A view for `session` inside `container` (a window's main area), creating (cold attach) if needed,
+    /// or moving a warm one over from another window's area. `windowKey` is the container window's.
+    /// Returns whether it was warm.
+    func acquire(_ session: String, frame: NSRect, hidden: Bool, in container: NSView, windowKey: Bool) -> (TerminalView, warm: Bool) {
         if let v = views[session], !v.exited {
             touch(session)
+            if v.superview !== container {
+                // Shown in another window now: the same view, its pty and tmux client untouched.
+                v.setResponder(false)
+                v.removeFromSuperview()
+                container.addSubview(v, positioned: .below, relativeTo: nil)
+                v.windowKey = windowKey
+            }
             return (v, true)
         }
         if let dead = views.removeValue(forKey: session) { dead.destroy() }
@@ -63,7 +69,7 @@ final class TerminalPool {
             self.onExit?(view.session)
         }
         v.onInput = { [weak self] view in self?.onInput?(view.session) }
-        container?.addSubview(v, positioned: .below, relativeTo: nil)
+        container.addSubview(v, positioned: .below, relativeTo: nil)
         v.frame = frame
         views[session] = v
         touch(session)
@@ -122,11 +128,11 @@ final class TerminalPool {
         setIgnoreSize(session, true)
     }
 
-    /// Start attaching a session in the background so a later switch is warm.
-    func prewarm(_ session: String, size: NSSize) {
+    /// Start attaching a session in the background (hidden in `container`) so a later switch is warm.
+    func prewarm(_ session: String, size: NSSize, in container: NSView, windowKey: Bool) {
         guard views[session] == nil || views[session]?.exited == true else { return }
         let state = signposter.beginInterval("Prewarm", id: signposter.makeSignpostID(), "\(session, privacy: .public)")
-        _ = acquire(session, frame: NSRect(origin: .zero, size: size), hidden: true)
+        _ = acquire(session, frame: NSRect(origin: .zero, size: size), hidden: true, in: container, windowKey: windowKey)
         signposter.endInterval("Prewarm", state)
     }
 
@@ -152,6 +158,16 @@ final class TerminalPool {
 
     func dropAll() {
         for s in Array(views.keys) { drop(s) }
+    }
+
+    /// A window is closing: its views stay warm, hidden in `other`'s area.
+    func adopt(from area: NSView, into other: NSView, windowKey: Bool) {
+        for (s, v) in views where v.superview === area {
+            hide(s)
+            v.removeFromSuperview()
+            other.addSubview(v, positioned: .below, relativeTo: nil)
+            v.windowKey = windowKey
+        }
     }
 
     private func setIgnoreSize(_ session: String, _ on: Bool) {

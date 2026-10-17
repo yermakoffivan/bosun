@@ -369,7 +369,7 @@ final class FocusTest: TestKit {
         r.check("start: the active terminal is first responder", firstResponderIsActiveTerminal)
 
         // --only a,b runs just those sections (rows, panes, zoom, newpanes, clientmoves, done, notify, appearance, links, sheet, empty,
-        // tiledrag, sidebardrag, shortcuts).
+        // tiledrag, sidebardrag, shortcuts, windows).
         if let only = argValue("--only") {
             let parts = Set(only.split(separator: ",").map(String.init))
             if parts.contains("rows") { await rows(f) }
@@ -382,6 +382,7 @@ final class FocusTest: TestKit {
             if parts.contains("appearance") { await appearancePair(f) }
             if parts.contains("links") { await links() }
             await layoutSections(parts)
+            if parts.contains("windows") { await windows(f) }
             await finish()
             return
         }
@@ -731,6 +732,7 @@ final class FocusTest: TestKit {
 
         // 18–22. Sheet layout, placeholders, pane drag, sidebar drag, the shortcuts panel.
         await layoutSections(nil)
+        await windows(f)
         await finish()
     }
 
@@ -1736,7 +1738,7 @@ extension TestKit {
     func checkFocusCount() {
         let focused = ws.pool.views.values.filter(\.hasTerminalFocus)
         let names = focused.map { app.displayName($0.session) }.joined(separator: ", ")
-        r.check("terminals libghostty thinks are focused: \(focused.count) (at most 1)", focused.count <= 1
+        r.check("terminals libghostty thinks are focused: \(focused.count) (at most 1, in any window)", focused.count <= 1
                 && focused.allSatisfy { $0 === ws.activeTerminal }, names)
     }
 }

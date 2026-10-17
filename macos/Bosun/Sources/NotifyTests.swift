@@ -44,7 +44,7 @@ extension FocusTest {
         }
         let realSeen = app.windowSeen
         // As if another app were in front: nothing is visible to you.
-        app.windowSeen = { false }
+        app.windowSeen = { _ in false }
         rec.reset()
         await showRow(f.api)
         let before = waitingCount
@@ -90,7 +90,7 @@ extension FocusTest {
                 "\(app.dockBadgeUpdates - updatesBefore) updates")
 
         // 4. The pane you're looking at in the frontmost app never notifies.
-        app.windowSeen = { true }
+        app.windowSeen = { _ in true }
         _ = await permission(s)
         await waitUntil(3) { app.daemon.state.state(of: s) == .waiting }
         await sleep(500)
@@ -99,15 +99,15 @@ extension FocusTest {
         await toolDone(s)
 
         // 5. The same pane while the app isn't in front does; coming to the front takes it back.
-        app.windowSeen = { false }
+        app.windowSeen = { _ in false }
         _ = await permission(s, tool: "Edit")
         r.check("inactive: the pane on screen notifies while the app isn't in front", await waitUntil(3) { rec.posts(for: s).count == 2 },
                 "\(rec.posts(for: s).count) posts")
         r.check("…with the new wait's detail", rec.delivered[id]?.body == "Waiting — permission: Edit", describe(rec.delivered[id]))
-        app.windowSeen = { true }
+        app.windowSeen = { _ in true }
         app.appBecameActive()
         r.check("…and the app coming to the front takes it back", rec.delivered[id] == nil)
-        app.windowSeen = { false }
+        app.windowSeen = { _ in false }
         await toolDone(s)
         await settle(s)
 

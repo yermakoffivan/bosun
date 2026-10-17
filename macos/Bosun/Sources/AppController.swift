@@ -2,24 +2,44 @@ import AppKit
 import BosunCore
 import SwiftUI
 
-/// Ties the daemon, the sidebar and the main area together, and owns the focus rules,
-/// key routing, menus and commands.
+/// Ties the daemon, the windows (each a sidebar and a main area) and the warm pool together, and owns
+/// the focus rules, key routing, menus and commands. Menus and keys act on the key window (`current`).
 @MainActor
 final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuItemValidation {
     let daemon = DaemonClient()
-    private(set) var workspace: Workspace!
-    private(set) var sidebar: SidebarController!
-    var focus = FocusModel()
+    /// Every Bosun window, the first one first (it never closes on its own, and its frame is kept by name).
+    private(set) var windows: [BosunWindow] = []
+    /// The key window, or the last one that was (menus, keys and sheets act on it).
+    private(set) var current: BosunWindow!
+    /// The warm pool, shared by every window.
+    private(set) var pool: TerminalPool!
+    /// Every row's layout and the pane bookkeeping, shared by every window.
+    let rowStore = RowStore()
+    var workspace: Workspace { current.workspace }
+    var sidebar: SidebarController { current.sidebar }
+    var focus: FocusModel {
+        get { current.focus }
+        set { current.focus = newValue }
+    }
+    var window: MainWindow { current.window }
+    private var root: RootView { current.root }
+    private var palette: PaletteView? {
+        get { current.palette }
+        set { current.palette = newValue }
+    }
+    private(set) var shortcutsPanel: ShortcutsPanel? {
+        get { current.shortcutsPanel }
+        set { current.shortcutsPanel = newValue }
+    }
+    private var sendNextPending: Bool {
+        get { current.sendNextPending }
+        set { current.sendNextPending = newValue }
+    }
     private var seen = SeenTracker()
     private(set) var theme = AppTheme(.fallback)
     private(set) var nav = NavBindings(nil) { didSet { updateNavMenu() } }
     private var navItems: [NavAction: NSMenuItem] = [:]
-    private(set) var shortcutsPanel: ShortcutsPanel?
-    private(set) var window: MainWindow!
-    private var root: RootView!
-    private var palette: PaletteView?
     private(set) var settingsWindow: NSWindow?
-    private var sendNextPending = false
     private var waitingSince: [String: Date] = [:]
     private var monitors: [Any] = []
     private(set) var themeMenu = NSMenu(title: "Theme")
@@ -35,15 +55,16 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     private(set) var sidebarPaintedAt: Double?
     private(set) var firstTerminalAt: Double?
     var onFirstTerminal: (() -> Void)?
-    /// Test modes run where the window can't become key (a locked screen); they treat it as key.
+    /// Test modes run where the window can't become key (a locked screen); they treat `current` as key.
     var assumeKeyForTests = false
-    var windowIsKey: Bool { window.isKeyWindow || assumeKeyForTests }
+    var windowIsKey: Bool { isKey(current) }
+    func isKey(_ bw: BosunWindow) -> Bool { bw.window.isKeyWindow || (assumeKeyForTests && bw === current) }
     /// When to notify about a session (design 10).
     private var attention = Attention()
     /// Notifications go to the system, or to a recorder in the test modes (they never post for real).
     let notifier: any Notifier = testMode ? RecordingNotifier() : SystemNotifier()
-    /// Whether you can see the window right now (`windowOnScreen`). The test modes replace it.
-    var windowSeen: () -> Bool = { false }
+    /// Whether you can see a window right now (`BosunWindow.onScreen`). The test modes replace it.
+    var windowSeen: (BosunWindow) -> Bool = { _ in false }
     /// The first live snapshot has been taken as the notifications' baseline.
     private var attentionLive = false
     /// The Dock badge as last set, and how many times it was set (the tests check it only changes with the count).
@@ -54,9 +75,12 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     // MARK: Startup
 
     func start() {
-        workspace = Workspace(app: self)
-        sidebar = SidebarController(app: self)
-        buildWindow()
+        pool = TerminalPool(daemon: daemon, capacity: AppSettings.shared.poolSize)
+        pool.onExit = { [weak self] s in self?.terminalExited(s) }
+        pool.onInput = { [weak self] s in self?.terminalInput(s) }
+        let primary = BosunWindow(app: self, frame: nil)
+        windows = [primary]
+        current = primary
         buildMenu()
         installMonitors()
         LinkOpener.sessionPath = { [weak self] in self?.daemon.state.sessions[$0]?.path }
@@ -67,8 +91,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.settingsChanged() }
         }
-        focus.followsMouse = AppSettings.shared.focusFollowsMouse
-        windowSeen = { [weak self] in self?.windowOnScreen ?? false }
+        windowSeen = { $0.onScreen }
         notifier.onOpen = { [weak self] in self?.notificationClicked(userInfo: $0) }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.reviewSeen() }
@@ -87,17 +110,16 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         // 1. First frame from the cached snapshot: no I/O beyond one small file.
         let cached = daemon.loadCache()
         if !cached { applyTheme() }
-        workspace.restore()
-        focus.setTiles(count: workspace.tiles.count, active: workspace.activeTile)
-        if noActivate {
-            window.orderFront(nil)
-        } else {
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate()
+        restoreWindows()
+        for bw in windows.reversed() {
+            bw.focus.setTiles(count: bw.workspace.tiles.count, active: bw.workspace.activeTile)
+            if noActivate || bw !== primary { bw.window.orderFront(nil) } else { bw.window.makeKeyAndOrderFront(nil) }
+            bw.root.layoutSubtreeIfNeeded()
+            bw.workspace.relayout()
+            bw.sidebar.reload()
+            bw.applyTheme()
         }
-        root.layoutSubtreeIfNeeded()
-        workspace.relayout()
-        sidebar.reload()
+        if !noActivate { NSApp.activate() }
         CATransaction.setCompletionBlock { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, self.sidebarPaintedAt == nil else { return }
@@ -113,65 +135,182 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         daemon.start()
         statusChanged(daemon.status)
         DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated { self?.workspace.startAttaching() }
+            MainActor.assumeIsolated { for bw in self?.windows ?? [] { bw.workspace.startAttaching() } }
         }
     }
 
-    private func buildWindow() {
-        let w = MainWindow(contentRect: NSRect(x: 0, y: 0, width: 1320, height: 840),
-                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                           backing: .buffered, defer: false)
-        w.title = "Bosun"
-        w.titleVisibility = .hidden
-        w.titlebarAppearsTransparent = true
-        w.isReleasedWhenClosed = false
-        w.acceptsMouseMovedEvents = true
-        w.tabbingMode = .disallowed
-        w.minSize = NSSize(width: 640, height: 400)
-        w.delegate = self
-        w.responderPolicy = { [weak self] r in self?.firstResponderPolicy(r) ?? r }
-        // Test modes share the app's defaults; they must never save their window frame over yours.
-        if !testMode { w.setFrameAutosaveName("BosunMain") }
-        if !w.setFrameUsingName("BosunMain") { w.center() }
-        root = RootView(sidebar: sidebar.view, main: workspace.area, sidebarWidth: AppSettings.shared.sidebarWidth)
-        root.onSidebarResized = { AppSettings.shared.sidebarWidth = $0 }
-        root.onSidebarDrag = { [weak self] began in
-            if began { self?.workspace.resizeBegan() } else { self?.workspace.resizeEnded() }
-        }
-        w.contentView = root
-        root.titlebarHeight = max(28, w.frame.height - w.contentLayoutRect.height)
-        window = w
+    // MARK: Windows
+
+    func controller(for w: NSWindow?) -> BosunWindow? { windows.first { $0.window === w } }
+
+    /// The window showing row `id`, if any.
+    func window(showing id: String) -> BosunWindow? { windows.first { $0.workspace.currentRow == id } }
+
+    /// The window showing `session` as one of its panes on screen, else the one showing its row.
+    func window(showingSession s: String) -> BosunWindow? {
+        windows.first { $0.workspace.visibleSessions.contains(s) }
+            ?? daemon.state.sidebar.container(holding: s).flatMap { window(showing: $0.id) }
     }
 
-    // MARK: Focus (design 7b)
+    func isShown(row id: String, elsewhereThan bw: BosunWindow?) -> Bool {
+        windows.contains { $0 !== bw && $0.workspace.currentRow == id }
+    }
 
-    /// Who may hold the keyboard: the active terminal, or a text field while an exception is open.
-    private func firstResponderPolicy(_ r: NSResponder?) -> NSResponder? {
-        let terminal = workspace.activeTerminal
-        if let t = r as? TerminalView {
-            return t === terminal ? t : (terminal ?? window)
+    /// Every window's panes on screen.
+    var visibleSessions: Set<String> { windows.reduce(into: Set<String>()) { $0.formUnion($1.workspace.visibleSessions) } }
+
+    /// Make `bw` the window menus and keys act on. The test modes can't make a window key (the screen
+    /// may be locked), so there it's just marked key in its place.
+    func setCurrent(_ bw: BosunWindow) {
+        guard bw !== current else { return }
+        let old = current
+        current = bw
+        if assumeKeyForTests {
+            old?.focus.setWindowKey(false)
+            old?.workspace.windowKeyChanged(false)
+            bw.focus.setWindowKey(true)
+            bw.workspace.windowKeyChanged(true)
         }
-        if r is NSText || r is NSTextField {
-            return focus.exception != nil ? r : (terminal ?? window)
+    }
+
+    /// Bring a window to the front with the keyboard in it.
+    func bringForward(_ bw: BosunWindow) {
+        if bw.window.isMiniaturized { bw.window.deminiaturize(nil) }
+        if testMode {
+            // Key without activating the app, so a test run never takes the keyboard from what you're doing.
+            bw.window.orderFront(nil)
+            bw.window.makeKey()
+        } else {
+            bw.window.makeKeyAndOrderFront(nil)
         }
-        if r == nil || r === window {
-            if focus.exception == nil, let terminal { return terminal }
-            return r
+        setCurrent(bw)
+    }
+
+    /// A new window showing row `id` (nil: the first row no window shows). `frame` places it; by default
+    /// it cascades from the key window.
+    @discardableResult
+    func openWindow(row id: String?, frame: NSRect? = nil, front: Bool = true) -> BosunWindow? {
+        let st = daemon.state
+        let row = id ?? st.sidebar.allRows.first { c in !isShown(row: c.id, elsewhereThan: nil) && c.tabs.contains { isAlive($0.session) } }?.id
+        guard let row, !isShown(row: row, elsewhereThan: nil) else { NSSound.beep(); return nil }
+        var f = frame
+        if f == nil, let from = current?.window {
+            var r = from.frame
+            let top = from.cascadeTopLeft(from: NSPoint(x: r.minX, y: r.maxY))
+            r.origin = NSPoint(x: top.x, y: top.y - r.height)
+            f = r
         }
-        // The outline, buttons, scroll views...: never.
-        return terminal ?? window
+        let bw = BosunWindow(app: self, frame: f)
+        windows.append(bw)
+        bw.workspace.restore(row: row)
+        bw.root.layoutSubtreeIfNeeded()
+        bw.workspace.relayout()
+        bw.sidebar.reload()
+        bw.applyTheme()
+        bw.sidebar.setStatus(statusText.text, reconnect: statusText.reconnect)
+        if hadLiveSnapshot || st.server != nil { bw.workspace.startAttaching() }
+        if front { bringForward(bw) } else { bw.window.orderFront(nil) }
+        if assumeKeyForTests, bw === current { bw.focus.setWindowKey(true); bw.workspace.windowKeyChanged(true) }
+        for w in windows { w.sidebar.refreshRows() }
+        saveLayouts()
+        return bw
+    }
+
+    // MARK: Tear-off
+
+    /// Panes moving out into rows of their own, to open in a new window once the daemon's sidebar shows
+    /// the new row: session → (its old row, where the window goes, when it was asked for).
+    private var pendingTearOffs: [String: (from: String, frame: NSRect?, at: Date)] = [:]
+
+    /// A new window's frame with its top left near `p` (a drop point on screen), the key window's size,
+    /// kept on that screen. nil without a point (the window cascades instead).
+    func tearOffFrame(at p: NSPoint?) -> NSRect? {
+        guard let p else { return nil }
+        let size = current?.window.frame.size ?? NSSize(width: 1100, height: 720)
+        var r = NSRect(x: p.x - 60, y: p.y - size.height + 12, width: size.width, height: size.height)
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(p) }) ?? NSScreen.main {
+            let v = screen.visibleFrame
+            r.size.width = min(r.width, v.width)
+            r.size.height = min(r.height, v.height)
+            r.origin.x = min(max(r.minX, v.minX), v.maxX - r.width)
+            r.origin.y = min(max(r.minY, v.minY), v.maxY - r.height)
+        }
+        return r
+    }
+
+    /// Whether a screen point is over one of the app's windows (a drag let go there isn't a tear-off).
+    func isOverBosunWindow(_ p: NSPoint) -> Bool { windows.contains { $0.window.isVisible && $0.window.frame.contains(p) } }
+
+    /// Open row `id` in a window of its own (a row dragged out of the sidebar, or its menu). The window
+    /// showing it now moves on to the next row no window shows; with none, nothing happens.
+    func openRowInNewWindow(_ id: String, at p: NSPoint? = nil) {
+        guard daemon.state.sidebar.container(id: id) != nil else { return }
+        if let from = window(showing: id), !from.workspace.leaveRow() {
+            NSSound.beep()
+            root.band.flash("Nothing else for this window to show")
+            return
+        }
+        openWindow(row: id, frame: tearOffFrame(at: p))
+    }
+
+    /// Move one pane out of its row into a row of its own, shown in a new window (a pane dragged out of
+    /// the window, a tab dragged out of the sidebar, or their menus). The daemon makes the row, so the
+    /// TUI sees it too; the window opens once that row arrives, with the same terminal view.
+    func movePaneToNewWindow(_ s: String, at p: NSPoint? = nil) {
+        guard let c = daemon.state.sidebar.container(holding: s), c.tabs.count > 1, isAlive(s) else { NSSound.beep(); return }
+        pendingTearOffs[s] = (c.id, tearOffFrame(at: p), Date())
+        daemon.command(.moveTab(session: s, container: nil, index: nil)) { [weak self] ack in
+            guard let self else { return }
+            self.report(ack)
+            if !ack.ok { self.pendingTearOffs[s] = nil } else { self.openPendingTearOffs() }
+        }
+    }
+
+    /// Open the windows for panes whose new row has arrived.
+    private func openPendingTearOffs() {
+        for (s, t) in pendingTearOffs {
+            if Date().timeIntervalSince(t.at) > 10 { pendingTearOffs[s] = nil; continue }
+            guard let c = daemon.state.sidebar.container(holding: s), c.id != t.from else { continue }
+            pendingTearOffs[s] = nil
+            // The old row's window lets the pane go first (it's no longer one of that row's tabs).
+            for bw in windows where bw.workspace.layout.contains(s) { bw.workspace.reconcile(focus: false) }
+            if let bw = openWindow(row: c.id, frame: t.frame) { bw.workspace.activate(s) }
+        }
+    }
+
+    /// The sidebar's drag of an item ended outside every Bosun window: a row opens in a new window, a
+    /// tab moves out into one.
+    func sidebarDraggedOut(_ kind: SidebarItem.Kind, at p: NSPoint) {
+        guard !isOverBosunWindow(p) else { return }
+        switch kind {
+        case .row(let id): openRowInNewWindow(id, at: p)
+        case .tab(let s): movePaneToNewWindow(s, at: p)
+        case .section: break
+        }
+    }
+
+    /// A window with nothing left to show closes on the next turn (not inside the reconcile that found it).
+    func closeWindowSoon(_ bw: BosunWindow) {
+        DispatchQueue.main.async { [weak self, weak bw] in
+            MainActor.assumeIsolated {
+                guard let self, let bw, self.windows.contains(where: { $0 === bw }), self.windows.count > 1 else { return }
+                bw.window.close()
+            }
+        }
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
-        focus.setWindowKey(true)
-        workspace.windowKeyChanged(true)
-        workspace.focusActiveTerminal()
+        guard let bw = controller(for: notification.object as? NSWindow) else { return }
+        setCurrent(bw)
+        bw.focus.setWindowKey(true)
+        bw.workspace.windowKeyChanged(true)
+        bw.workspace.focusActiveTerminal()
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        guard !assumeKeyForTests else { return }
-        focus.setWindowKey(false)
-        workspace.windowKeyChanged(false)
+        guard !assumeKeyForTests, let bw = controller(for: notification.object as? NSWindow) else { return }
+        bw.focus.setWindowKey(false)
+        bw.workspace.windowKeyChanged(false)
     }
 
     func enableTestKey() {
@@ -183,9 +322,10 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
 
     func windowDidChangeOcclusionState(_ notification: Notification) {
+        guard let bw = controller(for: notification.object as? NSWindow) else { return }
         // The test modes run with the screen locked, where the window counts as occluded.
-        let visible = assumeKeyForTests || window.occlusionState.contains(.visible)
-        for s in workspace.visibleSessions { workspace.pool.view(for: s)?.setRendererVisible(visible) }
+        let visible = assumeKeyForTests || bw.window.occlusionState.contains(.visible)
+        for s in bw.workspace.visibleSessions { pool.view(for: s)?.setRendererVisible(visible) }
         reviewSeen()
     }
 
@@ -199,19 +339,90 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
 
     func windowDidResize(_ notification: Notification) {
+        guard controller(for: notification.object as? NSWindow) === current else { return }
         layoutPalette()
         layoutShortcuts()
     }
 
     func windowWillClose(_ notification: Notification) {
-        persist()
+        guard let bw = controller(for: notification.object as? NSWindow) else { return }
+        guard windows.count > 1 else { persist(); return }
+        // Another window stays: this one's row goes back to the sidebar (its sessions keep running) and its
+        // terminal views stay warm, hidden in the next window.
+        if let row = bw.workspace.currentRow { syncActiveTab(row: row, pane: rowStore.rows[row]?.active) }
+        windows.removeAll { $0 === bw }
+        let next = windows[0]
+        pool.adopt(from: bw.workspace.area, into: next.workspace.area, windowKey: next.workspace.windowKey)
+        if current === bw { setCurrent(windows.first { $0.window.isKeyWindow } ?? next) }
+        seen.setViewed(visibleSessions)
+        for w in windows { w.sidebar.refreshRows() }
+        saveLayouts()
+        reviewSeen()
     }
 
     func persist() {
-        if let row = workspace.currentRow { syncActiveTab(row: row, pane: workspace.rows[row]?.active) }
+        for bw in windows {
+            if let row = bw.workspace.currentRow { syncActiveTab(row: row, pane: rowStore.rows[row]?.active) }
+        }
         daemon.writeCache()
-        workspace.save()
+        saveLayouts()
         saveInputs()
+    }
+
+    // MARK: Row layouts and windows, kept between runs
+
+    private var layoutURL: URL { Paths.supportDir.appendingPathComponent("rows-\(Paths.key(for: daemon.socketPath)).json") }
+    /// The one-tree-per-window layout of earlier builds.
+    private var legacyURL: URL { Paths.supportDir.appendingPathComponent("layout-\(Paths.key(for: daemon.socketPath)).json") }
+    private var layoutsTimer: Timer?
+
+    /// Read the saved layouts: the first window shows the saved row, and every other saved window opens
+    /// again where it was, on its row (one that's gone, or already shown, doesn't).
+    private func restoreWindows() {
+        let primary = windows[0]
+        guard let data = try? Data(contentsOf: layoutURL), let saved = SavedLayouts.decode(data) else {
+            primary.workspace.restore(row: nil, legacySession: (try? Data(contentsOf: legacyURL)).flatMap(SavedLayouts.legacyActiveSession))
+            return
+        }
+        rowStore.rows = saved.rows
+        primary.workspace.restore(row: saved.current)
+        let sb = daemon.state.sidebar
+        for w in saved.windows ?? [] where sb.container(id: w.row) != nil && !isShown(row: w.row, elsewhereThan: nil) {
+            let bw = BosunWindow(app: self, frame: w.frame.map { NSRectFromString($0) })
+            windows.append(bw)
+            bw.workspace.restore(row: w.row)
+        }
+    }
+
+    func saveLayouts() {
+        layoutsTimer?.invalidate()
+        layoutsTimer = nil
+        guard let first = windows.first else { return }
+        // Test modes share the app's defaults; they must never save a window frame over yours.
+        if !testMode { first.window.saveFrame(usingName: BosunWindow.primaryFrameName) }
+        let others = windows.dropFirst().compactMap { bw in
+            bw.workspace.currentRow.map { SavedLayouts.Window(row: $0, frame: testMode ? nil : NSStringFromRect(bw.window.frame)) }
+        }
+        var saved = SavedLayouts(current: first.workspace.currentRow, rows: rowStore.rows)
+        saved.windows = others.isEmpty ? nil : others
+        guard let data = saved.encoded() else { return }
+        try? data.write(to: layoutURL, options: .atomic)
+        // The old layout can't be carried over (its tiles mixed rows); once the new file exists it goes.
+        if FileManager.default.fileExists(atPath: legacyURL.path) { try? FileManager.default.removeItem(at: legacyURL) }
+    }
+
+    /// Save soon: pane activation (hover included) changes the model often, the file needn't follow every step.
+    func scheduleSaveLayouts() {
+        guard layoutsTimer == nil else { return }
+        layoutsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.saveLayouts() }
+        }
+    }
+
+    /// A terminal's tmux client ended on its own: its view goes, and a window showing it attaches again.
+    private func terminalExited(_ s: String) {
+        pool.drop(s)
+        for bw in windows { bw.workspace.terminalExited(s) }
     }
 
     private func installMonitors() {
@@ -232,11 +443,11 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 // The test modes drive the pointer themselves; the real one (someone using the Mac
                 // while a test runs) would move focus between panes behind the test's back.
                 if testMode && !TestKit.posted(event) { out = nil; return }
-                guard let self, event.window === self.window else { return }
-                self.workspace.pointerMoved(event)
+                guard let self, let bw = self.controller(for: event.window) else { return }
+                bw.workspace.pointerMoved(event)
                 // A posted mouse-moved never passes through the window server's tracking areas, so
                 // the test modes hand it to the terminal under the pointer, as a tracking area would.
-                if testMode { self.workspace.terminal(atWindowPoint: event.locationInWindow)?.mouseMoved(with: event) }
+                if testMode { bw.workspace.terminal(atWindowPoint: event.locationInWindow)?.mouseMoved(with: event) }
             }
             return out
         } as Any)
@@ -246,8 +457,15 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         } as Any)
     }
 
-    /// A click outside an open rename or palette closes it (rename keeps the new name).
+    /// A click outside an open rename or palette closes it (rename keeps the new name). A click in
+    /// another Bosun window closes them too, and that window becomes the one menus act on.
     private func clickedSomewhere(_ e: NSEvent) {
+        if let bw = controller(for: e.window), bw !== current {
+            closeShortcuts()
+            closePalette()
+            if focus.exception == .rename { window.makeFirstResponder(nil) }
+            setCurrent(bw)
+        }
         if e.window === window, shortcutsPanel != nil { closeShortcuts() }
         guard e.window === window, let ex = focus.exception else { return }
         switch ex {
@@ -328,7 +546,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     /// Previous/next row along the sidebar order (rows whose tabs have all ended are skipped, as in the
     /// TUI). The whole main area switches to that row's panes.
     private func stepSession(forward: Bool) {
-        let all = daemon.state.sidebar.allRows
+        // Rows another window shows are skipped: stepping never pulls another window forward.
+        let all = daemon.state.sidebar.allRows.filter { $0.id == workspace.currentRow || !isShown(row: $0.id, elsewhereThan: current) }
         let live = all.filter { c in c.tabs.contains { isAlive($0.session) } }.map(\.id)
         guard !live.isEmpty else { return }
         let current = workspace.currentRow
@@ -377,12 +596,13 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         workspace.selectRow(id)
     }
 
-    func workspaceChanged() {
-        seen.setViewed(workspace.visibleSessions)
-        sidebar.syncSelection()
-        sidebar.refreshRows()
-        focus.setTiles(count: workspace.tiles.count, active: workspace.activeTile)
-        updateTitle()
+    func workspaceChanged(_ ws: Workspace) {
+        seen.setViewed(visibleSessions)
+        ws.owner.sidebar.syncSelection()
+        // Every sidebar marks the rows other windows show.
+        for bw in windows { bw.sidebar.refreshRows() }
+        ws.owner.focus.setTiles(count: ws.tiles.count, active: ws.activeTile)
+        ws.owner.updateTitle()
         updateDockBadge()
         reviewSeen()
     }
@@ -395,8 +615,10 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         scheduleInputsSave()
         if !attention.delivered.isEmpty { act(attention.seen(session)) }
         guard displayState(session) != before else { return }
-        sidebar.refreshRows([session])
-        workspace.updateChromeState()
+        for bw in windows {
+            bw.sidebar.refreshRows([session])
+            bw.workspace.updateChromeState()
+        }
     }
 
     func terminalPainted(_ session: String) {
@@ -407,15 +629,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
 
     private func updateTitle() {
-        if let s = workspace.activeSession {
-            var t = displayName(s)
-            if let p = daemon.state.sessions[s]?.path { t += "  —  " + (p as NSString).abbreviatingWithTildeInPath }
-            root.band.set(title: t, theme: theme)
-            window.title = "Bosun — \(displayName(s))"
-        } else {
-            root.band.set(title: "Bosun", theme: theme)
-            window.title = "Bosun"
-        }
+        for bw in windows { bw.updateTitle() }
     }
 
     /// The Dock badge: the number of sessions waiting on you (see `Attention.badgeCount` for why done turns
@@ -432,14 +646,9 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     // MARK: Notifications (design 10)
 
-    /// The window is in front of you: the app is active and the window is on screen, on this Space and not covered.
-    var windowOnScreen: Bool {
-        NSApp.isActive && window.isVisible && !window.isMiniaturized && window.isOnActiveSpace && window.occlusionState.contains(.visible)
-    }
-
-    /// You can see `session`: the window is in front of you and the session is a pane of the row it shows.
+    /// You can see `session`: it's a pane on screen in a window that's in front of you.
     func userCanSee(_ session: String) -> Bool {
-        workspace.visibleSessions.contains(session) && windowSeen()
+        windows.contains { $0.workspace.visibleSessions.contains(session) && windowSeen($0) }
     }
 
     private func observeAttention(_ s: String) {
@@ -482,13 +691,10 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     /// keyboard in it.
     func notificationClicked(userInfo: [AnyHashable: Any]) {
         guard let s = userInfo["session"] as? String else { return }
-        if window.isMiniaturized { window.deminiaturize(nil) }
-        if testMode {
-            window.orderFront(nil)
-        } else {
-            NSApp.activate()
-            window.makeKeyAndOrderFront(nil)
-        }
+        // The window that shows the session's row, else the key one.
+        let target = window(showingSession: s) ?? current!
+        if !testMode { NSApp.activate() }
+        bringForward(target)
         closePalette()
         closeShortcuts()
         if daemon.state.sidebar.container(holding: s) != nil { sidebarActivated(session: s) }
@@ -533,7 +739,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             case .snapshot:
                 applyTheme()
                 nav = NavBindings(st.keybindings)
-                workspace.pool.tmuxSocket = st.server?.tmuxSocket
+                pool.tmuxSocket = st.server?.tmuxSocket
                 for name in st.sessionOrder { seen.observe(name, status: st.statuses[name], title: st.sessions[name]?.paneTitle) }
                 // Waits already there share one time; the sidebar order breaks the tie (`oldestWaiting`).
                 let now = Date()
@@ -553,14 +759,14 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 touched.formUnion(changed)
                 removed.formUnion(gone)
                 if !gone.isEmpty || changed.contains(where: { sidebar.itemFor(session: $0) == nil }) { structure = true }
-                chrome = chrome || !changed.isDisjoint(with: workspace.visibleSessions) || !gone.isEmpty
+                chrome = chrome || !changed.isDisjoint(with: visibleSessions) || !gone.isEmpty
             case .status(let name):
                 let state = st.state(of: name)
                 seen.observe(name, status: st.statuses[name], title: st.sessions[name]?.paneTitle)
                 if state == .waiting { if waitingSince[name] == nil { waitingSince[name] = Date() } } else { waitingSince[name] = nil }
                 if attentionLive { observeAttention(name) }
                 touched.insert(name)
-                chrome = chrome || workspace.visibleSessions.contains(name)
+                chrome = chrome || visibleSessions.contains(name)
             case .sidebar:
                 for name in st.sessionOrder { formerNames[name] = displayName(name) }
                 structure = true
@@ -582,7 +788,10 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                     }
                 }
             case .client(let tty, let session):
-                workspace.clientMoved(tty: tty, to: session)
+                // The window whose area holds that terminal deals with it.
+                if let v = pool.view(onTTY: tty), let bw = windows.first(where: { v.superview === $0.workspace.area }) {
+                    bw.workspace.clientMoved(tty: tty, to: session)
+                }
             case .config, .themes:
                 themePairModel.update(from: st)
             case .recents:
@@ -597,9 +806,15 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 lastNotice = (n.raw, better)
             }
         }
-        if structure { sidebar.reload() } else if !touched.isEmpty { sidebar.refreshRows(touched) }
-        if !removed.isEmpty || structure { workspace.stateChanged(removed: removed) }
-        if chrome { workspace.updateChromeState(); updateTitle() }
+        for bw in windows {
+            if structure { bw.sidebar.reload() } else if !touched.isEmpty { bw.sidebar.refreshRows(touched) }
+        }
+        if !removed.isEmpty || structure {
+            for s in removed { pool.drop(s) }
+            for bw in windows { bw.workspace.stateChanged() }
+            openPendingTearOffs()
+        }
+        if chrome { for bw in windows { bw.workspace.updateChromeState() }; updateTitle() }
         updateDockBadge()
     }
 
@@ -628,19 +843,27 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     private func liveSnapshotArrived() {
         let first = !hadLiveSnapshot
         hadLiveSnapshot = true
-        if first { workspace.startAttaching() }
+        if first { for bw in windows { bw.workspace.startAttaching() } }
+    }
+
+    /// The sidebar footer's connection status, for windows opened later.
+    private var statusText: (text: String?, reconnect: Bool) = (nil, false)
+
+    private func setStatus(_ text: String?, reconnect: Bool) {
+        statusText = (text, reconnect)
+        for bw in windows { bw.sidebar.setStatus(text, reconnect: reconnect) }
     }
 
     private func statusChanged(_ s: DaemonClient.Status) {
         switch s {
         case .connected:
-            sidebar.setStatus(nil, reconnect: false)
+            setStatus(nil, reconnect: false)
         case .connecting:
-            sidebar.setStatus("Connecting…", reconnect: false)
+            setStatus("Connecting…", reconnect: false)
         case .disconnected(let why):
-            sidebar.setStatus("Reconnecting… (\(why))", reconnect: true)
+            setStatus("Reconnecting… (\(why))", reconnect: true)
         case .failed(let why):
-            sidebar.setStatus(why, reconnect: true)
+            setStatus(why, reconnect: true)
             let alert = NSAlert()
             alert.messageText = "Can't use bosun serve"
             alert.informativeText = why
@@ -720,13 +943,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     private func applyTheme() {
         theme = AppTheme(daemon.state.palette(for: appearance))
         themePairModel.update(from: daemon.state)
-        window.appearance = theme.appearance
-        window.backgroundColor = theme.bg
-        sidebar.applyTheme()
-        workspace.updateChromeState()
-        palette?.theme = theme
-        palette?.applyTheme()
-        updateTitle()
+        for bw in windows { bw.applyTheme() }
         applyTerminalTheme()
     }
 
@@ -735,13 +952,13 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         guard want != appliedTerminalTheme else { return }
         appliedTerminalTheme = want
         GhosttyRuntime.shared.setTerminalTheme(want)
-        workspace.updateChromeState()
+        for bw in windows { bw.workspace.updateChromeState() }
     }
 
     private func settingsChanged() {
-        focus.followsMouse = AppSettings.shared.focusFollowsMouse
-        workspace.pool.capacity = AppSettings.shared.poolSize
-        workspace.pool.evict(keeping: workspace.visibleSessions)
+        for bw in windows { bw.focus.followsMouse = AppSettings.shared.focusFollowsMouse }
+        pool.capacity = AppSettings.shared.poolSize
+        pool.evict(keeping: visibleSessions)
         applyTerminalTheme()
         updateDockBadge()
     }
@@ -821,10 +1038,12 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
 
     private func runSheet(_ alert: NSAlert, _ done: @escaping (Bool) -> Void) {
-        focus.begin(.sheet)
-        alert.beginSheetModal(for: window) { [weak self] resp in
+        // The sheet belongs to this window, whichever window is key when it closes.
+        let bw = current!
+        bw.focus.begin(.sheet)
+        alert.beginSheetModal(for: bw.window) { resp in
             MainActor.assumeIsolated {
-                if self?.focus.end(.sheet) == true { self?.workspace.focusActiveTerminal() }
+                if bw.focus.end(.sheet) { bw.workspace.focusActiveTerminal() }
                 done(resp == .alertFirstButtonReturn)
             }
         }
@@ -931,16 +1150,18 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
 
     private func createTab(_ spec: Spec, in containerID: String, axis: SplitAxis, deferLaunch: Bool) {
-        let from = workspace.currentRow == containerID ? workspace.layout.active : workspace.rememberedPane(row: containerID)
-        workspace.expectSplit(row: containerID, from: from, axis: axis)
+        // The row may be on screen in another window: that one gets the pane.
+        let ws = window(showing: containerID)?.workspace ?? workspace
+        let from = ws.currentRow == containerID ? ws.layout.active : ws.rememberedPane(row: containerID)
+        ws.expectSplit(row: containerID, from: from, axis: axis)
         daemon.command(.create(spec: spec, deferLaunch: deferLaunch)) { [weak self] ack in
             guard let self else { return }
             self.report(ack)
             guard ack.ok, let s = ack.session else {
-                self.workspace.cancelSplit(row: containerID)
+                ws.cancelSplit(row: containerID)
                 return
             }
-            self.workspace.paneCreated(s, row: containerID)
+            (self.window(showing: containerID)?.workspace ?? self.workspace).paneCreated(s, row: containerID)
             if let p = ack.pendingLaunch { self.workspace.expectLaunch(p.session, resume: p.resume) }
         }
     }
@@ -1036,9 +1257,10 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         let form = NewSessionFormView(model: model)
         let sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: NewSessionFormView.width, height: form.fittingHeight),
                              styleMask: [.titled], backing: .buffered, defer: false)
-        let close = { [weak self, weak sheet] in
-            guard let self, let sheet else { return }
-            self.window.endSheet(sheet)
+        let bw = current!
+        let close = { [weak bw, weak sheet] in
+            guard let bw, let sheet else { return }
+            bw.window.endSheet(sheet)
         }
         form.onSubmit = { spec in close(); onSubmit(spec) }
         form.onCancel = { close() }
@@ -1056,12 +1278,12 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         sheet.setContentSize(NSSize(width: NewSessionFormView.width, height: form.fittingHeight))
         sheet.initialFirstResponder = form.nameField
         sheet.appearance = theme.appearance
-        formModel = model
-        focus.begin(.sheet)
-        window.beginSheet(sheet) { [weak self] _ in
+        bw.formModel = model
+        bw.focus.begin(.sheet)
+        bw.window.beginSheet(sheet) { [weak bw] _ in
             MainActor.assumeIsolated {
-                self?.formModel = nil
-                if self?.focus.end(.sheet) == true { self?.workspace.focusActiveTerminal() }
+                bw?.formModel = nil
+                if bw?.focus.end(.sheet) == true { bw?.workspace.focusActiveTerminal() }
             }
         }
         sheet.makeFirstResponder(form.nameField)
@@ -1069,7 +1291,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     var sheetOpen: Bool { window.attachedSheet != nil }
     /// The open new-session / modify form's model (the focus test switches agents through it).
-    private(set) var formModel: NewSessionModel?
+    var formModel: NewSessionModel? { current.formModel }
 
     @objc func showSettings() {
         if settingsWindow == nil {
@@ -1099,6 +1321,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         ("Navigation", [("Next session (row)", ["Next Session"]), ("Previous session (row)", ["Previous Session"]),
                         ("Next tab (pane)", ["Next Tab"]), ("Previous tab (pane)", ["Previous Tab"]),
                         ("Send the next key to the terminal", ["Send Next Key to Terminal"])]),
+        ("Windows", [("New window (a row no window shows)", ["New Window"]), ("Close window", ["Close Window"]),
+                     ("Open a row or pane in a new window", [])]),
         ("Other", [("Keyboard shortcuts", ["Keyboard Shortcuts"]), ("Settings", ["Settings…"]),
                    ("Copy / paste", ["Copy", "Paste"]), ("Undo / cut / select all", ["Undo", "Cut", "Select All"]),
                    ("Full screen", ["Enter Full Screen"]), ("Minimize", ["Minimize"]),
@@ -1116,7 +1340,9 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     func shortcutGroups() -> [ShortcutsPanel.Group] {
         Self.shortcutCatalog.map { g in
             ShortcutsPanel.Group(name: g.group, rows: g.rows.map { row in
-                if row.items.isEmpty { return ShortcutsPanel.Row(title: row.title, keys: "drag its header") }
+                if row.items.isEmpty {
+                    return ShortcutsPanel.Row(title: row.title, keys: g.group == "Windows" ? "drag it out of the window" : "drag its header")
+                }
                 let keys = row.items.compactMap { menuItem(titled: $0).flatMap(ShortcutsPanel.keyLabel) }
                 if keys.isEmpty { return ShortcutsPanel.Row(title: row.title, keys: "off") }
                 return ShortcutsPanel.Row(title: row.title, keys: keys.joined(separator: row.title.hasPrefix("Sidebar row") ? " … " : "  "))
@@ -1255,6 +1481,18 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             _ = item("New Tab in This Row…") { [weak self] in self?.newTab(in: c.id) }
             if case .tab = rowItem?.kind {
                 _ = item("Move to Own Row") { [weak self] in self?.moveTabToOwnRow(s) }
+                if alive { _ = item("Move to New Window") { [weak self] in self?.movePaneToNewWindow(s) } }
+            } else if case .row = rowItem?.kind {
+                if let other = window(showing: c.id), other !== current {
+                    _ = item("Show Its Window") { [weak self] in self?.sidebarActivated(row: c.id) }
+                } else {
+                    _ = item("Open in New Window") { [weak self] in self?.openRowInNewWindow(c.id) }
+                }
+            } else if rowItem == nil, c.tabs.count > 1, alive {
+                // A pane's header menu.
+                _ = item("Move to New Window") { [weak self] in self?.movePaneToNewWindow(s) }
+            }
+            if case .tab = rowItem?.kind {
             } else if let merge = mergeMenu(from: c) {
                 let i = NSMenuItem(title: "Merge into", action: nil, keyEquivalent: "")
                 i.submenu = merge
@@ -1414,6 +1652,10 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         add(session, "Kill…", #selector(menuSession(_:)), target: self, tag: 4)
 
         let win = sub("Window")
+        add(win, "New Window", #selector(menuNewWindow), "n", target: self)
+        add(win, "Move Pane to New Window", #selector(menuPaneToNewWindow), target: self)
+        add(win, "Close Window", #selector(menuCloseWindow), "W", [.command, .shift], target: self)
+        win.addItem(.separator())
         add(win, "Minimize", #selector(NSWindow.performMiniaturize(_:)), "m", target: nil)
         add(win, "Zoom", #selector(NSWindow.performZoom(_:)), target: nil)
         NSApp.windowsMenu = win
@@ -1463,6 +1705,12 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
     @objc func menuPalette() { showPalette() }
     @objc func menuZoomPane() { workspace.toggleZoom() }
+    @objc func menuNewWindow() { openWindow(row: nil) }
+    @objc func menuCloseWindow() { window.performClose(nil) }
+    @objc func menuPaneToNewWindow() {
+        guard let s = workspace.layout.active else { NSSound.beep(); return }
+        movePaneToNewWindow(s)
+    }
 
     @objc func menuFocusTile(_ sender: NSMenuItem) {
         workspace.moveFocus([Direction.left, .right, .up, .down][sender.tag])
@@ -1547,6 +1795,10 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             return workspace.layout.active != nil && workspace.layout.count < RowLayout.maxPanes
         case #selector(menuNewTab):
             return workspace.container != nil
+        case #selector(menuNewWindow):
+            return daemon.state.sidebar.allRows.contains { !isShown(row: $0.id, elsewhereThan: nil) }
+        case #selector(menuPaneToNewWindow):
+            return workspace.layout.count > 1 && workspace.layout.active.map(isAlive) == true
         default:
             return true
         }

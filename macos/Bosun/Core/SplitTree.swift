@@ -447,12 +447,24 @@ public struct RowLayout: Codable, Equatable, Sendable {
 }
 
 /// What the app keeps between runs (Application Support JSON): every row's layout by container id,
-/// and the row that was shown.
+/// the row the first window showed, and the other windows (each on its row, where it was).
 public struct SavedLayouts: Codable, Equatable, Sendable {
     public static let currentVersion = 2
     public var version: Int
     public var current: String?
     public var rows: [String: RowLayout]
+    /// Windows after the first; absent in files from before there were several.
+    public var windows: [Window]?
+
+    public struct Window: Codable, Equatable, Sendable {
+        public var row: String
+        /// `NSStringFromRect` of the window's frame (nil: let the app place it).
+        public var frame: String?
+        public init(row: String, frame: String?) {
+            self.row = row
+            self.frame = frame
+        }
+    }
 
     public init(current: String? = nil, rows: [String: RowLayout] = [:]) {
         version = SavedLayouts.currentVersion
@@ -472,6 +484,7 @@ public struct SavedLayouts: Codable, Equatable, Sendable {
     public mutating func prune(keeping ids: Set<String>) {
         rows = rows.filter { ids.contains($0.key) }
         if let c = current, !ids.contains(c) { current = nil }
+        windows = windows?.filter { ids.contains($0.row) }
     }
 
     /// The session the old single-tree layout file had active (`{"root":…,"sessions":{"1":"name",…},"active":1}`),
