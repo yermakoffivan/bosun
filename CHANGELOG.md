@@ -18,6 +18,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Rename is a double-click in Bosun for Mac.** A double-click on a row's or tab's name renames it, and Rename is in the right-click menu as before. A single click on the selected row's name no longer starts a rename, so clicking the row on screen to get back to it doesn't drop you into the name field.
 - **Dev and demo runs of Bosun for Mac leave your window frame alone.** Their defaults are your real ones, so a window opened by `dev.sh` used to save its size and place over yours.
 
+### Fixed
+
+- **Cmd+click on a relative path in Bosun for Mac on a busy Mac.** The app asks tmux for the pane's directory, and gave it only a second; when tmux was slower the path was looked up in the session's first directory instead, and usually nothing opened. It now waits up to three seconds (off the main thread, so nothing stalls).
+
 ## [2.2.3] — 2026-10-17
 
 ### Added

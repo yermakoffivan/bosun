@@ -305,11 +305,12 @@ enum LinkOpener {
         }
         let tty = view.ttyName, socket = view.tmuxSocket, session = view.session
         let fallback = sessionPath?(session)
+        // Off the main thread, so a busy tmux can take its time: the fallback is only the session's first directory.
         DispatchQueue.global(qos: .userInitiated).async {
             var cwd: String?
             if let tty {
                 let out = ShellEnv.run(Paths.tmux, (socket.map { ["-L", $0] } ?? []) + ["display-message", "-p", "-c", tty, "#{pane_current_path}"],
-                                       timeout: 1)
+                                       timeout: 3)
                 cwd = out?.trimmingCharacters(in: .whitespacesAndNewlines)
             }
             if cwd?.isEmpty ?? true { cwd = fallback }
