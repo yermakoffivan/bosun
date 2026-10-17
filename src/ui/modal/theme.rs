@@ -158,7 +158,12 @@ impl Modal for ThemeModal {
             rect.height.saturating_sub(2),
         );
 
-        let mut lines: Vec<Line<'static>> = Vec::with_capacity(self.themes.len() + 4);
+        // The list scrolls when the terminal is too short for every
+        // theme: two of the inner rows go to the title and a spacer.
+        let list_rows = (inner.height as usize).saturating_sub(2);
+        let window = visible_window(self.selected, self.themes.len(), list_rows);
+
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(list_rows + 2);
         lines.push(Line::from(vec![
             Span::styled(
                 "Theme",
@@ -174,14 +179,31 @@ impl Modal for ThemeModal {
         ]));
         lines.push(Line::from(""));
 
-        for (i, name) in self.themes.iter().enumerate() {
-            lines.push(render_row(name, i == self.selected, inner.width, theme));
+        for i in window {
+            lines.push(render_row(
+                &self.themes[i],
+                i == self.selected,
+                inner.width,
+                theme,
+            ));
         }
 
         Paragraph::new(lines)
             .style(Style::default().bg(body_bg))
             .render(inner, frame.buffer_mut());
     }
+}
+
+/// The slice of the theme list to draw when only `rows` fit: the whole
+/// list if it fits, otherwise a window that keeps `selected` in the
+/// middle, pinned at the start and end of the list. Worked out from
+/// the selection alone so the modal needs no scroll state of its own.
+fn visible_window(selected: usize, len: usize, rows: usize) -> std::ops::Range<usize> {
+    if len <= rows {
+        return 0..len;
+    }
+    let start = selected.saturating_sub(rows / 2).min(len - rows);
+    start..start + rows
 }
 
 fn render_row(name: &str, selected: bool, width: u16, theme: &Theme) -> Line<'static> {
@@ -233,6 +255,70 @@ mod tests {
             vec!["opencode".into(), "dracula".into(), "nord".into()],
             "opencode".into(),
         )
+    }
+
+    #[test]
+    fn window_shows_everything_when_it_fits() {
+        assert_eq!(visible_window(0, 5, 5), 0..5);
+        assert_eq!(visible_window(4, 5, 20), 0..5);
+        assert_eq!(visible_window(0, 0, 0), 0..0);
+    }
+
+    #[test]
+    fn window_follows_the_selection_and_pins_at_the_ends() {
+        // 28 themes, 20 rows: the start and end of the list pin the window.
+        assert_eq!(visible_window(0, 28, 20), 0..20);
+        assert_eq!(visible_window(9, 28, 20), 0..20);
+        assert_eq!(visible_window(15, 28, 20), 5..25);
+        assert_eq!(visible_window(27, 28, 20), 8..28);
+        for sel in 0..28 {
+            let w = visible_window(sel, 28, 20);
+            assert!(w.contains(&sel), "{sel} not in {w:?}");
+            assert_eq!(w.len(), 20);
+        }
+        // Even one row keeps the selection on screen.
+        assert_eq!(visible_window(7, 28, 1), 7..8);
+    }
+
+    /// Render the modal into a `w` x `h` terminal and return its text.
+    fn draw(m: &ThemeModal, w: u16, h: u16) -> Vec<String> {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let theme = Theme::default_opencode();
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| m.render(f, Rect::new(0, 0, w, h), &theme))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn selection_stays_on_screen_in_a_24_row_terminal() {
+        let names: Vec<String> = (0..28).map(|i| format!("theme-{i:02}")).collect();
+        let mut m = ThemeModal::new(names.clone(), "theme-00".into());
+        // Walk the whole list; the highlighted row must always be drawn.
+        for i in 0..28 {
+            let rows = draw(&m, 100, 24);
+            let marker = rows
+                .iter()
+                .find(|r| r.contains('▸'))
+                .unwrap_or_else(|| panic!("no selection marker with theme-{i:02} selected"));
+            assert!(marker.contains(&names[i]), "{marker:?} for {}", names[i]);
+            m.handle(key(KeyCode::Down));
+        }
+        // And walking back up from the end.
+        for i in (0..28).rev() {
+            let rows = draw(&m, 100, 24);
+            assert!(rows
+                .iter()
+                .any(|r| r.contains('▸') && r.contains(&names[i])));
+            m.handle(key(KeyCode::Up));
+        }
+        // A short terminal still shows the title.
+        assert!(draw(&m, 100, 24).iter().any(|r| r.contains("Theme")));
     }
 
     #[test]
