@@ -1492,8 +1492,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 // A pane's header menu.
                 _ = item("Move to New Window") { [weak self] in self?.movePaneToNewWindow(s) }
             }
-            if case .tab = rowItem?.kind {
-            } else if let merge = mergeMenu(from: c) {
+            let isTab: Bool = { if case .tab = rowItem?.kind { return true }; return false }()
+            if !isTab, let merge = mergeMenu(from: c) {
                 let i = NSMenuItem(title: "Merge into", action: nil, keyEquivalent: "")
                 i.submenu = merge
                 m.addItem(i)
