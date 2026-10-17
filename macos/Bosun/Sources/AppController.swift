@@ -185,7 +185,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     /// Bring a window to the front with the keyboard in it.
     func bringForward(_ bw: BosunWindow) {
         if bw.window.isMiniaturized { bw.window.deminiaturize(nil) }
-        if testMode {
+        if testMode && !realInput {
             // Key without activating the app, so a test run never takes the keyboard from what you're doing.
             bw.window.orderFront(nil)
             bw.window.makeKey()
@@ -407,9 +407,10 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         layoutsTimer?.invalidate()
         layoutsTimer = nil
         guard let first = windows.first else { return }
-        // Test modes and the demo share the app's defaults (CFFIXED_USER_HOME doesn't move them); they must never
-        // save a window frame over yours.
-        if !testMode && !demoMode { first.window.saveFrame(usingName: BosunWindow.primaryFrameName) }
+        // Test modes, the demo and a dev daemon's app share your defaults (CFFIXED_USER_HOME doesn't move them);
+        // they must never save a window frame over yours.
+        let ownsFrame = !testMode && !demoMode && !devDaemon
+        if ownsFrame { first.window.saveFrame(usingName: BosunWindow.primaryFrameName) }
         let others = windows.dropFirst().compactMap { bw in
             bw.workspace.currentRow.map { SavedLayouts.Window(row: $0, frame: testMode || demoMode ? nil : NSStringFromRect(bw.window.frame)) }
         }
@@ -452,12 +453,12 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             MainActor.assumeIsolated {
                 // The test modes drive the pointer themselves; the real one (someone using the Mac
                 // while a test runs) would move focus between panes behind the test's back.
-                if testMode && !TestKit.posted(event) { out = nil; return }
+                if testMode && !realInput && !TestKit.posted(event) { out = nil; return }
                 guard let self, let bw = self.controller(for: event.window) else { return }
                 bw.workspace.pointerMoved(event)
                 // A posted mouse-moved never passes through the window server's tracking areas, so
                 // the test modes hand it to the terminal under the pointer, as a tracking area would.
-                if testMode { bw.workspace.terminal(atWindowPoint: event.locationInWindow)?.mouseMoved(with: event) }
+                if testMode && !realInput { bw.workspace.terminal(atWindowPoint: event.locationInWindow)?.mouseMoved(with: event) }
             }
             return out
         } as Any)

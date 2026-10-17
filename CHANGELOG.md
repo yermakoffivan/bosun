@@ -11,9 +11,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **File links open in your editor, at the line.** Bosun for Mac's Settings has a Files section: choose the editor that Cmd+click on a path opens files in (it lists Zed, VS Code, Cursor, Windsurf, VSCodium, Sublime Text, Xcode and BBEdit when they're on your PATH, or takes any command), and `src/app.rs:42:7` opens at that line and column. It's the same `editor` setting in `config.toml` that the TUI's `e` key runs. Without one, files open with the default app for their type as before, and folders still open in Finder.
 - **`editor` in `bosun serve`.** The setting is in `config.settings`, `apply_setting` changes it (`null` unsets it), and an edit made elsewhere arrives as a `config` delta. See `docs/protocol.md`.
 
+- **A real-input test for Bosun for Mac (`--realtest`).** It drives the app with real mouse events through the window server, checking sidebar drags, pane drags and focus following the pointer (including after Settings, another app, the palette, a rename and a sheet). The other test modes post events inside the app and couldn't see 2.2.3's drag bug; this one fails on a build with it. It moves the pointer, so it only runs when you start it. See `macos/Bosun/README.md`.
+
 ### Changed
 
 - **Rename is a double-click in Bosun for Mac.** A double-click on a row's or tab's name renames it, and Rename is in the right-click menu as before. A single click on the selected row's name no longer starts a rename, so clicking the row on screen to get back to it doesn't drop you into the name field.
+- **Dev and demo runs of Bosun for Mac leave your window frame alone.** Their defaults are your real ones, so a window opened by `dev.sh` used to save its size and place over yours.
 
 ## [2.2.3] — 2026-10-17
 

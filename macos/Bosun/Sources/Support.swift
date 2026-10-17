@@ -13,8 +13,11 @@ let debugKeys = ProcessInfo.processInfo.environment["BOSUN_DEBUG_KEYS"] != nil
 let debugDrag = ProcessInfo.processInfo.environment["BOSUN_DEBUG_DRAG"] != nil
 /// BOSUN_DEBUG_FRAMES=1 logs every frame a terminal draws, and every focus and occlusion change it's given, to stdout.
 let debugFrames = ProcessInfo.processInfo.environment["BOSUN_DEBUG_FRAMES"] != nil
-/// A scripted test mode (--focustest, --selftest, --launchprobe) is running.
-let testMode = CommandLine.arguments.contains { ["--focustest", "--selftest", "--launchprobe"].contains($0) }
+/// A scripted test mode (--focustest, --selftest, --launchprobe, --realtest) is running.
+let testMode = CommandLine.arguments.contains { ["--focustest", "--selftest", "--launchprobe", "--realtest"].contains($0) }
+/// The real-input test mode: its events come through the window server and move the real pointer, so the app
+/// takes the pointer's moves and activates as it does in use.
+let realInput = CommandLine.arguments.contains("--realtest")
 /// A staged run for screenshots (`dev.sh demo`): the status line has no "dev" tag and notifications go to
 /// the recorder, so the demo sessions never post for real.
 let demoMode = ProcessInfo.processInfo.environment["BOSUN_DEMO"] != nil

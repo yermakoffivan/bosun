@@ -21,6 +21,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let t = FocusTest(app: controller)
             test = t
             Task { await t.run(); NSApp.terminate(nil) }
+        } else if args.contains("--realtest") {
+            let t = FocusTest(app: controller)
+            test = t
+            Task { await t.runReal(); NSApp.terminate(nil) }
         }
     }
 
