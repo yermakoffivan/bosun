@@ -19,7 +19,17 @@ final class GhosttyRuntime {
     private(set) var diagnostics: [String] = []
     /// Ghostty theme names bundled in Resources/ghostty/themes.
     let availableThemes: Set<String>
+    /// The terminal colour lines in the config last built.
     private var terminalThemeLines: [String] = []
+    /// The lines the app wants now; they reach the config at most once per `configUpdateInterval`.
+    private var wantedThemeLines: [String] = []
+    private var lastConfigUpdate: TimeInterval = -.infinity
+    private var configUpdateTimer: Timer?
+    /// How many times a theme change rebuilt the config (the tests count them).
+    private(set) var configUpdates = 0
+    /// A TUI or menu theme preview sends a theme per keystroke, and each `ghostty_app_update_config` rebuilds
+    /// the config and redraws every terminal. Colour changes wait for this long after the previous one.
+    static let configUpdateInterval: TimeInterval = 0.08
 
     nonisolated(unsafe) static var appHandle: ghostty_app_t?
     nonisolated static let tickScheduled = Atomic<Bool>(false)
@@ -100,12 +110,32 @@ final class GhosttyRuntime {
         return cfg
     }
 
-    /// Recolour every terminal (the "match terminal to Bosun theme" setting). nil restores the user's theme.
+    /// Recolour every terminal (the "follow the Bosun theme" setting). nil restores the user's theme. The first
+    /// change goes through at once; changes that follow within `configUpdateInterval` are merged into one
+    /// update with the latest colours.
     func setTerminalTheme(_ palette: ThemePalette?) {
         let lines = palette.map { ThemeMap.configLines(for: $0, available: availableThemes) } ?? []
-        guard lines != terminalThemeLines, let app else { return }
-        terminalThemeLines = lines
+        guard lines != wantedThemeLines else { return }
+        wantedThemeLines = lines
+        guard configUpdateTimer == nil else { return }
+        let wait = lastConfigUpdate + Self.configUpdateInterval - ProcessInfo.processInfo.systemUptime
+        if wait <= 0 {
+            applyWantedTheme()
+        } else {
+            configUpdateTimer = Timer.scheduledTimer(withTimeInterval: wait, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated { self?.applyWantedTheme() }
+            }
+        }
+    }
+
+    private func applyWantedTheme() {
+        configUpdateTimer?.invalidate()
+        configUpdateTimer = nil
+        guard wantedThemeLines != terminalThemeLines, let app else { return }
+        terminalThemeLines = wantedThemeLines
+        lastConfigUpdate = ProcessInfo.processInfo.systemUptime
         guard let newConfig = buildConfig() else { return }
+        configUpdates += 1
         ghostty_app_update_config(app, newConfig)
         let old = config
         config = newConfig

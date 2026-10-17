@@ -53,7 +53,7 @@ final class ThemePairModel: ObservableObject {
 /// The "Theme" group of the Settings window.
 struct ThemePairSection: View {
     @ObservedObject var model: ThemePairModel
-    @AppStorage("matchTerminalTheme") private var matchTerminalTheme = false
+    @AppStorage("matchTerminalTheme") private var matchTerminalTheme = TerminalSync.defaultOn
 
     var body: some View {
         Section("Theme") {
@@ -63,8 +63,14 @@ struct ThemePairSection: View {
                  ? "Bosun switches with the macOS appearance, including Auto. Same as Theme uses View → Theme (\(model.theme)), which the TUI always uses."
                  : "Needs a newer bosun: update it to pick a theme for each appearance.")
                 .font(.caption).foregroundStyle(.secondary)
-            Toggle("Match terminal colours to the Bosun theme", isOn: $matchTerminalTheme)
-            Text("Off: terminals keep your Ghostty theme. Your Ghostty config file is never changed.")
+            Picker("Terminal colours", selection: $matchTerminalTheme) {
+                Text("Follow the Bosun theme").tag(true)
+                Text("Use my Ghostty config").tag(false)
+            }
+            .pickerStyle(.radioGroup)
+            Text(matchTerminalTheme
+                 ? "The terminals change colour with the theme above, including with Light and Dark mode. Your Ghostty config file is never changed; font, padding and everything else in it still apply."
+                 : "The terminals keep the colours from your Ghostty config, and View → Theme changes only the app around them. Your Ghostty config file is never changed.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

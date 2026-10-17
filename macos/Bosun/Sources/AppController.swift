@@ -953,6 +953,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         appliedTerminalTheme = want
         GhosttyRuntime.shared.setTerminalTheme(want)
         for bw in windows { bw.workspace.updateChromeState() }
+        if want != nil, AppSettings.shared.takeTerminalSyncNote() { root.band.flash(TerminalSync.note, seconds: 6) }
     }
 
     private func settingsChanged() {

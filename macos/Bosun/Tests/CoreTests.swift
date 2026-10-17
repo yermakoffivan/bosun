@@ -831,6 +831,19 @@ final class MiscCoreTests: XCTestCase {
         XCTAssertEqual(red.hex, "#ff5d6b")
     }
 
+    func testTerminalSyncNoteIsForExistingInstallsThatNeverChose() {
+        XCTAssertTrue(TerminalSync.defaultOn)
+        // Never stored, never told, not a first launch: the one launch where it flips.
+        XCTAssertTrue(TerminalSync.shouldNote(stored: nil, alreadyNoted: false, existingInstall: true))
+        // An explicit choice either way keeps its value and gets no note.
+        XCTAssertFalse(TerminalSync.shouldNote(stored: true, alreadyNoted: false, existingInstall: true))
+        XCTAssertFalse(TerminalSync.shouldNote(stored: false, alreadyNoted: false, existingInstall: true))
+        // Only once, and not on a brand-new install.
+        XCTAssertFalse(TerminalSync.shouldNote(stored: nil, alreadyNoted: true, existingInstall: true))
+        XCTAssertFalse(TerminalSync.shouldNote(stored: nil, alreadyNoted: false, existingInstall: false))
+        XCTAssertEqual(TerminalSync.note, "Terminals now follow the Bosun theme (Settings → Theme to change)")
+    }
+
     func testContrastRatio() {
         XCTAssertEqual(RGB(hex: "#000000")!.contrast(with: RGB(hex: "#ffffff")!), 21, accuracy: 0.001)
         XCTAssertEqual(RGB(hex: "#777777")!.contrast(with: RGB(hex: "#777777")!), 1, accuracy: 0.001)
