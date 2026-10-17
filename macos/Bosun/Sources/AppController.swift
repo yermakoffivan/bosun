@@ -61,8 +61,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     func isKey(_ bw: BosunWindow) -> Bool { bw.window.isKeyWindow || (assumeKeyForTests && bw === current) }
     /// When to notify about a session (design 10).
     private var attention = Attention()
-    /// Notifications go to the system, or to a recorder in the test modes (they never post for real).
-    let notifier: any Notifier = testMode ? RecordingNotifier() : SystemNotifier()
+    /// Notifications go to the system, or to a recorder in the test modes and the demo (they never post for real).
+    let notifier: any Notifier = testMode || demoMode ? RecordingNotifier() : SystemNotifier()
     /// Whether you can see a window right now (`BosunWindow.onScreen`). The test modes replace it.
     var windowSeen: (BosunWindow) -> Bool = { _ in false }
     /// The first live snapshot has been taken as the notifications' baseline.
@@ -875,7 +875,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     private(set) var headerStatus: HeaderStatus = .connecting
 
     /// The app was pointed at a daemon of its own: the header says "dev".
-    private let devDaemon = ProcessInfo.processInfo.environment["BOSUN_SERVE_SOCKET"] != nil
+    private let devDaemon = ProcessInfo.processInfo.environment["BOSUN_SERVE_SOCKET"] != nil && !demoMode
 
     private func setStatus(_ s: HeaderStatus) {
         guard s != headerStatus else { return }

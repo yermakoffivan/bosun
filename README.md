@@ -168,6 +168,8 @@ brew install yetidevworks/bosun/bosun
 
 A native Mac app (Apple silicon, macOS 15 or later) runs over the same sessions as the TUI, with real terminals for every tab. It's signed and notarized, and its cask installs the `bosun` formula with it:
 
+![Bosun for Mac](screenshot-mac.png)
+
 ```bash
 brew install --cask yetidevworks/bosun/bosun-app
 ```

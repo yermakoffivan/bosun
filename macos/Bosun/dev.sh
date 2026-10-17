@@ -10,6 +10,10 @@
 #   ./dev.sh env                     print the variables the app needs, for running it yourself
 #   ./dev.sh down                    stop the test daemon and kill ONLY the test tmux server
 #   ./dev.sh reset                   down, then delete the throwaway home (its config.toml, sidebar, recents)
+#   ./dev.sh demo [up|run|down|reset|status|tmux]   the same against a staged demo for screenshots: a made-up
+#                                    project whose agents are played by fixture/demo_agent.py, in its own home and
+#                                    tmux socket; `demo run` launches the app with BOSUN_DEMO=1 (no "dev" tag, no
+#                                    real notifications)
 #
 # Settings (env): BOSUN_DEV_HOME (default /tmp/bosun-mac-dev-$USER; kept short because Unix socket
 # paths max out at 104 bytes), BOSUN_DEV_TMUX (tmux socket name, default bosun-mac-dev),
@@ -18,8 +22,11 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-DEV_HOME="${BOSUN_DEV_HOME:-/tmp/bosun-mac-dev-$USER}"
-TMUX_SOCK="${BOSUN_DEV_TMUX:-bosun-mac-dev}"
+DEMO=""
+KIND=dev
+if [[ "${1:-}" == "demo" ]]; then DEMO=1; KIND=demo; shift; set -- "${@:-up}"; fi
+DEV_HOME="${BOSUN_DEV_HOME:-/tmp/bosun-mac-$KIND-$USER}"
+TMUX_SOCK="${BOSUN_DEV_TMUX:-bosun-mac-$KIND}"
 TMUX_BIN="$(command -v tmux || echo /opt/homebrew/bin/tmux)"
 
 case "$TMUX_SOCK" in
@@ -59,6 +66,12 @@ up() {
     echo "restarting the test daemon on the rebuilt bosun" >&2
     stop_daemon
   fi
+  if [[ -n "$DEMO" ]]; then
+    # The demo's claude and codex sessions run demo_agent.py, which draws a staged screen for each.
+    mkdir -p "$DEV_HOME/Library/Application Support/dev.yetidevworks.bosun"
+    printf '[agents]\nclaude = "%s"\ncodex = "%s"\n' "$HERE/fixture/demo_agent.py" "$HERE/fixture/demo_agent.py" \
+      > "$DEV_HOME/Library/Application Support/dev.yetidevworks.bosun/config.toml"
+  fi
   if ! python3 -c 'import socket,sys; c=socket.socket(socket.AF_UNIX); c.connect(sys.argv[1])' "$s" 2>/dev/null; then
     # Keep the daemon alive between app runs (it normally exits 30 s after its last client).
     denv nohup "$(bin)" serve --idle-timeout 86400 >"$DEV_HOME/serve.log" 2>&1 &
@@ -69,6 +82,7 @@ up() {
     done
     if [[ -z "$ok" ]]; then echo "bosun serve didn't start:" >&2; tail -5 "$DEV_HOME/serve.log" >&2; exit 1; fi
   fi
+  if [[ -n "$DEMO" ]]; then demo_up "$s"; return; fi
   BOSUN_FIXTURE_EXISTING="$("$TMUX_BIN" -L "$TMUX_SOCK" list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^bosun-' || true)" \
     python3 "$HERE/fixture/devctl.py" "$s" fixture "$HERE/fixture/fake_agent.py"
   # The generic detector reads a quiet agent's pane (the fake agents) as waiting; start them idle via their hook state.
@@ -78,6 +92,30 @@ up() {
   done
   echo "daemon socket: $s"
   echo "tmux socket:   -L $TMUX_SOCK"
+}
+
+demo_up() {
+  python3 "$HERE/fixture/devctl.py" "$1" demo "$HERE/fixture/demo_agent.py" "$DEV_HOME/code"
+  # Each staged session's state, as the hooks would report it.
+  set_status checkout-v2 running
+  set_status auth-refresh waiting "permission: Bash"
+  set_status product-search running
+  set_status promo-tests done
+  set_status "pr-218 review" done
+  set_status billing-webhooks done
+  for name in docs-site tests shell; do set_status "$name" idle; done
+  echo "daemon socket: $1"
+  echo "tmux socket:   -L $TMUX_SOCK"
+}
+
+set_status() {
+  local name="$1" state="$2" detail="${3:-}" internal now
+  internal="$("$TMUX_BIN" -L "$TMUX_SOCK" list-sessions -F '#{session_name} #{@bosun_display}' | awk -v d="$name" '$1==d || substr($0, index($0," ")+1)==d {print $1; exit}')"
+  [[ -n "$internal" ]] || { echo "no fixture session '$name'" >&2; return 1; }
+  now="$(python3 -c 'import time; print(int(time.time()*1000))')"
+  "$TMUX_BIN" -L "$TMUX_SOCK" set-option -p -t "=$internal:" @bosun_state "$state" \; \
+    set-option -p -t "=$internal:" @bosun_state_at "$now" \; \
+    set-option -p -t "=$internal:" @bosun_state_detail "$detail"
 }
 
 LOCK="$DEV_HOME/Library/Application Support/dev.yetidevworks.bosun/bosun-serve.lock"
@@ -112,18 +150,28 @@ case "${1:-}" in
   env) app_env ;;
   run)
     shift
+    if [[ -n "$DEMO" ]]; then
+      # The demo app gets the demo home as its own (CFFIXED_USER_HOME): paths read ~/code/…, and its window
+      # frame, layouts and settings stay out of your real Bosun.app's. The layout demo_up wrote opens the
+      # checkout-v2 row as four panes, in a window sized for a screenshot.
+      app_support="$DEV_HOME/Library/Application Support/dev.yetidevworks.bosun-mac"
+      mkdir -p "$app_support"
+      key="$(python3 -c 'import sys; h=1469598103934665603
+for b in sys.argv[1].encode(): h=((h^b)*1099511628211)%(1<<64)
+d="0123456789abcdefghijklmnopqrstuvwxyz"; s=""
+while h: s=d[h%36]+s; h//=36
+print(s or "0")' "$(sock)")"
+      [[ -f "$DEV_HOME/demo-layout.json" ]] && cp "$DEV_HOME/demo-layout.json" "$app_support/rows-$key.json"
+      exec env -u TMUX -u TMUX_PANE BOSUN_SERVE_SOCKET="$(sock)" BOSUN_BIN="$(bin)" BOSUN_DEMO=1 CFFIXED_USER_HOME="$DEV_HOME" \
+        "$APP_DIR/Bosun.app/Contents/MacOS/Bosun" -ApplePersistenceIgnoreState YES \
+        -NSWindow\ Frame\ BosunMain "${BOSUN_DEMO_FRAME:-120 120 1220 780 0 0 1440 875}" "$@"
+    fi
     exec env -u TMUX -u TMUX_PANE BOSUN_SERVE_SOCKET="$(sock)" BOSUN_BIN="$(bin)" \
       "$APP_DIR/Bosun.app/Contents/MacOS/Bosun" -ApplePersistenceIgnoreState YES "$@" ;;
   status)
     [[ $# -ge 3 ]] || { echo "usage: $0 status SESSION running|waiting|done|idle [DETAIL]" >&2; exit 1; }
-    name="$2"; state="$3"; detail="${4:-}"
-    internal="$("$TMUX_BIN" -L "$TMUX_SOCK" list-sessions -F '#{session_name} #{@bosun_display}' | awk -v d="$name" '$1==d || substr($0, index($0," ")+1)==d {print $1; exit}')"
-    [[ -n "$internal" ]] || { echo "no fixture session '$name'" >&2; exit 1; }
-    now="$(python3 -c 'import time; print(int(time.time()*1000))')"
-    "$TMUX_BIN" -L "$TMUX_SOCK" set-option -p -t "=$internal:" @bosun_state "$state" \; \
-      set-option -p -t "=$internal:" @bosun_state_at "$now" \; \
-      set-option -p -t "=$internal:" @bosun_state_detail "$detail"
+    set_status "$2" "$3" "${4:-}" || exit 1
     ;;
   tmux) shift; exec "$TMUX_BIN" -L "$TMUX_SOCK" "$@" ;;
-  *) sed -n '2,18p' "$0"; exit 1 ;;
+  *) sed -n '2,22p' "$0"; exit 1 ;;
 esac

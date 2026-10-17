@@ -1,5 +1,7 @@
 # Bosun for Mac
 
+![Bosun for Mac](../../screenshot-mac.png)
+
 A native macOS front end for Bosun: a sidebar of your Bosun sessions and live terminals (libghostty) attached to them. It is a client of `bosun serve` and doesn't replace the TUI; both can run at once against the same daemon.
 
 Each sidebar row is a workspace, and the row's tabs are its panes. Selecting a row replaces the whole main area with that row's own split layout, so one row can hold an agent, a test watcher and a shell for the same project side by side, while another row is a single agent. In the TUI a row's tabs hide each other; here they sit next to each other.
@@ -71,6 +73,10 @@ Never point a development build at your real Bosun setup. `dev.sh` runs a throwa
 `BOSUN_DEV_HOME` (default `/tmp/bosun-mac-dev-$USER`, short because Unix socket paths max out at 104 bytes), `BOSUN_DEV_TMUX` and `BOSUN_DEV_BIN` change where it lives, the tmux socket name and the `bosun` binary. Without `BOSUN_DEV_BIN` it builds `bosun` from this checkout into `build/cargo-target`.
 
 The fixture: `api` and `docs` ungrouped; a Work section with `parser`, `ticker` (prints a line a second) and `web` (three tabs, so three panes: `web`, `web tests` and `web shell`, a plain shell); a Reviews section with `review-1`, `review-2` and `shell` (a plain shell, which reads as idle).
+
+### The demo, for screenshots
+
+`./dev.sh demo` starts a separate daemon (its own home and tmux socket) with a staged, made-up project: a Storefront and a Platform section, Claude and Codex sessions in waiting, done and running states, and a `checkout-v2` row whose four tabs are two Claude sessions, a test watcher and a shell. The agents are played by `fixture/demo_agent.py`, which the demo's `config.toml` puts in place of `claude` and `codex` (`[agents]`), so nothing real runs and no real session ever shows. `./dev.sh demo run` opens the app on it with `BOSUN_DEMO=1` (no "dev" tag in the status line, notifications to the recorder) and the demo home as the app's own home (`CFFIXED_USER_HOME`), so paths read `~/code/storefront` and the app's window frame, layouts and settings stay apart from your real ones. The window opens at 1220×780 with `checkout-v2` as a 2×2 grid; `BOSUN_DEMO_FRAME` changes the frame. `./dev.sh demo down` and `./dev.sh demo reset` clear it away. The README's `screenshot-mac.png` is `screencapture -l <window id>` of that window, run through `pngquant` and `oxipng`.
 
 ## Test modes
 

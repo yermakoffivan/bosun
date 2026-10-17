@@ -2,6 +2,7 @@
 """Tiny `bosun serve` protocol client for the dev fixture (docs/protocol.md).
 
   devctl.py SOCK fixture FAKE_AGENT   create the fixture sessions and sections
+  devctl.py SOCK demo DEMO_AGENT CODE create the demo's staged sessions (dev.sh demo), in CODE/<project>
   devctl.py SOCK snapshot             print the snapshot as JSON
   devctl.py SOCK cmd '{"op":...}'     send one command, print its ack
 """
@@ -142,11 +143,81 @@ def fixture(c, agent):
     print("sessions:", " ".join(s["name"] for s in c.snapshot["sessions"]))
 
 
+def demo(c, agent, code):
+    """The staged sessions for screenshots: a made-up storefront project, its agents played by demo_agent.py."""
+    have = {s["display"] for s in c.snapshot["sessions"]}
+    store, platform = os.path.join(code, "storefront"), os.path.join(code, "platform")
+    for d in (store, platform):
+        os.makedirs(d, exist_ok=True)
+
+    def agent_spec(name, kind, path, container=None):
+        s = spec(name, "", container)
+        s.update(path=path, agent=kind)
+        if kind == "claude":
+            s["options"] = {"claude": {"session_mode": "new", "skip_permissions": False, "remote_control": False}}
+        return s
+
+    plan = [
+        ("checkout-v2", "claude", store), ("auth-refresh", "claude", store), ("product-search", "codex", store),
+        ("pr-218 review", "claude", platform), ("billing-webhooks", "claude", platform), ("docs-site", "codex", platform),
+    ]
+    for name, kind, path in plan:
+        if name not in have:
+            c.cmd("create", spec=agent_spec(name, kind, path))
+    c.resync()
+    rows = {label(r): r for r in c.snapshot["sidebar"]["ungrouped"] + [m for s in c.snapshot["sidebar"]["sections"] for m in s["members"]]}
+    # checkout-v2 is the row on screen, as four panes: two Claude sessions, a test watcher and a shell.
+    if "promo-tests" not in have and "checkout-v2" in rows:
+        c.cmd("create", spec=agent_spec("promo-tests", "claude", store, rows["checkout-v2"]["id"]))
+    for name in ("tests", "shell"):
+        if name not in have and "checkout-v2" in rows:
+            c.cmd("create", spec={**spec(name, f"python3 {agent} '{name}'", rows["checkout-v2"]["id"]), "path": store})
+    c.resync()
+    sections = {s["name"]: s["id"] for s in c.snapshot["sidebar"]["sections"]}
+    for name in ("Storefront", "Platform"):
+        if name not in sections:
+            c.cmd("insert_section", name=name)
+    c.resync()
+    sb = c.snapshot["sidebar"]
+    by_name = {label(r): r for r in sb["ungrouped"] + [m for s in sb["sections"] for m in s["members"]]}
+    for extra in ("promo-tests", "tests", "shell"):
+        if "checkout-v2" in by_name and extra in by_name and by_name[extra] is not by_name["checkout-v2"]:
+            known = {t["session"] for t in by_name["checkout-v2"]["tabs"]}
+            by_name["checkout-v2"]["tabs"] += [t for t in by_name.pop(extra)["tabs"] if t["session"] not in known]
+
+    def rows_of(*names):
+        return [{"id": by_name[n]["id"], "name": by_name[n]["name"], "active": by_name[n]["tabs"][0]["session"],
+                 "tabs": [{"session": t["session"]} for t in by_name[n]["tabs"]]} for n in names if n in by_name]
+    members = {"Storefront": ("checkout-v2", "auth-refresh", "product-search"),
+               "Platform": ("pr-218 review", "billing-webhooks", "docs-site")}
+    out = {"ungrouped": [], "sections": [
+        {"id": s["id"], "name": s["name"], "collapsed": False, "members": rows_of(*members.get(s["name"], ()))}
+        for s in sb["sections"]]}
+    c.cmd("sidebar_save", sidebar=out)
+    c.resync()
+    print("demo ready:", ", ".join(sorted(s["display"] for s in c.snapshot["sessions"])))
+    # The app's layout for that row: the two agents on the left and right, each over a terminal.
+    if "checkout-v2" in by_name:
+        tabs = {}
+        for s in c.snapshot["sessions"]:
+            tabs[s["display"]] = s["name"]
+        leaf = lambda n: {"leaf": {"_0": tabs[n]}}
+        root = {"split": {"axis": "horizontal", "ratio": 0.5,
+                          "first": {"split": {"axis": "vertical", "ratio": 0.64, "first": leaf("checkout-v2"), "second": leaf("shell")}},
+                          "second": {"split": {"axis": "vertical", "ratio": 0.56, "first": leaf("promo-tests"), "second": leaf("tests")}}}}
+        row = by_name["checkout-v2"]["id"]
+        layouts = {"version": 2, "current": row, "rows": {row: {"root": root, "active": tabs["checkout-v2"]}}}
+        with open(os.path.join(code, "..", "demo-layout.json"), "w") as f:
+            json.dump(layouts, f)
+
+
 def main():
     sock, what = sys.argv[1], sys.argv[2]
     c = Conn(sock)
     if what == "fixture":
         fixture(c, sys.argv[3])
+    elif what == "demo":
+        demo(c, sys.argv[3], sys.argv[4])
     elif what == "snapshot":
         print(json.dumps(c.snapshot, indent=1))
     elif what == "cmd":
