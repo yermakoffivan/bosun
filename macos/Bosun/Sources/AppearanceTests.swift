@@ -120,6 +120,66 @@ extension FocusTest {
         r.check("the keyboard is still in the active terminal", firstResponderIsActiveTerminal)
     }
 
+    /// With terminals following the theme, a run of theme changes through every theme, dark and light mixed,
+    /// recolours what the active terminal draws each time (its pixels, not just Ghostty's config).
+    func terminalColoursFollowEveryTheme() async {
+        let originalMatch = AppSettings.shared.matchTerminalTheme
+        AppSettings.shared.matchTerminalTheme = true
+        defer { AppSettings.shared.matchTerminalTheme = originalMatch; app.previewTheme(nil) }
+        await showRow(session("api") ?? ws.activeSession ?? "")
+        var bad: [String] = []
+        for name in app.themePairModel.names {
+            app.previewTheme(name)
+            guard await waitUntil(2, { app.theme.palette.name == name }) else { bad.append("\(name): no palette"); continue }
+            let want = ThemeMap.configLines(for: app.theme.palette, available: GhosttyRuntime.shared.availableThemes)
+                .first { $0.hasPrefix("background = ") }.map { String($0.dropFirst("background = ".count)).lowercased() } ?? "?"
+            var drawn = "-"
+            let ok = await waitUntil(2) {
+                guard let t = ws.activeTerminal, let img = WindowSnapshot.image(of: t), let px = Self.pixel(img, x: img.width - 4, y: img.height - 4) else { return false }
+                drawn = px.hex
+                return px.close(to: RGB(hex: want))
+            }
+            if !ok { bad.append("\(name): drew \(drawn), wanted \(want), config \(terminalDetail())") }
+        }
+        r.check("terminal colours: the active terminal draws each theme's background, through all \(app.themePairModel.names.count) themes",
+                bad.isEmpty, bad.prefix(6).joined(separator: "; "))
+
+        // Inside an open menu (a Settings popup), AppKit runs the run loop in event-tracking mode: two highlights in
+        // quick succession must both reach the terminals while it's open, not only once it closes.
+        let names = app.themePairModel.names.filter { $0 != app.theme.palette.name }
+        guard names.count >= 2 else { return }
+        func drawnMatches(_ name: String) -> Bool {
+            guard app.theme.palette.name == name, let t = ws.activeTerminal, let img = WindowSnapshot.image(of: t),
+                  let px = Self.pixel(img, x: img.width - 4, y: img.height - 4) else { return false }
+            let want = ThemeMap.configLines(for: app.theme.palette, available: GhosttyRuntime.shared.availableThemes)
+                .first { $0.hasPrefix("background = ") }.map { String($0.dropFirst("background = ".count)) }
+            return px.close(to: want.flatMap { RGB(hex: $0) })
+        }
+        app.previewTheme(names[0])
+        await waitUntil(2) { drawnMatches(names[0]) }
+        app.previewTheme(names[1])
+        let end = Date().addingTimeInterval(1.0)
+        var reached = false
+        while Date() < end, !reached {
+            Self.spinEventTracking(0.02)
+            reached = drawnMatches(names[1])
+        }
+        r.check("terminal colours: a second highlight within 80 ms recolours the terminals while a menu is open", reached, terminalDetail())
+    }
+
+    /// Run the main run loop in event-tracking mode for a moment, as AppKit does while a menu is open.
+    static func spinEventTracking(_ seconds: TimeInterval) {
+        RunLoop.main.run(mode: .eventTracking, before: Date().addingTimeInterval(seconds))
+    }
+
+    static func pixel(_ img: CGImage, x: Int, y: Int) -> RGB? {
+        guard let ctx = CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.draw(img, in: CGRect(x: -x, y: -(img.height - 1 - y), width: img.width, height: img.height))
+        guard let d = ctx.data?.assumingMemoryBound(to: UInt8.self) else { return nil }
+        return RGB(r: Double(d[0]) / 255, g: Double(d[1]) / 255, b: Double(d[2]) / 255)
+    }
+
     /// Moving through a Settings theme popup previews each theme on the chrome before anything is chosen (driven
     /// through the popup's own menu delegate, as AppKit calls it). macOS is in Dark mode here, so `dark` shows.
     private func themePreview(light: String, dark: String) async {

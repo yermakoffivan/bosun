@@ -368,7 +368,7 @@ final class FocusTest: TestKit {
         await showRow(api)
         r.check("start: the active terminal is first responder", firstResponderIsActiveTerminal)
 
-        // --only a,b runs just those sections (rows, panes, zoom, newpanes, clientmoves, done, notify, appearance, links, filter, sheet,
+        // --only a,b runs just those sections (rows, panes, zoom, termcolours, newpanes, clientmoves, done, notify, appearance, links, filter, sheet,
         // empty, tiledrag, sidebardrag, shortcuts, header, windows).
         if let only = argValue("--only") {
             let parts = Set(only.split(separator: ",").map(String.init))
@@ -380,6 +380,7 @@ final class FocusTest: TestKit {
             if parts.contains("done") { await doneState(f) }
             if parts.contains("notify") { await notifications(f) }
             if parts.contains("appearance") { await appearancePair(f) }
+            if parts.contains("termcolours") { await terminalColoursFollowEveryTheme() }
             if parts.contains("links") { await links() }
             if parts.contains("filter") { await filter(f) }
             await layoutSections(parts)
@@ -718,6 +719,7 @@ final class FocusTest: TestKit {
 
         // 16a. The Light/Dark pair following the appearance.
         await appearancePair(f)
+        await terminalColoursFollowEveryTheme()
 
         // 16b. Done from the agent's Stop hook, on screen, until the user types into the pane.
         await doneState(f)

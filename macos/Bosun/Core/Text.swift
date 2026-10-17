@@ -126,6 +126,12 @@ public struct RGB: Equatable, Sendable {
         return l > 140 ? RGB(hex: "#101218")! : RGB(hex: "#f2f3f5")!
     }
 
+    /// Within a few steps of `o` on each channel (colour-space rounding).
+    public func close(to o: RGB?, tolerance: Double = 6.0 / 255) -> Bool {
+        guard let o else { return false }
+        return abs(r - o.r) <= tolerance && abs(g - o.g) <= tolerance && abs(b - o.b) <= tolerance
+    }
+
     /// WCAG contrast ratio against `o`, 1 to 21.
     public func contrast(with o: RGB) -> Double {
         let a = luminance, b = o.luminance

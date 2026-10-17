@@ -122,9 +122,13 @@ final class GhosttyRuntime {
         if wait <= 0 {
             applyWantedTheme()
         } else {
-            configUpdateTimer = Timer.scheduledTimer(withTimeInterval: wait, repeats: false) { [weak self] _ in
+            // In the common modes: a theme popup or menu being open runs the run loop in event-tracking
+            // mode, and a default-mode timer would hold every highlight after the first until it closed.
+            let t = Timer(timeInterval: wait, repeats: false) { [weak self] _ in
                 MainActor.assumeIsolated { self?.applyWantedTheme() }
             }
+            RunLoop.main.add(t, forMode: .common)
+            configUpdateTimer = t
         }
     }
 
