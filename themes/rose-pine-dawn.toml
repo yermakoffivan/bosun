@@ -1,0 +1,28 @@
+name = "rose-pine-dawn"
+
+bg             = "#faf4ed"
+panel          = "#fffaf3"
+panel_alt      = "#f2e9e1"
+selection_bg   = "#dfdad9"
+text           = "#575279"
+text_muted     = "#797593"
+accent         = "#907aa9"
+shadow         = "#cecacd"
+dim_fg         = "#9893a5"
+status_running = "#56949f"
+status_waiting = "#ea9d34"
+status_idle    = "#797593"
+status_error   = "#b4637a"
+status_done    = "#286983"
+
+[terminal]
+ghostty        = "Rose Pine Dawn"
+background     = "#faf4ed"
+foreground     = "#575279"
+cursor         = "#575279"
+selection_bg   = "#dfdad9"
+selection_fg   = "#575279"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#f2e9e1", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279",
+  "#9893a5", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279",
+]

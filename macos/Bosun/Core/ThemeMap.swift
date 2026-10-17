@@ -1,6 +1,6 @@
 import Foundation
 
-/// Maps Bosun themes onto Ghostty themes for the optional "match terminal to Bosun theme" setting.
+/// Terminal colours for the "match terminal colours to the Bosun theme" setting.
 public enum ThemeMap {
     /// Bundled Bosun theme → Ghostty theme of the same family (names from Ghostty's themes directory).
     public static let ghosttyNames: [String: String] = [
@@ -19,18 +19,38 @@ public enum ThemeMap {
         "ayu-light": "Ayu Light",
     ]
 
-    /// Ghostty config lines that colour the terminal like `theme`: the colours of its Ghostty counterpart when
-    /// there is one (in `available`, read with `read`), otherwise a palette generated from the Bosun colours.
+    /// Ghostty config lines that colour the terminal like `theme`, from the first of these that applies:
+    /// 1. the theme's own `[terminal]` table, which the daemon sends with the theme;
+    /// 2. the colours of the Ghostty counterpart in `ghosttyNames` (in `available`, read with `read`), for a daemon
+    ///    that predates the table;
+    /// 3. a palette generated from the Bosun colours.
     ///
-    /// The counterpart's colours are written out rather than as `theme = Name`: Ghostty applies a theme beneath
-    /// every colour set explicitly in the user's config, so a `background` or `palette` line there would win.
+    /// Colours are written out rather than as `theme = Name`: Ghostty applies a theme beneath every colour set
+    /// explicitly in the user's config, so a `background` or `palette` line there would win.
     public static func configLines(for theme: ThemePalette, available: Set<String>,
                                    read: (String) -> String? = bundledTheme) -> [String] {
+        if let table = theme.terminal, let lines = tableLines(table) { return lines }
         if let g = ghosttyNames[theme.name], available.contains(g), let text = read(g) {
             let lines = colorLines(text)
             if !lines.isEmpty { return lines }
         }
         return generated(theme)
+    }
+
+    /// The Ghostty config lines for a `[terminal]` table; nil when it isn't usable (not 16 palette colours, or a
+    /// colour that isn't `#rrggbb`), so the next source gets a turn.
+    public static func tableLines(_ t: TerminalPalette) -> [String]? {
+        let colors = [t.background, t.foreground, t.cursor, t.selectionBg, t.selectionFg] + t.palette
+        guard t.palette.count == 16, colors.allSatisfy({ RGB(hex: $0) != nil }) else { return nil }
+        var lines = [
+            "background = \(t.background)",
+            "foreground = \(t.foreground)",
+            "cursor-color = \(t.cursor)",
+            "selection-background = \(t.selectionBg)",
+            "selection-foreground = \(t.selectionFg)",
+        ]
+        for (i, c) in t.palette.enumerated() { lines.append("palette = \(i)=\(c)") }
+        return lines
     }
 
     /// The colour settings of a Ghostty theme file, one `key = value` per line (comments and other keys dropped).
@@ -69,10 +89,26 @@ public enum ThemeMap {
         let dark = bg.isDark
         let black = dark ? bg.mixed(with: fg, 0.12) : fg
         let white = dark ? fg : bg.mixed(with: fg, 0.12)
-        let normal = [black, red, green, yellow, blue, magenta, cyan, white]
+        var normal = [black, red, green, yellow, blue, magenta, cyan, white]
         let toward = dark ? RGB(r: 1, g: 1, b: 1) : RGB(r: 0, g: 0, b: 0)
         var bright = normal.map { $0.mixed(with: toward, 0.18) }
         bright[0] = muted
+        // The mixed status colours can land under 2:1 on a dark background. Lift each hue (ANSI 1-6 and 9-14;
+        // black and white are meant to sit near the background or the text) toward the text colour until it
+        // reads at 3:1.
+        func lifted(_ c: RGB) -> RGB {
+            var out = c
+            var step = 0.0
+            while out.contrast(with: bg) < 3, step < 1 {
+                step = min(1, step + 0.05)
+                out = c.mixed(with: fg, step)
+            }
+            return out
+        }
+        for i in 1...6 {
+            normal[i] = lifted(normal[i])
+            bright[i] = lifted(bright[i])
+        }
         var lines = [
             "background = \(t.bg)",
             "foreground = \(t.text)",

@@ -668,7 +668,7 @@ impl Daemon {
         if cur.theme != prev.theme {
             let msg = ServerMsg::Theme {
                 seq: self.next_seq(),
-                theme: cur.theme.clone(),
+                theme: Box::new(cur.theme.clone()),
             };
             self.broadcast(&msg);
         }

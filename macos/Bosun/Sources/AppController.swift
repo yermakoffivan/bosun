@@ -108,6 +108,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         }
 
         // 1. First frame from the cached snapshot: no I/O beyond one small file.
+        let syncNote = AppSettings.shared.migrateTerminalSync()
         let cached = daemon.loadCache()
         if !cached { applyTheme() }
         restoreWindows()
@@ -120,6 +121,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             bw.applyTheme()
         }
         if !noActivate { NSApp.activate() }
+        if syncNote { primary.root.band.flash(TerminalSync.note, seconds: 8) }
         CATransaction.setCompletionBlock { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, self.sidebarPaintedAt == nil else { return }

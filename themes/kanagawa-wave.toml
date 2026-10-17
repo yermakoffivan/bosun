@@ -1,0 +1,28 @@
+name = "kanagawa-wave"
+
+bg             = "#1f1f28"
+panel          = "#16161d"
+panel_alt      = "#2a2a37"
+selection_bg   = "#363646"
+text           = "#dcd7ba"
+text_muted     = "#727169"
+accent         = "#7e9cd8"
+shadow         = "#0d0c14"
+dim_fg         = "#54546d"
+status_running = "#98bb6c"
+status_waiting = "#e6c384"
+status_idle    = "#727169"
+status_error   = "#ff5d62"
+status_done    = "#7fb4ca"
+
+[terminal]
+ghostty        = "Kanagawa Wave"
+background     = "#1f1f28"
+foreground     = "#dcd7ba"
+cursor         = "#c8c093"
+selection_bg   = "#2d4f67"
+selection_fg   = "#dcd7ba"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#16161d", "#c34043", "#76946a", "#c0a36e", "#7e9cd8", "#957fb8", "#6a9589", "#c8c093",
+  "#727169", "#e82424", "#98bb6c", "#e6c384", "#7fb4ca", "#938aa9", "#7aa89f", "#dcd7ba",
+]

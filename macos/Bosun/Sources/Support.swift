@@ -150,7 +150,7 @@ final class AppSettings {
     var onChange: [() -> Void] = []
 
     private init() {
-        d.register(defaults: ["focusFollowsMouse": true, "matchTerminalTheme": false, "poolSize": AppSettings.defaultPoolSize, "sidebarWidth": 248.0,
+        d.register(defaults: ["focusFollowsMouse": true, "matchTerminalTheme": TerminalSync.defaultOn, "poolSize": AppSettings.defaultPoolSize, "sidebarWidth": 248.0,
                               Key.notifyWhenWaiting: true, Key.notifyWhenDone: true, Key.showDockBadge: true])
     }
 
@@ -158,6 +158,8 @@ final class AppSettings {
         static let notifyWhenWaiting = "notifyWhenWaiting"
         static let notifyWhenDone = "notifyWhenDone"
         static let showDockBadge = "showDockBadge"
+        static let matchTerminalTheme = "matchTerminalTheme"
+        static let terminalSyncNoted = "terminalSyncNoted"
     }
 
     /// The test modes share the installed app's defaults (same bundle id), so their changes to these stay in memory.
@@ -193,13 +195,29 @@ final class AppSettings {
         set { d.set(newValue, forKey: "focusFollowsMouse"); changed() }
     }
 
-    /// Off by default. In the test modes it stays in memory (and starts off), like the notification flags.
+    /// Terminals follow the Bosun theme (on by default, for existing installs too); off means "use my Ghostty
+    /// config". In the test modes it stays in memory and starts off, so the sections that read the terminals'
+    /// colours see the user's Ghostty theme.
     var matchTerminalTheme: Bool {
-        get { testMode ? testFlags["matchTerminalTheme"] ?? false : d.bool(forKey: "matchTerminalTheme") }
+        get { testMode ? testFlags[Key.matchTerminalTheme] ?? false : d.bool(forKey: Key.matchTerminalTheme) }
         set {
-            if testMode { testFlags["matchTerminalTheme"] = newValue } else { d.set(newValue, forKey: "matchTerminalTheme") }
+            if testMode { testFlags[Key.matchTerminalTheme] = newValue } else { d.set(newValue, forKey: Key.matchTerminalTheme) }
             changed()
         }
+    }
+
+    /// Run once at launch, before the theme is applied: the first launch with terminal sync switches it on
+    /// (see `TerminalSync.migrate`). True when the caller should show `TerminalSync.note`.
+    func migrateTerminalSync() -> Bool {
+        guard !testMode else { return false }
+        let domain = Bundle.main.bundleIdentifier.flatMap { d.persistentDomain(forName: $0) } ?? [:]
+        let stored = domain[Key.matchTerminalTheme] as? Bool
+        let migrated = domain[Key.terminalSyncNoted] as? Bool ?? false
+        let existing = !domain.keys.filter { $0 != Key.terminalSyncNoted }.isEmpty
+        let m = TerminalSync.migrate(stored: stored, alreadyMigrated: migrated, existingInstall: existing)
+        if !migrated { d.set(true, forKey: Key.terminalSyncNoted) }
+        if m.turnOn { d.set(true, forKey: Key.matchTerminalTheme) }
+        return m.note
     }
 
     /// Terminal views kept attached, visible ones included. 12 holds the shown row and two or three

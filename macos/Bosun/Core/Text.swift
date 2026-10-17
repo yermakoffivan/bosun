@@ -126,6 +126,12 @@ public struct RGB: Equatable, Sendable {
         return l > 140 ? RGB(hex: "#101218")! : RGB(hex: "#f2f3f5")!
     }
 
+    /// WCAG contrast ratio against `o`, 1 to 21.
+    public func contrast(with o: RGB) -> Double {
+        let a = luminance, b = o.luminance
+        return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+    }
+
     public func mixed(with o: RGB, _ t: Double) -> RGB {
         RGB(r: r + (o.r - r) * t, g: g + (o.g - g) * t, b: b + (o.b - b) * t)
     }

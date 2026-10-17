@@ -1,7 +1,7 @@
 //! Theme system. A `Theme` is a set of semantic color slots
 //! (backgrounds, text, accents, status) that every render site reads
 //! from instead of hardcoding `Color::Rgb`. Themes are TOML files —
-//! two ship built in (`opencode`, `tokyonight`), and users can drop
+//! the bundled set lives in `themes/`, and users can drop
 //! extra `.toml` files into `$XDG_CONFIG_HOME/bosun/themes/` which
 //! take priority over the built-ins if the name matches.
 //!
@@ -71,6 +71,54 @@ pub struct Theme {
     /// [`Theme::done_color`] falls back to the theme's accent.
     #[serde(default, with = "hex_color_opt")]
     pub status_done: Option<Color>,
+
+    /// Colours for the terminals of a graphical client (Bosun for
+    /// Mac), from the optional `[terminal]` table. The TUI ignores it:
+    /// it draws in the terminal it runs in. A table that doesn't parse
+    /// (a palette that isn't 16 colours, say) is dropped with a
+    /// warning rather than failing the whole theme.
+    #[serde(default, deserialize_with = "lenient_terminal")]
+    pub terminal: Option<TerminalTheme>,
+}
+
+/// A theme's terminal colours: the `[terminal]` table. Every colour is
+/// required, and `palette` holds exactly 16 entries (ANSI 0-7 normal,
+/// 8-15 bright).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TerminalTheme {
+    /// The Ghostty theme these colours were taken from, for reference.
+    /// The colours below are what clients use, not this name.
+    #[serde(default)]
+    pub ghostty: Option<String>,
+    #[serde(with = "hex_color")]
+    pub background: Color,
+    #[serde(with = "hex_color")]
+    pub foreground: Color,
+    #[serde(with = "hex_color")]
+    pub cursor: Color,
+    #[serde(with = "hex_color")]
+    pub selection_bg: Color,
+    #[serde(with = "hex_color")]
+    pub selection_fg: Color,
+    #[serde(with = "hex_palette")]
+    pub palette: Vec<Color>,
+}
+
+/// Number of entries in a terminal palette.
+pub const TERMINAL_PALETTE_LEN: usize = 16;
+
+fn lenient_terminal<'de, D>(de: D) -> Result<Option<TerminalTheme>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = toml::Value::deserialize(de)?;
+    match value.try_into::<TerminalTheme>() {
+        Ok(t) => Ok(Some(t)),
+        Err(e) => {
+            tracing::warn!("ignoring invalid [terminal] table in theme: {}", e);
+            Ok(None)
+        }
+    }
 }
 
 impl Theme {
@@ -142,6 +190,19 @@ impl Theme {
             "solarized-light" => include_str!("../../themes/solarized-light.toml"),
             "ayu-light" => include_str!("../../themes/ayu-light.toml"),
             "quiet-light" => include_str!("../../themes/quiet-light.toml"),
+            "bosun" => include_str!("../../themes/bosun.toml"),
+            "kanagawa-wave" => include_str!("../../themes/kanagawa-wave.toml"),
+            "kanagawa-lotus" => include_str!("../../themes/kanagawa-lotus.toml"),
+            "everforest-dark" => include_str!("../../themes/everforest-dark.toml"),
+            "everforest-light" => include_str!("../../themes/everforest-light.toml"),
+            "flexoki-dark" => include_str!("../../themes/flexoki-dark.toml"),
+            "flexoki-light" => include_str!("../../themes/flexoki-light.toml"),
+            "monokai-pro" => include_str!("../../themes/monokai-pro.toml"),
+            "oxocarbon" => include_str!("../../themes/oxocarbon.toml"),
+            "catppuccin-latte" => include_str!("../../themes/catppuccin-latte.toml"),
+            "rose-pine-dawn" => include_str!("../../themes/rose-pine-dawn.toml"),
+            "tokyonight-day" => include_str!("../../themes/tokyonight-day.toml"),
+            "poimandres" => include_str!("../../themes/poimandres.toml"),
             _ => return None,
         };
         match toml::from_str::<Theme>(src) {
@@ -155,7 +216,8 @@ impl Theme {
 
     /// Names of every compiled-in theme, in the order we want them
     /// shown in the picker. `opencode` is the default/anchor so it
-    /// goes first; the rest are alphabetized by common usage.
+    /// goes first; the rest follow by common usage, with the themes
+    /// added later at the end.
     pub fn builtin_names() -> &'static [&'static str] {
         &[
             "opencode",
@@ -173,6 +235,19 @@ impl Theme {
             "solarized-light",
             "ayu-light",
             "quiet-light",
+            "bosun",
+            "kanagawa-wave",
+            "kanagawa-lotus",
+            "everforest-dark",
+            "everforest-light",
+            "flexoki-dark",
+            "flexoki-light",
+            "monokai-pro",
+            "oxocarbon",
+            "catppuccin-latte",
+            "rose-pine-dawn",
+            "tokyonight-day",
+            "poimandres",
         ]
     }
 
@@ -338,6 +413,30 @@ mod hex_color {
     }
 }
 
+/// A list of `#RRGGBB` colours that must hold exactly
+/// [`TERMINAL_PALETTE_LEN`] entries.
+mod hex_palette {
+    use ratatui::style::Color;
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(de: D) -> Result<Vec<Color>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let list = Vec::<String>::deserialize(de)?;
+        if list.len() != super::TERMINAL_PALETTE_LEN {
+            return Err(serde::de::Error::custom(format!(
+                "terminal palette needs {} colors, got {}",
+                super::TERMINAL_PALETTE_LEN,
+                list.len()
+            )));
+        }
+        list.iter()
+            .map(|s| super::hex_color::parse_hex(s).map_err(serde::de::Error::custom))
+            .collect()
+    }
+}
+
 /// Same as [`hex_color`] but for optional keys — a theme file that
 /// omits the color parses to `None` instead of failing. Keeps user
 /// themes written against an older bosun loading unchanged when a new
@@ -440,6 +539,106 @@ mod tests {
                 t.name, name
             );
         }
+    }
+
+    #[test]
+    fn every_builtin_has_a_full_terminal_palette() {
+        for name in Theme::builtin_names() {
+            let t = Theme::builtin(name).unwrap();
+            let term = t
+                .terminal
+                .unwrap_or_else(|| panic!("built-in theme {name} needs a [terminal] table"));
+            assert_eq!(
+                term.palette.len(),
+                TERMINAL_PALETTE_LEN,
+                "{name}: palette must have 16 entries"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_terminal_table_reads_every_key() {
+        let t = Theme::builtin("nord").unwrap();
+        let term = t.terminal.expect("nord has a [terminal] table");
+        assert_eq!(term.ghostty.as_deref(), Some("Nord"));
+        assert_eq!(term.background, Color::Rgb(0x2e, 0x34, 0x40));
+        assert_eq!(term.foreground, Color::Rgb(0xd8, 0xde, 0xe9));
+        assert_eq!(term.cursor, Color::Rgb(0xec, 0xef, 0xf4));
+        assert_eq!(term.selection_bg, Color::Rgb(0xec, 0xef, 0xf4));
+        assert_eq!(term.selection_fg, Color::Rgb(0x4c, 0x56, 0x6a));
+        assert_eq!(term.palette[1], Color::Rgb(0xbf, 0x61, 0x6a));
+        assert_eq!(term.palette[15], Color::Rgb(0xec, 0xef, 0xf4));
+        // `ghostty` is optional: opencode has no Ghostty counterpart.
+        let opencode = Theme::builtin("opencode").unwrap().terminal.unwrap();
+        assert_eq!(opencode.ghostty, None);
+    }
+
+    /// A minimal theme file with the given extra text appended.
+    fn theme_toml(extra: &str) -> String {
+        format!(
+            r##"name = "t"
+bg = "#000000"
+panel = "#000000"
+panel_alt = "#000000"
+selection_bg = "#000000"
+text = "#ffffff"
+text_muted = "#ffffff"
+accent = "#ff0000"
+shadow = "#000000"
+dim_fg = "#000000"
+status_running = "#00ff00"
+status_waiting = "#ffff00"
+status_idle = "#888888"
+status_error = "#ff0000"
+{extra}"##
+        )
+    }
+
+    fn terminal_toml(palette_len: usize) -> String {
+        let colors = vec![r##""#112233""##; palette_len].join(", ");
+        theme_toml(&format!(
+            r##"
+[terminal]
+background = "#000000"
+foreground = "#ffffff"
+cursor = "#ffffff"
+selection_bg = "#333333"
+selection_fg = "#ffffff"
+palette = [{colors}]
+"##
+        ))
+    }
+
+    #[test]
+    fn terminal_table_is_optional() {
+        let t: Theme = toml::from_str(&theme_toml("")).unwrap();
+        assert!(t.terminal.is_none());
+    }
+
+    #[test]
+    fn terminal_table_needs_exactly_16_palette_colors() {
+        let ok: Theme = toml::from_str(&terminal_toml(16)).unwrap();
+        assert_eq!(ok.terminal.unwrap().palette.len(), 16);
+        // The table type itself rejects other lengths...
+        for n in [0, 8, 15, 17] {
+            let table = terminal_toml(n);
+            let v: toml::Value = toml::from_str(&table).unwrap();
+            let err = v["terminal"]
+                .clone()
+                .try_into::<TerminalTheme>()
+                .expect_err("wrong palette length must not parse");
+            assert!(err.to_string().contains("16"), "{err}");
+            // ...and the theme drops the bad table instead of failing.
+            let t: Theme = toml::from_str(&table).unwrap();
+            assert!(t.terminal.is_none(), "{n} colors");
+        }
+    }
+
+    #[test]
+    fn terminal_table_with_a_bad_color_is_dropped() {
+        let bad = terminal_toml(16).replace("#333333", "not-a-color");
+        let t: Theme = toml::from_str(&bad).unwrap();
+        assert!(t.terminal.is_none());
     }
 
     #[test]

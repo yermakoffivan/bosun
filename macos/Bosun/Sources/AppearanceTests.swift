@@ -18,6 +18,9 @@ extension FocusTest {
             r.check("the daemon knows theme_light and theme_dark", false, "rebuild bosun from this checkout")
             return
         }
+        r.check("terminals follow the Bosun theme by default, for installs that never chose",
+                TerminalSync.defaultOn
+                    && UserDefaults.standard.volatileDomain(forName: UserDefaults.registrationDomain)["matchTerminalTheme"] as? Bool == true)
         AppSettings.shared.matchTerminalTheme = false
         await showRow(f.web)
 
@@ -74,6 +77,7 @@ extension FocusTest {
         AppSettings.shared.matchTerminalTheme = false
         r.check("…and turning it off gives the terminals back their Ghostty theme",
                 await waitUntil(3) { app.appliedTerminalTheme == nil })
+        await coalescedTerminalUpdates()
 
         // "Same as Theme" on one side.
         r.check("dark side set to Same as Theme", await setPair(light, nil))
@@ -113,6 +117,36 @@ extension FocusTest {
         ws.focusActiveTerminal()
         await waitUntil(2) { firstResponderIsActiveTerminal }
         r.check("the keyboard is still in the active terminal", firstResponderIsActiveTerminal)
+    }
+
+    /// A burst of theme previews (the TUI sends one per keystroke) reaches Ghostty as at most two config updates:
+    /// the first at once, and one more with the latest colours.
+    private func coalescedTerminalUpdates() async {
+        let runtime = GhosttyRuntime.shared
+        guard var table = app.theme.palette.terminal else {
+            r.check("the theme has a terminal table to preview", false, "rebuild bosun from this checkout")
+            return
+        }
+        await sleep(200)
+        let before = runtime.configUpdates
+        var last = ""
+        for i in 0..<12 {
+            last = String(format: "#%02x1018", 16 + i * 8)
+            table.background = last
+            var p = app.theme.palette
+            p.terminal = table
+            runtime.setTerminalTheme(p)
+        }
+        r.check("a burst of 12 terminal previews rebuilds the config at once", runtime.configUpdates - before == 1,
+                "\(runtime.configUpdates - before) updates straight away")
+        await sleep(300)
+        let updates = runtime.configUpdates - before
+        r.check("…and once more with the last colours, nothing in between", updates == 2, "\(updates) updates")
+        let c = runtime.configColor("background")?.usingColorSpace(.sRGB)
+        let bg = c.map { RGB(r: Double($0.redComponent), g: Double($0.greenComponent), b: Double($0.blueComponent)).hex }
+        r.check("…the terminals end on the last preview's background", bg == last, "\(bg ?? "-") wanted \(last)")
+        runtime.setTerminalTheme(nil)
+        await sleep(300)
     }
 
     /// Set the pair the way the Settings pickers do; true once the daemon's palettes say so.

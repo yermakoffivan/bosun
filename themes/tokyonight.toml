@@ -5,7 +5,7 @@ panel          = "#16161e"
 panel_alt      = "#1f2335"
 selection_bg   = "#292e42"
 text           = "#c0caf5"
-text_muted     = "#565f89"
+text_muted     = "#6b739e"
 accent         = "#7aa2f7"
 shadow         = "#0d0e14"
 dim_fg         = "#414868"
@@ -14,3 +14,15 @@ status_waiting = "#e0af68"
 status_idle    = "#565f89"
 status_error   = "#f7768e"
 status_done    = "#7dcfff"
+
+[terminal]
+ghostty        = "TokyoNight"
+background     = "#1a1b26"
+foreground     = "#c0caf5"
+cursor         = "#c0caf5"
+selection_bg   = "#33467c"
+selection_fg   = "#c0caf5"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6",
+  "#414868", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#c0caf5",
+]

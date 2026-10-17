@@ -1,0 +1,27 @@
+name = "poimandres"
+
+bg             = "#1b1e28"
+panel          = "#171922"
+panel_alt      = "#303340"
+selection_bg   = "#40455d"
+text           = "#e4f0fb"
+text_muted     = "#767c9d"
+accent         = "#add7ff"
+shadow         = "#0f1117"
+dim_fg         = "#506477"
+status_running = "#5de4c7"
+status_waiting = "#fffac2"
+status_idle    = "#767c9d"
+status_error   = "#d0679d"
+status_done    = "#fcc5e9"
+
+[terminal]
+background     = "#1b1e28"
+foreground     = "#a6accd"
+cursor         = "#a6accd"
+selection_bg   = "#40455d"
+selection_fg   = "#e4f0fb"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#303340", "#d0679d", "#5de4c7", "#fffac2", "#89ddff", "#f087bd", "#89ddff", "#ffffff",
+  "#a6accd", "#d0679d", "#5de4c7", "#fffac2", "#add7ff", "#f087bd", "#add7ff", "#ffffff",
+]

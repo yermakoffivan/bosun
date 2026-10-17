@@ -10,6 +10,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **A light and a dark theme for Bosun for Mac.** Two new `config.toml` keys, `theme_light` and `theme_dark`, name the themes the Mac app shows while macOS is in Light and Dark mode, switching as the appearance changes. Either can be left out to use `theme`. The TUI can't tell the macOS appearance, so it keeps using `theme` as before, and it now keeps both keys when it saves `config.toml` instead of dropping them.
 - **`bosun serve` sends the light/dark pair.** `theme_light` and `theme_dark` are settings that `apply_setting` can change (`null` unsets one), and their palettes come in the snapshot and in a new `theme_pair` delta, so a client can switch the moment the appearance changes. Setting them never changes `theme`. See `docs/protocol.md`.
+- **Thirteen more themes.** `kanagawa-wave`, `kanagawa-lotus`, `everforest-dark`, `everforest-light`, `flexoki-dark`, `flexoki-light`, `monokai-pro`, `oxocarbon`, `catppuccin-latte`, `rose-pine-dawn`, `tokyonight-day` and `poimandres`, plus a `bosun` house theme in the app icon's navy, cream and mint. That makes 28 (17 dark, 11 light); `opencode` is still the default. The theme picker scrolls when the terminal is too short to show them all.
+- **Terminal colours in theme files.** A theme can carry an optional `[terminal]` table (background, foreground, cursor, selection and a 16-colour palette), which `bosun serve` sends with the theme as an optional `terminal` field (no protocol version bump; see `docs/protocol.md`). Every bundled theme has one, and your own themes can too. The TUI ignores it.
+- **Terminals follow the Bosun theme in Bosun for Mac.** It is now on by default, and the first launch with this version switches it on for everyone once, with a note in the title band. Settings > Theme has **Follow the Bosun theme** and **Use my Ghostty config**; choose the second after that and it sticks. The colours come from the theme's own `[terminal]` table, then the Ghostty counterpart, then a generated palette whose colours are now lifted to read on the background. Your Ghostty config file is never changed. Previewing themes from the TUI recolours the terminals at most about 12 times a second.
+
+### Changed
+
+- **Weak spots in the existing themes.** Selected rows on `github-light`, `ayu-light` and `solarized-light` were almost the panel colour; muted text in `one-light`, `solarized-light`, `one-dark-pro`, `nord`, `dracula`, `tokyonight`, `ayu-mirage` and `quiet-light` was hard to read, and `one-dark-pro`'s text was dull. `gruvbox-dark`'s panel and panel_alt were the wrong way round, and `rose-pine`'s done colour matched its accent. All are lifted one step. Copies of these themes in your own themes directory are unchanged.
+
+### Fixed
+
+- **First launch of the Mac app showed another theme.** Before the daemon's snapshot arrived, the app drew a palette from an older opencode. It now matches `themes/opencode.toml`.
 
 ## [2.2.0] — 2026-10-16
 

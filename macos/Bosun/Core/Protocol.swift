@@ -383,6 +383,31 @@ public struct ConfigView: Codable, Equatable, Sendable {
     public func value(_ key: String) -> JSONValue? { settings.first { $0.key == key }?.value }
 }
 
+/// A theme's terminal colours (the `[terminal]` table of a theme file), as the daemon sends them. Absent from
+/// themes of an older daemon.
+public struct TerminalPalette: Codable, Equatable, Sendable {
+    /// The Ghostty theme the colours were taken from; for reference, the colours below are what the app uses.
+    public var ghostty: String?
+    public var background: String
+    public var foreground: String
+    public var cursor: String
+    public var selectionBg: String
+    public var selectionFg: String
+    /// ANSI 0-7 normal, then 8-15 bright.
+    public var palette: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case ghostty, background, foreground, cursor, palette
+        case selectionBg = "selection_bg", selectionFg = "selection_fg"
+    }
+
+    public init(ghostty: String? = nil, background: String, foreground: String, cursor: String, selectionBg: String,
+                selectionFg: String, palette: [String]) {
+        self.ghostty = ghostty; self.background = background; self.foreground = foreground; self.cursor = cursor
+        self.selectionBg = selectionBg; self.selectionFg = selectionFg; self.palette = palette
+    }
+}
+
 public struct ThemePalette: Codable, Equatable, Sendable {
     public var name: String
     public var bg: String
@@ -399,28 +424,35 @@ public struct ThemePalette: Codable, Equatable, Sendable {
     public var statusIdle: String
     public var statusError: String
     public var statusDone: String
+    /// The theme's terminal colours; nil from a daemon that predates the `[terminal]` table.
+    public var terminal: TerminalPalette?
 
     enum CodingKeys: String, CodingKey {
-        case name, bg, panel, text, accent, shadow
+        case name, bg, panel, text, accent, shadow, terminal
         case panelAlt = "panel_alt", selectionBg = "selection_bg", textMuted = "text_muted", dimFg = "dim_fg"
         case statusRunning = "status_running", statusWaiting = "status_waiting", statusIdle = "status_idle"
         case statusError = "status_error", statusDone = "status_done"
     }
 
-    /// The opencode palette, used before any snapshot has arrived.
+    /// The opencode palette (`themes/opencode.toml`), used before any snapshot has arrived. A test keeps it equal
+    /// to the file.
     public static let fallback = ThemePalette(
-        name: "opencode", bg: "#0a0a0a", panel: "#141414", panelAlt: "#1e1e1e", selectionBg: "#2a2a2a",
-        text: "#eeeeee", textMuted: "#808080", accent: "#fab283", shadow: "#000000", dimFg: "#555555",
-        statusRunning: "#7fd88f", statusWaiting: "#f5a742", statusIdle: "#808080", statusError: "#e06c75",
-        statusDone: "#5c9cf5")
+        name: "opencode", bg: "#0b0d12", panel: "#11141b", panelAlt: "#131722", selectionBg: "#1e2433",
+        text: "#e6e9ef", textMuted: "#7c8495", accent: "#7c5cff", shadow: "#05070b", dimFg: "#3c4254",
+        statusRunning: "#62d98c", statusWaiting: "#f4c169", statusIdle: "#7c8495", statusError: "#ff5d6b",
+        statusDone: "#6ec8ff",
+        terminal: TerminalPalette(
+            background: "#0b0d12", foreground: "#e6e9ef", cursor: "#7c5cff", selectionBg: "#1e2433", selectionFg: "#e6e9ef",
+            palette: ["#25272d", "#ff5d6b", "#62d98c", "#f4c169", "#6ec8ff", "#b692b5", "#68d0c6", "#e6e9ef",
+                      "#7c8495", "#ff7a86", "#7ee0a1", "#f6cc84", "#88d2ff", "#c4a6c2", "#83d9d0", "#ebedf2"]))
 
     public init(name: String, bg: String, panel: String, panelAlt: String, selectionBg: String, text: String, textMuted: String,
                 accent: String, shadow: String, dimFg: String, statusRunning: String, statusWaiting: String,
-                statusIdle: String, statusError: String, statusDone: String) {
+                statusIdle: String, statusError: String, statusDone: String, terminal: TerminalPalette? = nil) {
         self.name = name; self.bg = bg; self.panel = panel; self.panelAlt = panelAlt; self.selectionBg = selectionBg
         self.text = text; self.textMuted = textMuted; self.accent = accent; self.shadow = shadow; self.dimFg = dimFg
         self.statusRunning = statusRunning; self.statusWaiting = statusWaiting; self.statusIdle = statusIdle
-        self.statusError = statusError; self.statusDone = statusDone
+        self.statusError = statusError; self.statusDone = statusDone; self.terminal = terminal
     }
 }
 

@@ -5,7 +5,7 @@ panel          = "#f0f0f0"
 panel_alt      = "#e5e5e6"
 selection_bg   = "#d4e6fb"
 text           = "#383a42"
-text_muted     = "#a0a1a7"
+text_muted     = "#8e8f95"
 accent         = "#4078f2"
 shadow         = "#c2c2c3"
 dim_fg         = "#a0a1a7"
@@ -14,3 +14,15 @@ status_waiting = "#c18401"
 status_idle    = "#a0a1a7"
 status_error   = "#e45649"
 status_done    = "#0184bc"
+
+[terminal]
+ghostty        = "Atom One Light"
+background     = "#f9f9f9"
+foreground     = "#2a2c33"
+cursor         = "#bbbbbb"
+selection_bg   = "#d0dffc"
+selection_fg   = "#2a2c33"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#000000", "#de3e35", "#3f953a", "#d2b67c", "#2f5af3", "#950095", "#3f953a", "#bbbbbb",
+  "#000000", "#de3e35", "#3f953a", "#d2b67c", "#2f5af3", "#a00095", "#3f953a", "#ffffff",
+]
