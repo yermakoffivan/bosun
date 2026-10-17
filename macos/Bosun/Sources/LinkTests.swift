@@ -98,9 +98,17 @@ extension FocusTest {
         r.check("Cmd+click on an absolute path opens the file", a.opened.map { if case .file(let p, _, _) = $0 { real(p) } else { "\($0)" } } == [real(abs)],
                 "\(a.opened)")
 
+        // The shell's client is on its own session (a client left elsewhere by an earlier section is a bug of its own).
+        let clientOn = await clientSession(of: shell)
+        r.check("the shell's tmux client is on its own session before the relative link", clientOn == shell,
+                clientOn == shell ? "" : "on \(clientOn.map(app.displayName) ?? "-"); client events:\n" + ws.pool.clientLog.suffix(25).joined(separator: "\n"))
         let rl = await cmdClick(rel)
+        // What tmux says the pane's directory is, right after the click: the app resolves the path against it.
+        let tmuxCwd = tmuxOut(["display", "-p", "-c", v.ttyName ?? "", "#{pane_current_path} (client on #{session_name}, pane #{pane_pid} #{pane_current_command})"])
         r.check("Cmd+click on a relative path with :line opens the file in the shell's directory",
-                rl.opened.map { if case .file(let p, _, _) = $0 { real(p) } else { "\($0)" } } == [real(dir + "/src/app.rs")], "\(rl.opened)")
+                rl.opened.map { if case .file(let p, _, _) = $0 { real(p) } else { "\($0)" } } == [real(dir + "/src/app.rs")],
+                "\(rl.opened), tmux says the pane is in \(tmuxCwd)"
+                    + (rl.opened.isEmpty ? "; view tty \(v.ttyName ?? "-"); client events:\n" + ws.pool.clientLog.suffix(25).joined(separator: "\n") : ""))
         r.check("…and keeps the line, for the editor setting", rl.opened.map { (t: LinkTarget) -> Int? in if case .file(_, let line, _) = t { line } else { nil } } == [42],
                 "\(rl.opened)")
 

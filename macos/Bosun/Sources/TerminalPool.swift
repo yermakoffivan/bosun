@@ -21,6 +21,14 @@ final class TerminalPool {
     var onInput: ((String) -> Void)?
     /// Views whose client currently has tmux's ignore-size flag set.
     private var ignoringSize: Set<String> = []
+    /// The test modes: every client the daemon saw move and every client put back, newest last, for a failure's detail.
+    private(set) var clientLog: [String] = []
+
+    func noteClient(_ line: String) {
+        guard testMode else { return }
+        clientLog.append(String(format: "%.2f ", ProcessClock.sinceLaunch()) + line)
+        if clientLog.count > 200 { clientLog.removeFirst(clientLog.count - 200) }
+    }
 
     init(daemon: DaemonClient, capacity: Int) {
         self.daemon = daemon
@@ -114,6 +122,7 @@ final class TerminalPool {
 
     /// Put the tmux client on `tty` back on `session`.
     func moveClient(_ tty: String, to session: String) {
+        noteClient("move \(tty) back to \(session)")
         let socket = tmuxSocket
         DispatchQueue.global(qos: .userInitiated).async {
             TmuxCLI.run(socket: socket, ["switch-client", "-c", tty, "-t", "=\(session)"])

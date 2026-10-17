@@ -235,7 +235,8 @@ extension FocusTest {
             r.check("the theme has a terminal table to preview", false, "rebuild bosun from this checkout")
             return
         }
-        await sleep(200)
+        // Whatever the steps before changed has gone through, so the burst's first preview can too.
+        await waitUntil(3) { runtime.configUpdatesSettled }
         let before = runtime.configUpdates
         var last = ""
         for i in 0..<12 {
@@ -296,10 +297,13 @@ extension FocusTest {
             return RGB(r: Double(s.redComponent), g: Double(s.greenComponent), b: Double(s.blueComponent)).hex.lowercased()
         }
         func hex(_ c: CGColor?) -> String? { c.flatMap { NSColor(cgColor: $0) }.flatMap(hex) }
-        // The active pane's ring: the 2 px border layer drawn inside the pane.
+        // The active pane's ring: the 2 px border layer drawn inside the pane. Hidden views and layers don't count:
+        // the area keeps spare pane chrome hidden for the next row (recoloured when it's used), and each tile's drop
+        // highlight is a hidden 2 px border too.
         var ring: CGColor?
         func walk(_ v: NSView) {
-            for l in v.layer?.sublayers ?? [] where l.borderWidth == 2 && ring == nil { ring = l.borderColor }
+            guard !v.isHidden else { return }
+            for l in v.layer?.sublayers ?? [] where !l.isHidden && l.borderWidth == 2 && ring == nil { ring = l.borderColor }
             for s in v.subviews where ring == nil { walk(s) }
         }
         walk(ws.area)

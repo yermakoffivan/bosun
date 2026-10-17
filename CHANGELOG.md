@@ -10,6 +10,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Read and unread done turns in Bosun for Mac.** A done turn is unread (a filled dot in the done colour) until you've read it, then it shows as a hollow ring in the same colour, with "done · read" in the pane header, so you can tell a finished turn you've seen from one waiting for you, and from an idle session. Reading it means having its pane as the active pane of the front window for two seconds, or choosing **Mark as Read** from a row's or tab's right-click menu (a row marks all its done tabs). Read turns leave the header's done count and their notification, the next turn is unread again, and read marks survive a relaunch.
 
+### Fixed
+
+- **Cmd+click on a relative path asks about the pane's own session.** Bosun for Mac resolved `src/app.rs:42` against the directory of whatever pane the terminal's tmux client was on. A client can be on another session for a moment (moved by a binding, on its way back), and then the path was looked up in the wrong directory and nothing opened. It now asks tmux about the terminal's own session, which is what the pane shows.
+- **Theme previews merge reliably with many terminals open.** Colour changes within 80 ms of the previous one are merged into one, but the 80 ms counted from the start of the previous update; with enough terminals that update alone takes longer, so previews went through one by one. It now counts from when the update is done.
+
 ## [2.2.4] — 2026-10-17
 
 ### Added
@@ -25,7 +30,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **Cmd+click on a relative path in Bosun for Mac on a busy Mac.** The app asks tmux for the pane's directory, and gave it only a second; when tmux was slower the path was looked up in the session's first directory instead, and usually nothing opened. It now waits up to three seconds (off the main thread, so nothing stalls).
+- **More time for tmux to say a pane's directory.** For a Cmd+click on a relative path, the app asks tmux for the pane's current directory; it now waits up to three seconds instead of one (off the main thread, so nothing stalls) before falling back to the session's first directory.
 
 ## [2.2.3] — 2026-10-17
 

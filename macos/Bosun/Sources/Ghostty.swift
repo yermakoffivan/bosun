@@ -27,8 +27,12 @@ final class GhosttyRuntime {
     private var configUpdateTimer: Timer?
     /// How many times a theme change rebuilt the config (the tests count them).
     private(set) var configUpdates = 0
+    /// No colour change is waiting and the last one is more than an interval old: the next goes through at once.
+    var configUpdatesSettled: Bool {
+        configUpdateTimer == nil && ProcessInfo.processInfo.systemUptime - lastConfigUpdate > Self.configUpdateInterval
+    }
     /// A TUI or menu theme preview sends a theme per keystroke, and each `ghostty_app_update_config` rebuilds
-    /// the config and redraws every terminal. Colour changes wait for this long after the previous one.
+    /// the config and redraws every terminal. Colour changes wait for this long after the previous one is done.
     static let configUpdateInterval: TimeInterval = 0.08
 
     nonisolated(unsafe) static var appHandle: ghostty_app_t?
@@ -137,7 +141,9 @@ final class GhosttyRuntime {
         configUpdateTimer = nil
         guard wantedThemeLines != terminalThemeLines, let app else { return }
         terminalThemeLines = wantedThemeLines
-        lastConfigUpdate = ProcessInfo.processInfo.systemUptime
+        // The wait counts from when this update is done: with many terminals, rebuilding and redrawing them can
+        // take longer than the interval itself, and the next preview would then go through straight away.
+        defer { lastConfigUpdate = ProcessInfo.processInfo.systemUptime }
         guard let newConfig = buildConfig() else { return }
         configUpdates += 1
         ghostty_app_update_config(app, newConfig)
@@ -303,16 +309,16 @@ enum LinkOpener {
             if let t = LinkTarget.resolve(text, cwd: nil, home: home) { deliver(t) }
             return
         }
-        let tty = view.ttyName, socket = view.tmuxSocket, session = view.session
+        let socket = view.tmuxSocket, session = view.session
         let fallback = sessionPath?(session)
         // Off the main thread, so a busy tmux can take its time: the fallback is only the session's first directory.
         DispatchQueue.global(qos: .userInitiated).async {
-            var cwd: String?
-            if let tty {
-                let out = ShellEnv.run(Paths.tmux, (socket.map { ["-L", $0] } ?? []) + ["display-message", "-p", "-c", tty, "#{pane_current_path}"],
-                                       timeout: 3)
-                cwd = out?.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
+            // The view's own session, not its client (`-c tty`): a view always shows its session, but its client
+            // can be elsewhere for a moment (moved by a binding, on its way back), and then tmux would answer for
+            // the wrong pane.
+            let out = ShellEnv.run(Paths.tmux, (socket.map { ["-L", $0] } ?? []) + ["display-message", "-p", "-t", "=\(session):", "#{pane_current_path}"],
+                                   timeout: 3)
+            var cwd = out?.trimmingCharacters(in: .whitespacesAndNewlines)
             if cwd?.isEmpty ?? true { cwd = fallback }
             let target = LinkTarget.resolve(text, cwd: cwd, home: home)
             DispatchQueue.main.async { MainActor.assumeIsolated { if let target { deliver(target) } } }

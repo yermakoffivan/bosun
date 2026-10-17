@@ -413,6 +413,7 @@ final class Workspace {
     /// do that. A pane always shows its own tab, so the client always goes back; the app follows the
     /// move instead: a tab of the same row becomes the active pane, a tab of another row shows that row.
     func clientMoved(tty: String, to target: String?) {
+        pool.noteClient("client \(tty) now on \(target ?? "nothing"); the view on that tty is \(pool.view(onTTY: tty)?.session ?? "none")")
         guard let v = pool.view(onTTY: tty) else { return }  // not one of ours, or already going away
         let session = v.session
         // A detach also ends the `tmux attach` in the view, and `terminalExited` attaches it again.
