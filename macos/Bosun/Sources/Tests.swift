@@ -1296,6 +1296,151 @@ final class FocusTest: TestKit {
 final class SelfTest: TestKit {
     init(app: AppController) { super.init(app: app, report: "selftest.txt") }
 
+    /// Phase 3's exit test: dragging a divider follows the pointer at display rate with four busy agents
+    /// on screen. Each runs the fixture's ink mode (a status block 30 times a second, and the whole
+    /// screen again on every SIGWINCH, as Claude Code does). The drag goes through AppKit's event path
+    /// (posted mouse events on the divider) once per grid-size throttle, to show what the throttle buys.
+    func busyResize() async {
+        guard let api = session("api"), let spec = (await app.daemon.request(.getSpec(session: api))).spec,
+              let agent = spec.args.split(separator: " ").first(where: { $0.hasSuffix("fake_agent.py") }) else {
+            r.say("busy resize: SKIPPED (no fixture agent path in api's spec)")
+            return
+        }
+        r.say("")
+        r.say("busy resize: four ink-style agents in one row (30 fps status block, full repaint on SIGWINCH)")
+        var made: [String] = []
+        var row: String?
+        for i in 1...4 {
+            let sp = Spec(name: "busy", path: "~", agent: "terminal", args: "python3 \(agent) busy-\(i) --ink", containerID: row)
+            let ack = await app.daemon.request(.create(spec: sp, deferLaunch: false))
+            guard ack.ok, let s = ack.session else { r.say("busy resize: couldn't create a busy session: \(ack.error ?? "?")"); break }
+            made.append(s)
+            if row == nil {
+                await waitUntil(4) { rowID(s) != nil }
+                row = rowID(s)
+            }
+        }
+        // Kill them and take their row out, so the fixture is as it was.
+        func cleanUp() async {
+            for s in made { _ = await app.daemon.request(.kill(session: s)) }
+            await waitUntil(4) { made.allSatisfy { !app.isAlive($0) } }
+            if let row { app.removeRow(row) }
+            await waitUntil(3) { row.map { app.daemon.state.sidebar.container(id: $0) == nil } ?? true }
+        }
+        guard let row, made.count == 4, await waitUntil(6, { tabs(row).count == 4 && made.allSatisfy(app.isAlive) }) else {
+            r.say("busy resize: SKIPPED (the busy row didn't come up: \(made.count) sessions)")
+            await cleanUp()
+            return
+        }
+        ws.selectRow(row)
+        await waitUntil(6) { ws.layout.count == 4 }
+        await waitPanesPainted(6)
+        await sleep(1500)
+        guard ws.layout.count == 4, let d = ws.area.subviews.compactMap({ $0 as? DividerView }).compactMap(\.divider).first(where: { $0.path.isEmpty }) else {
+            r.say("busy resize: SKIPPED (no four-pane layout)")
+            await cleanUp()
+            return
+        }
+        // CPU seconds used so far by the four agents and by the tmux server, from ps.
+        // The pane's process is the shell the launch command was typed into; the agent is its child.
+        let agentPIDs = made.flatMap { s -> [String] in
+            let pid = tmuxOut(["display-message", "-p", "-t", "=\(s):", "#{pane_pid}"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let kids = (ShellEnv.run("/usr/bin/pgrep", ["-P", pid], timeout: 2) ?? "").split(separator: "\n").map(String.init)
+            return [pid] + kids
+        }
+        let serverPID = tmuxOut(["display-message", "-p", "#{pid}"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        func cpu(_ pids: [String]) -> Double {
+            let out = ShellEnv.run("/bin/ps", ["-o", "time=", "-p", pids.joined(separator: ",")], timeout: 2) ?? ""
+            return out.split(separator: "\n").reduce(0) { sum, line in
+                // [[hh:]mm:]ss.ss
+                sum + line.trimmingCharacters(in: .whitespaces).split(separator: ":").reduce(0) { $0 * 60 + (Double($1) ?? 0) }
+            }
+        }
+        let hz = Double(max(60, w.screen?.maximumFramesPerSecond ?? 120))
+        let frame = 1 / hz
+        let views = made.compactMap { ws.pool.view(for: $0) }
+        let saved = Workspace.resizeThrottle
+        defer { Workspace.resizeThrottle = saved }
+        func point(_ p: Double) -> NSPoint {
+            let c = d.container
+            let q = d.axis == .horizontal
+                ? NSPoint(x: c.minX + c.width * (0.5 - 0.25 * sin(p * 2 * .pi)), y: c.midY)
+                : NSPoint(x: c.midX, y: c.minY + c.height * (0.5 - 0.25 * sin(p * 2 * .pi)))
+            return ws.area.convert(q, to: nil)
+        }
+        r.say(String(format: "  dragging the row's main divider through AppKit for 2 s at %.0f Hz, once per throttle:", hz))
+        var verdict = ""
+        for throttle in [0, 0.05, 0.1, 0.15] {
+            Workspace.resizeThrottle = throttle
+            let sends0 = views.map(\.sizeSends), frames0 = views.map(\.contentsCount)
+            let agentCPU0 = cpu(agentPIDs), tmuxCPU0 = cpu([serverPID])
+            var handled: [CFTimeInterval] = [], layout: [Double] = []
+            ws.onDividerStep = { cost in
+                handled.append(CACurrentMediaTime())
+                layout.append(cost)
+            }
+            let n = Int(2 * hz)
+            let start = point(0)
+            if let e = mouse(.leftMouseDown, start) { NSApp.postEvent(e, atStart: false) }
+            await sleep(20)
+            let t0 = CACurrentMediaTime()
+            var posted: [CFTimeInterval] = []
+            for i in 1...n {
+                if let e = mouse(.leftMouseDragged, point(Double(i) / Double(n))) {
+                    posted.append(CACurrentMediaTime())
+                    NSApp.postEvent(e, atStart: false)
+                }
+                // Pace to the display: sleep to the next step's time, not a fixed amount.
+                let next = t0 + Double(i) * frame
+                let left = next - CACurrentMediaTime()
+                if left > 0 { try? await Task.sleep(nanoseconds: UInt64(left * 1e9)) } else { await Task.yield() }
+            }
+            await waitUntil(0.5) { handled.count >= posted.count }
+            let dur = CACurrentMediaTime() - t0
+            if let e = mouse(.leftMouseUp, point(1)) { NSApp.postEvent(e, atStart: false) }
+            // The final resize's repaint, then what the agents and tmux spent on the drag.
+            await sleep(300)
+            let agentCPU = (cpu(agentPIDs) - agentCPU0) / dur, tmuxCPU = (cpu([serverPID]) - tmuxCPU0) / dur
+            await sleep(60)
+            ws.onDividerStep = nil
+            let lat = zip(posted, handled).map { $1 - $0 }
+            let gaps = zip(handled.dropFirst(), handled).map { $0 - $1 }
+            let sends = zip(views.map(\.sizeSends), sends0).map { $0 - $1 }
+            let fps = zip(views.map(\.contentsCount), frames0).map { Double($0 - $1) / dur }
+            let ok = handled.count >= posted.count && Stats.percentile(gaps, 99) <= frame * 1.5 && Stats.percentile(layout, 99) <= frame
+            r.say(String(format: "  throttle %3.0f ms: steps %d/%d  pointer→layout p50=%@ p99=%@  step gap p99=%@  layout p99=%@  SIGWINCH per pane %.0f  frames per pane %.0f/s  CPU agents %.0f%% tmux %.0f%%  %@",
+                         throttle * 1000, handled.count, posted.count, fmtMs(Stats.percentile(lat, 50)), fmtMs(Stats.percentile(lat, 99)),
+                         fmtMs(Stats.percentile(gaps, 99)), fmtMs(Stats.percentile(layout, 99)),
+                         Double(sends.reduce(0, +)) / Double(max(1, sends.count)), fps.reduce(0, +) / Double(max(1, fps.count)),
+                         agentCPU * 100, tmuxCPU * 100, ok ? "at display rate" : "BEHIND"))
+            if throttle == saved { verdict = ok ? "met" : "MISSED" }
+            await sleep(900)
+        }
+        r.say("  divider drag at display rate with 4 busy agents (throttle \(Int(saved * 1000)) ms): \(verdict)")
+
+        // A window resize (what a live resize does to the panes), throttled the same way.
+        Workspace.resizeThrottle = saved
+        let original = w.frame
+        let sends0 = views.map(\.sizeSends)
+        var steps: [Double] = []
+        ws.resizeBegan()
+        let n = Int(hz)
+        for i in 0...n {
+            var f = original
+            f.size.width = original.width - (original.width * 0.25) * sin(Double(i) / Double(n) * .pi)
+            let t0 = CACurrentMediaTime()
+            w.setFrame(f, display: true)
+            steps.append(CACurrentMediaTime() - t0)
+            try? await Task.sleep(nanoseconds: UInt64(frame * 1e9))
+        }
+        ws.resizeEnded()
+        w.setFrame(original, display: true)
+        let sends = zip(views.map(\.sizeSends), sends0).map { $0 - $1 }
+        stats(String(format: "window resize, 4 busy panes (1 s, resizes per pane %.0f): setFrame + layout per step", Double(sends.reduce(0, +)) / 4), steps, budget: frame)
+        await sleep(500)
+        await cleanUp()
+    }
+
     func stats(_ name: String, _ xs: [Double], budget: Double? = nil) {
         let p50 = Stats.percentile(xs, 50), p99 = Stats.percentile(xs, 99)
         var line = String(format: "%@: n=%d  p50=%@  p90=%@  p99=%@  max=%@", name, xs.count, fmtMs(p50), fmtMs(Stats.percentile(xs, 90)),
@@ -1321,6 +1466,13 @@ final class SelfTest: TestKit {
         let all = singles.filter { $0 != ticker } + (ticker.map { [$0] } ?? [])
         var samples: [(String, Bool, Double, Double?)] = []
         ws.onShowMeasured = { samples.append(($0, $1, $2, $3)) }
+
+        // --only busy runs just the busy-agent resize measurement.
+        if argValue("--only") == "busy" {
+            await busyResize()
+            r.save()
+            return
+        }
 
         // --only idle skips straight to the idle measurement.
         if argValue("--only") != "idle" {
@@ -1436,6 +1588,8 @@ final class SelfTest: TestKit {
                 }
             }
             stats("divider drag: layout per step", steps, budget: 0.0083)
+
+            await busyResize()
 
             await rapidSwitching(all)
         }

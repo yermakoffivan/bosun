@@ -77,6 +77,8 @@ Both run inside the app against the fixture (`./dev.sh up` first) and drive it t
 
 `--selftest` reports p50/p90/p99 for warm switch, warm row switch (a three-pane row: the main-thread swap, and every pane's first frame), cold attach, status change to badge, daemon round trip, divider drag layout, launch to sidebar painted and launch to first live terminal (from ten fresh processes), plus idle CPU and memory, against the budgets in the design doc. Idle CPU is measured twice, with the window key and with it not key, each with the frames every pane drew, and checks that only the active pane blinks. Before it, 80 pane and row switches in about 4 s check that afterwards only the active pane blinks and has libghostty's focus (and how often the blink guard stepped in). `--selftest --only idle` runs just the idle part.
 
+It also measures dragging a divider with four busy agents on screen: it makes a temporary row of four tabs running the fake agent's `--ink` mode (a status block redrawn 30 times a second and the whole screen again on every SIGWINCH, as Claude Code does), drags the row's main divider for 2 s through AppKit's event path at the display's rate, once per grid-size throttle (0, 50, 100 and 150 ms), and reports for each the steps handled, pointer-to-layout time, the gap between steps, layout time, SIGWINCHes and frames per pane, and the CPU the agents and the tmux server used. Then it resizes the window for 1 s the same way, and kills the row. `--selftest --only busy` runs just that.
+
 The intervals are also emitted as signposts (subsystem `dev.yetidevworks.bosun-mac`), so Instruments' os_signpost track shows them in a normal run.
 
 ## Keyboard

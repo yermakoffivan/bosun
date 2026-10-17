@@ -31,6 +31,8 @@ final class RootView: NSView {
     }
     var titlebarHeight: CGFloat = 28
     var onSidebarResized: ((CGFloat) -> Void)?
+    /// Dragging the sidebar's edge resizes the main area: true when it starts, false when it ends.
+    var onSidebarDrag: ((Bool) -> Void)?
     private var resizing = false
 
     override var isFlipped: Bool { true }
@@ -66,7 +68,10 @@ final class RootView: NSView {
         return super.hitTest(point)
     }
 
-    override func mouseDown(with event: NSEvent) { resizing = edgeRect.contains(convert(event.locationInWindow, from: nil)) }
+    override func mouseDown(with event: NSEvent) {
+        resizing = edgeRect.contains(convert(event.locationInWindow, from: nil))
+        if resizing { onSidebarDrag?(true) }
+    }
 
     override func mouseDragged(with event: NSEvent) {
         guard resizing else { return }
@@ -76,7 +81,10 @@ final class RootView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        if resizing { onSidebarResized?(sidebarWidth) }
+        if resizing {
+            onSidebarResized?(sidebarWidth)
+            onSidebarDrag?(false)
+        }
         resizing = false
     }
 }

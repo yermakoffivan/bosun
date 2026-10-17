@@ -135,6 +135,9 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         if !w.setFrameUsingName("BosunMain") { w.center() }
         root = RootView(sidebar: sidebar.view, main: workspace.area, sidebarWidth: AppSettings.shared.sidebarWidth)
         root.onSidebarResized = { AppSettings.shared.sidebarWidth = $0 }
+        root.onSidebarDrag = { [weak self] began in
+            if began { self?.workspace.resizeBegan() } else { self?.workspace.resizeEnded() }
+        }
         w.contentView = root
         root.titlebarHeight = max(28, w.frame.height - w.contentLayoutRect.height)
         window = w

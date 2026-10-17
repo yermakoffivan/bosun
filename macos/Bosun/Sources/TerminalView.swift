@@ -43,6 +43,8 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
     // Pixel frames always follow layout; the pty size follows at most every `resizeThrottle` seconds.
     var resizeThrottle: TimeInterval = 0
     private var lastSizeSent: CFTimeInterval = 0
+    /// How many sizes this view has given libghostty (each one is a pty resize, so a SIGWINCH), for the self-test.
+    private(set) var sizeSends = 0
     private var pendingSizeTimer: Timer?
 
     private var markedText = NSMutableAttributedString()
@@ -308,6 +310,7 @@ final class TerminalView: NSView, @preconcurrency NSTextInputClient {
         let px = convertToBacking(NSRect(origin: .zero, size: bounds.size)).size
         ghostty_surface_set_size(surface, UInt32(px.width), UInt32(px.height))
         lastSizeSent = CACurrentMediaTime()
+        sizeSends += 1
     }
 
     override func viewDidChangeBackingProperties() {

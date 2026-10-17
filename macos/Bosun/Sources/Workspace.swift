@@ -310,7 +310,7 @@ final class Workspace {
         let label: StaticString = warm ? "WarmSwitch" : "ColdAttach"
         let sp = signposter.beginInterval(label, id: signposter.makeSignpostID(), "\(session, privacy: .public)")
         if v.frame != rect { v.frame = rect }
-        v.resizeThrottle = 0
+        v.resizeThrottle = resizing ? Workspace.resizeThrottle : 0
         pool.reveal(session, wasWarm: warm)
         if !warm && !v.hasPaintedContent {
             // Stay transparent until tmux paints, so login(1)'s banner never flashes up. (Layer opacity,
@@ -598,28 +598,54 @@ final class Workspace {
         updateChromeState()
     }
 
-    // MARK: Divider drag
+    // MARK: Resizing: divider drags, window live resize, the sidebar's edge
 
-    private var dragSignpost: OSSignpostIntervalState?
+    /// During a resize drag the panes' pixel frames follow the pointer, but their grid size (pty winsize,
+    /// so a SIGWINCH and a full redraw in ink-based agents like Claude Code) follows at most this often,
+    /// plus once at the end. See the self-test's busy-agent drag for how it was picked.
+    static var resizeThrottle: TimeInterval = 0.1
+    /// Resize drags under way (a window live resize can overlap a divider drag in theory).
+    private var resizeDrags = 0
+    /// Self-test hook: a divider drag step was laid out (seconds of main-thread work).
+    var onDividerStep: ((Double) -> Void)?
 
-    func dividerDragBegan() {
-        dragSignpost = signposter.beginInterval("DividerDrag", id: signposter.makeSignpostID())
-        for s in visibleSessions { pool.view(for: s)?.resizeThrottle = 0.1 }
+    var resizing: Bool { resizeDrags > 0 }
+
+    func resizeBegan() {
+        resizeDrags += 1
+        guard resizeDrags == 1 else { return }
+        for s in visibleSessions { pool.view(for: s)?.resizeThrottle = Workspace.resizeThrottle }
     }
 
-    func dividerDragged(_ d: SplitNode.Divider, to point: NSPoint) {
-        guard let id = currentRow else { return }
-        rows[id]?.setRatio(at: d.path, SplitNode.ratio(for: d, at: point, gap: Workspace.gap))
-        lastLayout = displayRoot.layout(in: area.bounds, gap: Workspace.gap)
-        positionAll()
-    }
-
-    func dividerDragEnded() {
+    func resizeEnded() {
+        guard resizeDrags > 0 else { return }
+        resizeDrags -= 1
+        guard resizeDrags == 0 else { return }
         for s in visibleSessions {
             guard let v = pool.view(for: s) else { continue }
             v.flushGridSize()
             v.resizeThrottle = 0
         }
+    }
+
+    private var dragSignpost: OSSignpostIntervalState?
+
+    func dividerDragBegan() {
+        dragSignpost = signposter.beginInterval("DividerDrag", id: signposter.makeSignpostID())
+        resizeBegan()
+    }
+
+    func dividerDragged(_ d: SplitNode.Divider, to point: NSPoint) {
+        guard let id = currentRow else { return }
+        let t0 = CACurrentMediaTime()
+        rows[id]?.setRatio(at: d.path, SplitNode.ratio(for: d, at: point, gap: Workspace.gap))
+        lastLayout = displayRoot.layout(in: area.bounds, gap: Workspace.gap)
+        positionAll()
+        onDividerStep?(CACurrentMediaTime() - t0)
+    }
+
+    func dividerDragEnded() {
+        resizeEnded()
         if let sp = dragSignpost { signposter.endInterval("DividerDrag", sp) }
         dragSignpost = nil
         save()
@@ -761,6 +787,17 @@ final class MainAreaView: NSView {
 
     override func resizeSubviews(withOldSize oldSize: NSSize) {
         MainActor.assumeIsolated { workspace?.relayout() }
+    }
+
+    // A window live resize is a resize drag too: grid sizes are throttled until it ends.
+    override func viewWillStartLiveResize() {
+        super.viewWillStartLiveResize()
+        MainActor.assumeIsolated { workspace?.resizeBegan() }
+    }
+
+    override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize()
+        MainActor.assumeIsolated { workspace?.resizeEnded() }
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { workspace?.dragUpdated(sender) ?? [] }
