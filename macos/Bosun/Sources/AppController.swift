@@ -1091,6 +1091,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                    ("New tab with an agent (sheet), split right", ["New Tab…"]),
                    ("Focus the pane left / right", ["Focus Pane Left", "Focus Pane Right"]),
                    ("Focus the pane up / down", ["Focus Pane Up", "Focus Pane Down"]),
+                   ("Zoom the pane, or show the whole row", ["Zoom Pane"]),
                    ("Close pane and end its tab", ["Close Pane"]), ("Move or swap a pane", [])]),
         ("Navigation", [("Next session (row)", ["Next Session"]), ("Previous session (row)", ["Previous Session"]),
                         ("Next tab (pane)", ["Next Tab"]), ("Previous tab (pane)", ["Previous Tab"]),
@@ -1379,6 +1380,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         let arrows: [(String, Unicode.Scalar, Int)] = [("Focus Pane Left", "\u{F702}", 0), ("Focus Pane Right", "\u{F703}", 1),
                                                          ("Focus Pane Up", "\u{F700}", 2), ("Focus Pane Down", "\u{F701}", 3)]
         for (t, k, tag) in arrows { add(view, t, #selector(menuFocusTile(_:)), String(Character(k)), [.command, .option], target: self, tag: tag) }
+        add(view, "Zoom Pane", #selector(menuZoomPane), "\r", target: self)
         view.addItem(.separator())
         let themeItem = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
         themeMenu.delegate = self
@@ -1457,6 +1459,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         newTab(in: c.id)
     }
     @objc func menuPalette() { showPalette() }
+    @objc func menuZoomPane() { workspace.toggleZoom() }
 
     @objc func menuFocusTile(_ sender: NSMenuItem) {
         workspace.moveFocus([Direction.left, .right, .up, .down][sender.tag])
@@ -1533,6 +1536,9 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             return windowIsKey && focus.terminalOwnsKeyboard && !(window.firstResponder is NSText)
                 && workspace.activeTerminal?.hasMarkedText() != true
         case #selector(menuFocusTile(_:)):
+            return workspace.layout.count > 1
+        case #selector(menuZoomPane):
+            item.state = workspace.layout.isZoomed ? .on : .off
             return workspace.layout.count > 1
         case #selector(menuSplitRight), #selector(menuSplitDown):
             return workspace.layout.active != nil && workspace.layout.count < RowLayout.maxPanes

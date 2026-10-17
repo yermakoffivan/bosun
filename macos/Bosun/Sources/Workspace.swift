@@ -72,7 +72,7 @@ final class Workspace {
     /// The tree on screen: the row's panes; for a row whose tabs have all ended, one tile for its
     /// active tab (the exited placeholder, with Restart); with no rows at all, one empty tile ("").
     var displayRoot: SplitNode {
-        if let r = layout.root { return r }
+        if let r = layout.shownRoot { return r }
         if let c = container { return .leaf(c.active) }
         return .leaf("")
     }
@@ -85,12 +85,13 @@ final class Workspace {
         guard layout.contains(activeTile) else { return nil }
         return pool.view(for: activeTile).flatMap { $0.exited ? nil : $0 }
     }
-    /// The panes on screen.
-    var visibleSessions: Set<String> { Set(layout.panes) }
+    /// The panes on screen (with a zoomed pane, just that one).
+    var visibleSessions: Set<String> { Set(layout.shown) }
     var tileRects: [TileID: CGRect] { lastLayout.tiles }
     func headerSession(_ tile: TileID) -> String? { chrome[tile]?.headerSession }
     /// What a pane's header shows: its badge, the text beside the name and that text's colour (for the test modes).
     func headerStatus(_ tile: TileID) -> (state: AgentState?, text: String, color: NSColor?)? { chrome[tile]?.headerStatus }
+    func headerZoomNote(_ tile: TileID) -> String? { chrome[tile]?.headerZoomNote }
     func session(in tile: TileID) -> String? { tile.isEmpty ? nil : tile }
 
     func terminal(in tile: TileID) -> TerminalView? {
@@ -159,13 +160,13 @@ final class Workspace {
         let sp = signposter.beginInterval("RowSwitch", id: signposter.makeSignpostID(), "\(id, privacy: .public)")
         // The row we leave tells the daemon which tab it was on, so the TUI shows the same one.
         if let old = currentRow { app.syncActiveTab(row: old, pane: rows[old]?.active) }
-        let before = layout.panes
+        let before = layout.shown
         reconcileRow(id, create: true)
         if let pane { rows[id]?.activate(pane) }
         currentRow = id
         legacyActive = nil
         switchStart = t0
-        let warm = layout.panes.allSatisfy { pool.isWarm($0) }
+        let warm = layout.shown.allSatisfy { pool.isWarm($0) }
         apply(previous: before, focus: focus)
         switchStart = nil
         let spent = CACurrentMediaTime() - t0
@@ -216,7 +217,7 @@ final class Workspace {
             rows = rows.filter { ids.contains($0.key) }
             pendingSplits = pendingSplits.filter { ids.contains($0.key) }
         }
-        let before = layout.panes
+        let before = layout.shown
         let beforeActive = layout.active
         for id in Array(rows.keys) { reconcileRow(id, create: false) }
 
@@ -248,7 +249,7 @@ final class Workspace {
             return
         }
         if let c = currentRow, order.contains(c) { reconcileRow(c, create: true) }
-        let changed = layout.panes != before || layout.active != beforeActive || layout.root == nil
+        let changed = layout.shown != before || layout.active != beforeActive || layout.root == nil
         apply(previous: before, focus: focus && changed)
         if changed { scheduleSave() }
     }
@@ -259,12 +260,14 @@ final class Workspace {
         CATransaction.setDisableActions(true)
         lastLayout = displayRoot.layout(in: area.bounds, gap: Workspace.gap)
         // Others first and the active pane last, so it's the most recently used in the pool.
-        let panes = layout.panes.filter { $0 != layout.active } + layout.panes.filter { $0 == layout.active }
+        let shown = layout.shown
+        let panes = shown.filter { $0 != layout.active } + shown.filter { $0 == layout.active }
         for s in panes {
             if let v = pool.view(for: s), !v.exited, !v.isHidden { pool.touch(s); continue }
             attachVisible(s)
         }
-        for s in previous where !layout.contains(s) { pool.hide(s) }
+        // Panes that left the screen: another row's, or the others of a row that zoomed one.
+        for s in previous where !shown.contains(s) { pool.hide(s) }
         pool.evict(keeping: visibleSessions)
         app.focus.setTiles(count: tiles.count, active: activeTile)
         syncChrome()
@@ -287,9 +290,9 @@ final class Workspace {
     func prewarm(row id: String) {
         guard attaching, id != currentRow, app.daemon.state.sidebar.container(id: id) != nil else { return }
         reconcileRow(id, create: true)
-        guard let l = rows[id], let root = l.root else { return }
+        guard let l = rows[id], let root = l.shownRoot else { return }
         let rects = root.layout(in: area.bounds, gap: Workspace.gap).tiles
-        let order = l.panes.filter { $0 == l.active } + l.panes.filter { $0 != l.active }
+        let order = l.shown.filter { $0 == l.active } + l.shown.filter { $0 != l.active }
         for s in order where app.isAlive(s) {
             pool.prewarm(s, size: Workspace.terminalRect(in: rects[s] ?? area.bounds).size)
         }
@@ -357,7 +360,7 @@ final class Workspace {
     private func terminalExited(_ session: String) {
         // The tmux client ended on its own: the session was killed or the client detached elsewhere.
         pool.drop(session)
-        if layout.contains(session), app.isAlive(session) {
+        if visibleSessions.contains(session), app.isAlive(session) {
             // Still alive (detached by someone else, or Ctrl+q): attach again.
             attachVisible(session)
             // The old view had the keyboard; the new one takes it over.
@@ -418,7 +421,7 @@ final class Workspace {
     /// reports once the kill lands (gone, or exited).
     func closePane(_ session: String) {
         guard let id = currentRow, rows[id]?.contains(session) == true, layout.count > 1 else { return }
-        let before = layout.panes
+        let before = layout.shown
         closing.insert(session)
         rows[id]?.close(session)
         apply(previous: before, focus: true)
@@ -440,8 +443,15 @@ final class Workspace {
         }
         let changed = tile != layout.active
         if debugFrames, changed { print(String(format: "activate %.3f %@", CACurrentMediaTime(), tile)) }
+        let before = layout.shown
         rows[id]?.activate(tile)
         app.focus.activate(tile)
+        if changed, layout.isZoomed {
+            // The zoom follows the active pane: the old one leaves the screen and this one fills it.
+            apply(previous: before, focus: focus)
+            scheduleSave()
+            return
+        }
         if changed {
             pool.touch(tile)
             updateChromeState()
@@ -467,8 +477,20 @@ final class Workspace {
     }
 
     func moveFocus(_ d: Direction) {
-        guard let n = SplitNode.neighbor(of: activeTile, d, in: lastLayout) else { NSSound.beep(); return }
+        // Zoomed, the direction is by the row's whole tree, and the zoom moves to that pane.
+        let geometry = layout.isZoomed ? (layout.root?.layout(in: area.bounds, gap: Workspace.gap) ?? lastLayout) : lastLayout
+        guard let n = SplitNode.neighbor(of: activeTile, d, in: geometry) else { NSSound.beep(); return }
         activate(n)
+    }
+
+    /// Cmd+Return: show the active pane alone, full size, or the whole row again. The tree doesn't
+    /// change; the other panes' views stay attached and hidden, so unzooming is a swap.
+    func toggleZoom() {
+        guard let id = currentRow else { NSSound.beep(); return }
+        let before = layout.shown
+        guard rows[id]?.toggleZoom() == true else { NSSound.beep(); return }
+        apply(previous: before, focus: true)
+        save()
     }
 
     /// The visible terminal under a point in window coordinates.
@@ -550,6 +572,11 @@ final class Workspace {
         }
     }
 
+    /// What a zoomed pane's header says on its right (the header already says which tab it is).
+    var zoomNote: String? {
+        layout.isZoomed ? "zoomed · ⌘↩ shows all \(layout.count)" : nil
+    }
+
     /// Ring, dimming, headers and placeholders from the current state and theme.
     func updateChromeState() {
         let theme = app.theme
@@ -559,7 +586,7 @@ final class Workspace {
             let s = session(in: id)
             let hasTerminal = layout.contains(id) && app.isAlive(id)
             c.update(session: s, active: id == active, showRing: ring, windowKey: windowKey,
-                     hasTerminal: hasTerminal, dropTarget: dropTile == id, theme: theme)
+                     hasTerminal: hasTerminal, dropTarget: dropTile == id, zoomNote: zoomNote, theme: theme)
         }
         for d in dividers { d.color = theme.shadow; d.needsDisplay = true }
         area.layer?.backgroundColor = (GhosttyRuntime.shared.configColor("background") ?? theme.bg).cgColor
@@ -609,7 +636,7 @@ final class Workspace {
 
     /// A header drag passed the threshold. Only with two or more panes, and never while the keyboard is lent out.
     func tileDragBegan(_ tile: TileID) -> Bool {
-        guard layout.count > 1, layout.contains(tile), app.focus.exception == nil else { return false }
+        guard tiles.count > 1, layout.contains(tile), app.focus.exception == nil else { return false }
         tileDrag = (tile, nil, nil)
         area.addSubview(dropIndicator, positioned: .above, relativeTo: nil)
         dropIndicator.frame = area.bounds
@@ -759,6 +786,7 @@ final class TileChromeView: NSView {
     /// The session the header names, and the placeholder (for the test modes).
     var headerSession: String? { session }
     var headerStatus: (state: AgentState?, text: String, color: NSColor?) { header.shownStatus }
+    var headerZoomNote: String? { header.shownZoomNote }
     var placeholderView: PlaceholderView? { placeholder }
 
     override var isFlipped: Bool { true }
@@ -778,6 +806,10 @@ final class TileChromeView: NSView {
         header.onClick = { [weak self] in
             guard let self else { return }
             self.workspace.tileClicked(self.tile)
+        }
+        header.onDoubleClick = { [weak self] in
+            guard let self, self.workspace.layout.contains(self.tile) else { return }
+            self.workspace.toggleZoom()
         }
         header.onDragBegan = { [weak self] in
             guard let self else { return false }
@@ -817,14 +849,16 @@ final class TileChromeView: NSView {
         layoutSubtreeIfNeeded()
     }
 
-    func update(session: String?, active: Bool, showRing: Bool, windowKey: Bool, hasTerminal: Bool, dropTarget: Bool, theme: AppTheme) {
+    func update(session: String?, active: Bool, showRing: Bool, windowKey: Bool, hasTerminal: Bool, dropTarget: Bool,
+                zoomNote: String?, theme: AppTheme) {
         self.session = session
         isActive = active
         let app = workspace.app
         header.draggable = showRing
         header.update(name: session.map { app.displayName($0) }, group: session.flatMap { app.groupLabel($0) },
                       state: session.map { app.displayState($0) }, detail: session.flatMap { app.statusDetail($0) },
-                      exited: session.map { !app.isAlive($0) } ?? false, active: active && showRing, theme: theme)
+                      exited: session.map { !app.isAlive($0) } ?? false, active: active && showRing,
+                      zoomNote: hasTerminal ? zoomNote : nil, theme: theme)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         if showRing && active {
@@ -907,8 +941,11 @@ final class TileHeaderView: NSView {
     private let badge = StatusBadge(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
     private let name = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
+    private let zoom = NSTextField(labelWithString: "")
     private let bottomLine = CALayer()
     var onClick: (@MainActor () -> Void)?
+    /// A double click zooms the pane, or unzooms the row.
+    var onDoubleClick: (@MainActor () -> Void)?
     var menuProvider: (@MainActor () -> NSMenu?)?
     /// Dragging the header moves the tile (only with two or more tiles).
     var onDragBegan: (@MainActor () -> Bool)?
@@ -926,11 +963,13 @@ final class TileHeaderView: NSView {
     var shownStatus: (state: AgentState?, text: String, color: NSColor?) {
         (badge.isHidden ? nil : badge.state, detail.stringValue, detail.textColor)
     }
+    /// The zoom note on the right ("zoomed · 2 of 3"), nil when the row isn't zoomed (for the test modes).
+    var shownZoomNote: String? { zoom.isHidden ? nil : zoom.stringValue }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        for l in [name, detail] {
+        for l in [name, detail, zoom] {
             l.lineBreakMode = .byTruncatingTail
             l.isSelectable = false
             l.refusesFirstResponder = true
@@ -938,6 +977,9 @@ final class TileHeaderView: NSView {
         }
         name.font = .systemFont(ofSize: 12, weight: .semibold)
         detail.font = .systemFont(ofSize: 11.5, weight: .regular)
+        zoom.font = .systemFont(ofSize: 11, weight: .medium)
+        zoom.alignment = .right
+        zoom.isHidden = true
         addSubview(badge)
         layer?.addSublayer(bottomLine)
     }
@@ -951,16 +993,27 @@ final class TileHeaderView: NSView {
         name.sizeToFit()
         let nameW = min(name.frame.width, bounds.width * 0.55)
         name.frame = NSRect(x: 27, y: (h - name.frame.height) / 2, width: nameW, height: name.frame.height)
+        var right = bounds.width - 10
+        if !zoom.isHidden {
+            zoom.sizeToFit()
+            let zw = min(zoom.frame.width, max(0, bounds.width * 0.4))
+            zoom.frame = NSRect(x: right - zw, y: (h - zoom.frame.height) / 2, width: zw, height: zoom.frame.height)
+            right = zoom.frame.minX - 8
+        }
         detail.sizeToFit()
         let dx = name.frame.maxX + 8
-        detail.frame = NSRect(x: dx, y: (h - detail.frame.height) / 2, width: max(0, bounds.width - dx - 10), height: detail.frame.height)
+        detail.frame = NSRect(x: dx, y: (h - detail.frame.height) / 2, width: max(0, right - dx), height: detail.frame.height)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         bottomLine.frame = NSRect(x: 0, y: h - 1, width: bounds.width, height: 1)
         CATransaction.commit()
     }
 
-    func update(name n: String?, group: String?, state: AgentState?, detail d: String?, exited: Bool, active: Bool, theme: AppTheme) {
+    func update(name n: String?, group: String?, state: AgentState?, detail d: String?, exited: Bool, active: Bool,
+                zoomNote: String?, theme: AppTheme) {
+        zoom.isHidden = zoomNote == nil
+        zoom.stringValue = zoomNote ?? ""
+        zoom.textColor = theme.accent
         layer?.backgroundColor = (active ? AppTheme.mix(theme.panel, theme.accent, 0.08) : theme.panel).cgColor
         bottomLine.backgroundColor = theme.shadow.cgColor
         if let n {
@@ -1007,6 +1060,7 @@ final class TileHeaderView: NSView {
         downAt = event.locationInWindow
         dragging = false
         onClick?()
+        if event.clickCount == 2 { onDoubleClick?() }
     }
 
     override func mouseDragged(with event: NSEvent) {

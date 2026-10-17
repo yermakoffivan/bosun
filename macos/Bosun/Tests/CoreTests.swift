@@ -218,6 +218,71 @@ final class RowLayoutTests: XCTestCase {
         XCTAssertEqual(row.active, "b")
     }
 
+    // MARK: Zoom
+
+    func testZoomShowsTheActivePaneAloneAndKeepsTheTree() {
+        var row = RowLayout(root: h(a, v(b, c, 0.3), 0.65), active: "b")
+        let tree = row.root
+        XCTAssertTrue(row.toggleZoom())
+        XCTAssertEqual(row.zoomed, "b")
+        XCTAssertEqual(row.shownRoot, b)
+        XCTAssertEqual(row.shown, ["b"])
+        XCTAssertEqual(row.panes, ["a", "b", "c"], "every pane stays in the row")
+        XCTAssertEqual(row.root, tree)
+        XCTAssertTrue(row.toggleZoom())
+        XCTAssertNil(row.zoomed)
+        XCTAssertEqual(row.shownRoot, tree, "unzoomed, ratios and all")
+        var one = RowLayout(root: a)
+        XCTAssertFalse(one.toggleZoom(), "one pane: nothing to zoom")
+        XCTAssertNil(one.zoomed)
+    }
+
+    func testZoomFollowsTheActivePane() {
+        var row = RowLayout(root: h(a, v(b, c)), active: "a")
+        row.toggleZoom()
+        row.activate("c")
+        XCTAssertEqual(row.zoomed, "c")
+        XCTAssertEqual(row.shown, ["c"])
+        row.activate("x")
+        XCTAssertEqual(row.zoomed, "c", "a pane that isn't in the row changes nothing")
+    }
+
+    func testZoomEndsWhenTheRowGainsOrLosesAPane() {
+        var split = RowLayout(root: h(a, b), active: "a")
+        split.toggleZoom()
+        split.split("a", axis: .horizontal, newPane: "c")
+        XCTAssertNil(split.zoomed, "Cmd+D shows the new split")
+
+        var closed = RowLayout(root: h(a, v(b, c)), active: "b")
+        closed.toggleZoom()
+        closed.close("a")
+        XCTAssertNil(closed.zoomed)
+        XCTAssertEqual(closed.active, "b")
+
+        var arrived = RowLayout(root: h(a, b), active: "a")
+        arrived.toggleZoom()
+        arrived.reconcile(liveTabs: ["a", "b", "c"], preferredActive: "a", aspect: 1.6)
+        XCTAssertNil(arrived.zoomed, "a tab from elsewhere")
+
+        var unchanged = RowLayout(root: h(a, b), active: "a")
+        unchanged.toggleZoom()
+        unchanged.reconcile(liveTabs: ["a", "b"], preferredActive: "b", aspect: 1.6)
+        XCTAssertEqual(unchanged.zoomed, "a", "the same tabs keep the zoom")
+    }
+
+    func testZoomIsSavedAndOldFilesReadUnzoomed() throws {
+        var row = RowLayout(root: h(a, b), active: "b")
+        row.toggleZoom()
+        var saved = SavedLayouts(current: "con-1")
+        saved.rows["con-1"] = row
+        let back = try XCTUnwrap(SavedLayouts.decode(XCTUnwrap(saved.encoded())))
+        XCTAssertEqual(back.rows["con-1"]?.zoomed, "b")
+        let old = #"{"version":2,"current":"con-1","rows":{"con-1":{"root":{"leaf":{"_0":"a"}},"active":"a"}}}"#
+        let decoded = try XCTUnwrap(SavedLayouts.decode(Data(old.utf8)))
+        XCTAssertNil(decoded.rows["con-1"]?.zoomed)
+        XCTAssertEqual(decoded.rows["con-1"]?.active, "a")
+    }
+
     // MARK: Persistence
 
     func testSavedLayoutsRoundTrip() throws {

@@ -287,6 +287,9 @@ public struct PendingSplit: Equatable, Sendable {
 public struct RowLayout: Codable, Equatable, Sendable {
     public private(set) var root: SplitNode?
     public private(set) var active: TileID?
+    /// The pane shown full size (Cmd+Return), like tmux's `resize-pane -Z`: the tree stays as it is.
+    /// Zoom follows the active pane, and ends when the row gains or loses a pane.
+    public private(set) var zoomed: TileID?
 
     /// The supported maximum (design section 6). Only the app's own new-pane commands stop here.
     public static let maxPanes = 9
@@ -301,13 +304,34 @@ public struct RowLayout: Codable, Equatable, Sendable {
     public var isEmpty: Bool { root == nil }
     public func contains(_ pane: TileID) -> Bool { root?.contains(pane) ?? false }
 
+    /// The tree on screen: the zoomed pane alone, else the whole tree.
+    public var shownRoot: SplitNode? { zoomed.map { .leaf($0) } ?? root }
+    /// The panes on screen (all of them, or the zoomed one).
+    public var shown: [TileID] { zoomed.map { [$0] } ?? panes }
+    public var isZoomed: Bool { zoomed != nil }
+
     public mutating func activate(_ pane: TileID) {
-        if contains(pane) { active = pane }
+        guard contains(pane) else { return }
+        active = pane
+        if zoomed != nil { zoomed = pane }
+    }
+
+    /// Zoom the active pane, or end the zoom. Returns false when there's nothing to zoom (one pane).
+    @discardableResult
+    public mutating func toggleZoom() -> Bool {
+        if zoomed != nil {
+            zoomed = nil
+            return true
+        }
+        guard count > 1, let active else { return false }
+        zoomed = active
+        return true
     }
 
     /// Split `pane` (or the active pane) along `axis` for `newPane`, which goes right or below and becomes active.
     public mutating func split(_ pane: TileID?, axis: SplitAxis, newPane: TileID) {
-        guard !contains(newPane) else { active = newPane; return }
+        guard !contains(newPane) else { activate(newPane); return }
+        zoomed = nil
         guard let root else {
             self.root = .leaf(newPane)
             active = newPane
@@ -324,6 +348,7 @@ public struct RowLayout: Codable, Equatable, Sendable {
     public mutating func close(_ pane: TileID) -> Bool {
         guard let root, root.contains(pane) else { return false }
         let sibling = root.nearestSiblingLeaf(of: pane)
+        zoomed = nil
         self.root = root.removing(pane)
         if active == pane || active.map({ !contains($0) }) ?? true {
             active = sibling ?? self.root?.leaves.first
@@ -337,6 +362,7 @@ public struct RowLayout: Codable, Equatable, Sendable {
     /// and 2, 3 and 4 tabs open as side by side, a column and a stack, and a 2×2 grid.
     public mutating func place(_ newPane: TileID, order: [String], aspect: Double) {
         guard !contains(newPane) else { return }
+        zoomed = nil
         guard let root else {
             self.root = .leaf(newPane)
             return
@@ -410,6 +436,7 @@ public struct RowLayout: Codable, Equatable, Sendable {
     public mutating func move(_ pane: TileID, to target: TileID, zone: TileDropZone) -> Bool {
         guard let r = root?.moving(pane, to: target, zone: zone) else { return false }
         root = r
+        zoomed = nil
         active = pane
         return true
     }

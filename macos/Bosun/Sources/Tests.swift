@@ -368,12 +368,13 @@ final class FocusTest: TestKit {
         await showRow(api)
         r.check("start: the active terminal is first responder", firstResponderIsActiveTerminal)
 
-        // --only a,b runs just those sections (rows, panes, newpanes, clientmoves, done, notify, appearance, links, sheet, empty,
+        // --only a,b runs just those sections (rows, panes, zoom, newpanes, clientmoves, done, notify, appearance, links, sheet, empty,
         // tiledrag, sidebardrag, shortcuts).
         if let only = argValue("--only") {
             let parts = Set(only.split(separator: ",").map(String.init))
             if parts.contains("rows") { await rows(f) }
             if parts.contains("panes") { await panes(f) }
+            if parts.contains("zoom") { await zoom(f) }
             if parts.contains("newpanes") { await newPanes(f) }
             if parts.contains("clientmoves") { await clientMoves(f) }
             if parts.contains("done") { await doneState(f) }
@@ -461,6 +462,7 @@ final class FocusTest: TestKit {
         // 5–7. Rows are workspaces: switching, pane navigation, new and closed panes.
         await rows(f)
         await panes(f)
+        await zoom(f)
         await newPanes(f)
 
         // 8. Focus follows the mouse in the three-pane row: move into each pane, type, check that pane.
@@ -961,6 +963,107 @@ final class FocusTest: TestKit {
         }
         r.check("panes: Cmd+Option+arrows move to the pane in that direction (\(tried) moves)", spatialOK && firstResponderIsActiveTerminal)
         ws.activate(f.webTests)
+    }
+
+    // MARK: Zoom
+
+    func zoom(_ f: Fixture) async {
+        guard let webRow = rowID(f.web) else { return }
+        await showRow(f.webTests)
+        let views = Dictionary(uniqueKeysWithValues: ws.layout.panes.compactMap { s in ws.pool.view(for: s).map { (s, ObjectIdentifier($0)) } })
+        let order = tabs(webRow).filter { ws.layout.contains($0) }
+        let tree = ws.layout.root
+        func full(_ t: TileID) -> Bool { ws.tileRects[t].map { $0.size == ws.area.bounds.size } ?? false }
+        func othersHidden(_ t: TileID) -> Bool {
+            ws.layout.panes.filter { $0 != t }.allSatisfy { s in ws.pool.view(for: s).map { $0.isHidden && !$0.exited } ?? false }
+        }
+        await key(36, "\r", [.command])
+        r.check("zoom: Cmd+Return shows the active pane alone, full size", ws.layout.zoomed == f.webTests && ws.tiles == [f.webTests] && full(f.webTests),
+                "tiles \(ws.tiles.map(app.displayName)) rect \(ws.tileRects[f.webTests] ?? .zero) area \(ws.area.bounds)")
+        r.check("…the other panes stay in the row, attached and hidden", ws.layout.count == 3 && othersHidden(f.webTests) && ws.layout.root == tree)
+        r.check("…its header says it's zoomed (\(ws.headerZoomNote(f.webTests) ?? "nothing"))", ws.headerZoomNote(f.webTests) == "zoomed · ⌘↩ shows all 3")
+        r.check("…with the keyboard, and no ring", firstResponderIsActiveTerminal && ws.activeSession == f.webTests && !app.focus.showsRing)
+        shot("05-zoomed")
+        if let item = app.menuItem(titled: "Zoom Pane") {
+            let enabled = app.validateMenuItem(item)
+            r.check("…View → Zoom Pane is checked", enabled && item.state == .on)
+        }
+
+        // Zoom follows the active pane: Shift+Right goes to the next tab, still full size.
+        let next = order[(order.firstIndex(of: f.webTests)! + 1) % order.count]
+        await arrow(124, [.shift])
+        await waitUntil(2) { ws.terminal(in: next)?.isHidden == false }
+        r.check("zoom: Shift+Right zooms the next tab (\(app.displayName(next))) instead", ws.layout.zoomed == next && ws.tiles == [next] && full(next) && othersHidden(next),
+                "zoomed \(ws.layout.zoomed.map(app.displayName) ?? "-") tiles \(ws.tiles.map(app.displayName))")
+        r.check("…the keyboard follows", firstResponderIsActiveTerminal && (w.firstResponder as? TerminalView)?.session == next)
+        if next == f.webShell {
+            await waitShell(f.webShell)
+            await type("echo zoom-ok\n")
+            r.check("…typing reaches the zoomed pane", await paneHasLine(f.webShell, "zoom-ok"))
+        }
+        // Cmd+Option+arrows go by the row's whole tree.
+        let geometry = ws.layout.root!.layout(in: ws.area.bounds, gap: Workspace.gap)
+        var spatial = true
+        for (code, dir) in [(UInt16(123), Direction.left), (124, .right), (126, .up), (125, .down)] {
+            let from = ws.activeTile
+            guard let want = SplitNode.neighbor(of: from, dir, in: geometry) else { continue }
+            await arrow(code, [.command, .option])
+            if ws.layout.zoomed != want { spatial = false; r.say("      \(dir) from \(app.displayName(from)): zoomed \(ws.layout.zoomed.map(app.displayName) ?? "-"), want \(app.displayName(want))") }
+        }
+        r.check("zoom: Cmd+Option+arrows move the zoom to the pane in that direction of the whole row", spatial && ws.tiles.count == 1)
+
+        // A zoomed row stays zoomed across a row switch.
+        let zoomedNow = ws.layout.zoomed
+        await showRow(f.api)
+        r.check("zoom: another row shows unzoomed (api has one pane)", !ws.layout.isZoomed && ws.tiles == [f.api])
+        await key(36, "\r", [.command])
+        r.check("…Cmd+Return there does nothing (one pane)", !ws.layout.isZoomed && ws.tiles == [f.api])
+        ws.selectRow(webRow)
+        await waitPanesPainted()
+        r.check("…and back, the row is still zoomed on the same pane", ws.layout.zoomed == zoomedNow && ws.tiles == zoomedNow.map { [$0] })
+
+        // Unzoom: the same views come back where they were.
+        await key(36, "\r", [.command])
+        await waitPanesPainted()
+        let same = ws.layout.panes.allSatisfy { s in ws.pool.view(for: s).map { ObjectIdentifier($0) } == views[s] }
+        r.check("zoom: Cmd+Return again shows the whole row, same tree", !ws.layout.isZoomed && ws.tiles.count == 3 && ws.layout.root == tree)
+        r.check("…with the same terminal views (no reattach), all shown", same && ws.layout.panes.allSatisfy { ws.terminal(in: $0)?.isHidden == false })
+        r.check("…and the keyboard stays in the active pane", firstResponderIsActiveTerminal && ws.activeSession == zoomedNow)
+        r.check("…no header says zoomed", ws.tiles.allSatisfy { ws.headerZoomNote($0) == nil })
+
+        // A double click on a pane's header zooms it, and another shows the row again.
+        ws.activate(f.web)
+        if let rect = ws.tileRects[f.webTests] {
+            let p = ws.area.convert(NSPoint(x: rect.midX, y: rect.minY + Workspace.headerHeight / 2), to: nil)
+            await doubleClick(p)
+            r.check("zoom: double-clicking a pane's header zooms that pane", ws.layout.zoomed == f.webTests && ws.tiles == [f.webTests],
+                    "zoomed \(ws.layout.zoomed.map(app.displayName) ?? "-")")
+            let p2 = ws.area.convert(NSPoint(x: ws.area.bounds.midX, y: Workspace.headerHeight / 2), to: nil)
+            await doubleClick(p2)
+            r.check("…and double-clicking it again shows the row", !ws.layout.isZoomed && ws.tiles.count == 3)
+        }
+
+        // A new pane ends the zoom, so you see the split.
+        ws.activate(f.webShell)
+        await key(36, "\r", [.command])
+        let before = tabs(webRow)
+        await cmd("d")
+        let made = await waitUntil(4) { tabs(webRow).count == before.count + 1 && ws.layout.count == 4 }
+        let new = tabs(webRow).first { !before.contains($0) }
+        r.check("zoom: Cmd+D while zoomed shows the whole row with the new split", made && !ws.layout.isZoomed && ws.tiles.count == 4 && ws.activeSession == new)
+        if let new { await killTab(new) }
+        await waitUntil(3) { ws.layout.count == 3 }
+        ws.activate(f.webTests)
+    }
+
+    func doubleClick(_ p: NSPoint) async {
+        for n in [1, 2] {
+            if let d = mouse(.leftMouseDown, p, clicks: n), let u = mouse(.leftMouseUp, p, clicks: n) {
+                NSApp.postEvent(d, atStart: false)
+                NSApp.postEvent(u, atStart: false)
+            }
+        }
+        await sleep(150)
     }
 
     // MARK: New and closed panes
