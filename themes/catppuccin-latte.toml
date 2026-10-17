@@ -1,0 +1,28 @@
+name = "catppuccin-latte"
+
+bg             = "#eff1f5"
+panel          = "#e6e9ef"
+panel_alt      = "#dce0e8"
+selection_bg   = "#ccd0da"
+text           = "#4c4f69"
+text_muted     = "#6c6f85"
+accent         = "#8839ef"
+shadow         = "#bcc0cc"
+dim_fg         = "#9ca0b0"
+status_running = "#40a02b"
+status_waiting = "#df8e1d"
+status_idle    = "#6c6f85"
+status_error   = "#d20f39"
+status_done    = "#04a5e5"
+
+[terminal]
+ghostty        = "Catppuccin Latte"
+background     = "#eff1f5"
+foreground     = "#4c4f69"
+cursor         = "#dc8a78"
+selection_bg   = "#ccd0da"
+selection_fg   = "#4c4f69"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#5c5f77", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#acb0be",
+  "#6c6f85", "#e64553", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#bcc0cc",
+]

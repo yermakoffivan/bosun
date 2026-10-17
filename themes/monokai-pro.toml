@@ -1,0 +1,28 @@
+name = "monokai-pro"
+
+bg             = "#2d2a2e"
+panel          = "#221f22"
+panel_alt      = "#403e41"
+selection_bg   = "#5b595c"
+text           = "#fcfcfa"
+text_muted     = "#939293"
+accent         = "#ffd866"
+shadow         = "#19181a"
+dim_fg         = "#727072"
+status_running = "#a9dc76"
+status_waiting = "#fc9867"
+status_idle    = "#939293"
+status_error   = "#ff6188"
+status_done    = "#78dce8"
+
+[terminal]
+ghostty        = "Monokai Pro"
+background     = "#2d2a2e"
+foreground     = "#fcfcfa"
+cursor         = "#fcfcfa"
+selection_bg   = "#5b595c"
+selection_fg   = "#fcfcfa"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#403e41", "#ff6188", "#a9dc76", "#ffd866", "#fc9867", "#ab9df2", "#78dce8", "#fcfcfa",
+  "#727072", "#ff6188", "#a9dc76", "#ffd866", "#fc9867", "#ab9df2", "#78dce8", "#fcfcfa",
+]

@@ -1,0 +1,28 @@
+name = "everforest-dark"
+
+bg             = "#2d353b"
+panel          = "#232a2e"
+panel_alt      = "#343f44"
+selection_bg   = "#3d484d"
+text           = "#d3c6aa"
+text_muted     = "#859289"
+accent         = "#e69875"
+shadow         = "#1e2326"
+dim_fg         = "#7a8478"
+status_running = "#a7c080"
+status_waiting = "#dbbc7f"
+status_idle    = "#859289"
+status_error   = "#e67e80"
+status_done    = "#7fbbb3"
+
+[terminal]
+ghostty        = "Everforest Dark Med"
+background     = "#2d353b"
+foreground     = "#d3c6aa"
+cursor         = "#d3c6aa"
+selection_bg   = "#475258"
+selection_fg   = "#d3c6aa"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#475258", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#d3c6aa",
+  "#7a8478", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#f2efdf",
+]

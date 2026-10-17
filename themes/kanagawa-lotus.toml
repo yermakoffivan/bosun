@@ -1,0 +1,28 @@
+name = "kanagawa-lotus"
+
+bg             = "#f2ecbc"
+panel          = "#e5ddb0"
+panel_alt      = "#dcd5ac"
+selection_bg   = "#b5cbd2"
+text           = "#545464"
+text_muted     = "#716e61"
+accent         = "#4d699b"
+shadow         = "#b8b09a"
+dim_fg         = "#8a8980"
+status_running = "#6f894e"
+status_waiting = "#cc6d00"
+status_idle    = "#716e61"
+status_error   = "#c84053"
+status_done    = "#4e8ca2"
+
+[terminal]
+ghostty        = "Kanagawa Lotus"
+background     = "#f2ecbc"
+foreground     = "#545464"
+cursor         = "#43436c"
+selection_bg   = "#b5cbd2"
+selection_fg   = "#545464"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#1f1f28", "#c84053", "#6f894e", "#77713f", "#4d699b", "#b35b79", "#597b75", "#545464",
+  "#8a8980", "#d7474b", "#6e915f", "#836f4a", "#6693bf", "#624c83", "#5e857a", "#43436c",
+]

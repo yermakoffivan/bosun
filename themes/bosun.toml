@@ -1,0 +1,27 @@
+name = "bosun"
+
+bg             = "#0e1a2b"
+panel          = "#0a1422"
+panel_alt      = "#15243a"
+selection_bg   = "#1d3250"
+text           = "#f1e9d2"
+text_muted     = "#7f90a8"
+accent         = "#7fd1ae"
+shadow         = "#050b14"
+dim_fg         = "#4a5b73"
+status_running = "#5ec48f"
+status_waiting = "#f3c56b"
+status_idle    = "#7f90a8"
+status_error   = "#ef6b73"
+status_done    = "#6ab7ff"
+
+[terminal]
+background     = "#0e1a2b"
+foreground     = "#e8e2cf"
+cursor         = "#7fd1ae"
+selection_bg   = "#1d3250"
+selection_fg   = "#f1e9d2"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#15243a", "#ef6b73", "#5ec48f", "#f3c56b", "#6ab7ff", "#c39bf0", "#7fd1ae", "#cfd6e0",
+  "#4a5b73", "#ff8a90", "#7fd1ae", "#ffd98a", "#8fc9ff", "#d6b8ff", "#a3e6cc", "#f1e9d2",
+]

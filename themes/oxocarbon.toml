@@ -1,0 +1,27 @@
+name = "oxocarbon"
+
+bg             = "#161616"
+panel          = "#0f0f0f"
+panel_alt      = "#262626"
+selection_bg   = "#393939"
+text           = "#f2f4f8"
+text_muted     = "#8d8d8d"
+accent         = "#ee5396"
+shadow         = "#000000"
+dim_fg         = "#525252"
+status_running = "#42be65"
+status_waiting = "#f1c21b"
+status_idle    = "#8d8d8d"
+status_error   = "#fa4d56"
+status_done    = "#33b1ff"
+
+[terminal]
+background     = "#161616"
+foreground     = "#f2f4f8"
+cursor         = "#ffffff"
+selection_bg   = "#393939"
+selection_fg   = "#f2f4f8"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#262626", "#ee5396", "#42be65", "#ffe97b", "#33b1ff", "#be95ff", "#3ddbd9", "#dde1e6",
+  "#525252", "#ff7eb6", "#6fdc8c", "#fddc69", "#78a9ff", "#d4bbff", "#82cfff", "#ffffff",
+]

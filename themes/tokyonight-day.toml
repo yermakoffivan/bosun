@@ -1,0 +1,27 @@
+name = "tokyonight-day"
+
+bg             = "#e1e2e7"
+panel          = "#d8dbe5"
+panel_alt      = "#c1c9df"
+selection_bg   = "#b7c1e3"
+text           = "#3760bf"
+text_muted     = "#68709a"
+accent         = "#2e7de9"
+shadow         = "#b4b5b9"
+dim_fg         = "#8990b3"
+status_running = "#587539"
+status_waiting = "#b15c00"
+status_idle    = "#68709a"
+status_error   = "#c64343"
+status_done    = "#007197"
+
+[terminal]
+background     = "#e1e2e7"
+foreground     = "#3760bf"
+cursor         = "#3760bf"
+selection_bg   = "#b7c1e3"
+selection_fg   = "#3760bf"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#b4b5b9", "#f52a65", "#587539", "#8c6c3e", "#2e7de9", "#9854f1", "#007197", "#6172b0",
+  "#a1a6c5", "#ff4774", "#5c8524", "#a27629", "#358aff", "#a463ff", "#007ea8", "#3760bf",
+]

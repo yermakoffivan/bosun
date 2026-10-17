@@ -1,0 +1,28 @@
+name = "flexoki-dark"
+
+bg             = "#100f0f"
+panel          = "#1c1b1a"
+panel_alt      = "#282726"
+selection_bg   = "#343331"
+text           = "#cecdc3"
+text_muted     = "#878580"
+accent         = "#ce5d97"
+shadow         = "#000000"
+dim_fg         = "#575653"
+status_running = "#879a39"
+status_waiting = "#d0a215"
+status_idle    = "#878580"
+status_error   = "#d14d41"
+status_done    = "#4385be"
+
+[terminal]
+ghostty        = "Flexoki Dark"
+background     = "#100f0f"
+foreground     = "#cecdc3"
+cursor         = "#cecdc3"
+selection_bg   = "#403e3c"
+selection_fg   = "#cecdc3"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#100f0f", "#d14d41", "#879a39", "#d0a215", "#4385be", "#ce5d97", "#3aa99f", "#878580",
+  "#575653", "#e8705f", "#a0af54", "#dfb431", "#66a0c8", "#e47da8", "#5abdac", "#cecdc3",
+]
