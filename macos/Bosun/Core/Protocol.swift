@@ -776,10 +776,11 @@ public enum Command: Equatable, Sendable {
     case applySetting(key: String, value: JSONValue)
     case clientFlags(tty: String, ignoreSize: Bool)
     case makeLatest(tty: String)
-    /// Move one tab into row `container` (at `index` among its tabs), or into a new row of its own with nil.
-    case moveTab(session: String, container: String?, index: Int?)
-    /// Move every tab of row `from` to the end of row `into`.
-    case mergeRows(from: String, into: String)
+    /// Move one tab into row `container` (at `index` among its tabs), or into a new row of its own with nil:
+    /// at `index` among the rows of `section` (the ungrouped rows with nil), or right after the old one with no `index`.
+    case moveTab(session: String, container: String?, index: Int?, section: String? = nil)
+    /// Move every tab of row `from` into row `into` (at `index` among its tabs, at the end with nil).
+    case mergeRows(from: String, into: String, index: Int?)
 
     public var op: String {
         switch self {
@@ -892,12 +893,14 @@ public enum ClientMessage: Sendable {
                     try put("tty", t); try put("ignore_size", i)
                 case .makeLatest(let t):
                     try put("tty", t)
-                case .moveTab(let s, let container, let index):
+                case .moveTab(let s, let container, let index, let section):
                     try put("session", s)
                     if let container { try put("container_id", container) } else { try c.encodeNil(forKey: AnyKey("container_id")) }
                     if let index { try put("index", index) }
-                case .mergeRows(let from, let into):
+                    if let section { try put("section", section) }
+                case .mergeRows(let from, let into, let index):
                     try put("from", from); try put("into", into)
+                    if let index { try put("index", index) }
                 }
             }
         }

@@ -151,8 +151,9 @@ case "${1:-}" in
   run)
     shift
     if [[ -n "$DEMO" ]]; then
-      # The demo app gets the demo home as its own (CFFIXED_USER_HOME): paths read ~/code/…, and its window
-      # frame, layouts and settings stay out of your real Bosun.app's. The layout demo_up wrote opens the
+      # The demo app gets the demo home as its own (CFFIXED_USER_HOME): paths read ~/code/…, and its row
+      # layouts stay out of your real Bosun.app's. Its defaults are still the real ones (cfprefsd ignores
+      # CFFIXED_USER_HOME), so the demo never saves its window frame there. The layout demo_up wrote opens the
       # checkout-v2 row as four panes, in a window sized for a screenshot.
       app_support="$DEV_HOME/Library/Application Support/dev.yetidevworks.bosun-mac"
       mkdir -p "$app_support"

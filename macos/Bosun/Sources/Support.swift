@@ -9,6 +9,8 @@ let log = Logger(subsystem: appSubsystem, category: "app")
 
 /// BOSUN_DEBUG_KEYS=1 logs every key routing decision to stdout.
 let debugKeys = ProcessInfo.processInfo.environment["BOSUN_DEBUG_KEYS"] != nil
+/// BOSUN_DEBUG_DRAG=1 logs every sidebar drop check (what the outline proposed and what was answered), and each drag's start and end, to stdout.
+let debugDrag = ProcessInfo.processInfo.environment["BOSUN_DEBUG_DRAG"] != nil
 /// BOSUN_DEBUG_FRAMES=1 logs every frame a terminal draws, and every focus and occlusion change it's given, to stdout.
 let debugFrames = ProcessInfo.processInfo.environment["BOSUN_DEBUG_FRAMES"] != nil
 /// A scripted test mode (--focustest, --selftest, --launchprobe) is running.

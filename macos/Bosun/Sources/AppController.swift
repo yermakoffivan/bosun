@@ -402,10 +402,11 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         layoutsTimer?.invalidate()
         layoutsTimer = nil
         guard let first = windows.first else { return }
-        // Test modes share the app's defaults; they must never save a window frame over yours.
-        if !testMode { first.window.saveFrame(usingName: BosunWindow.primaryFrameName) }
+        // Test modes and the demo share the app's defaults (CFFIXED_USER_HOME doesn't move them); they must never
+        // save a window frame over yours.
+        if !testMode && !demoMode { first.window.saveFrame(usingName: BosunWindow.primaryFrameName) }
         let others = windows.dropFirst().compactMap { bw in
-            bw.workspace.currentRow.map { SavedLayouts.Window(row: $0, frame: testMode ? nil : NSStringFromRect(bw.window.frame)) }
+            bw.workspace.currentRow.map { SavedLayouts.Window(row: $0, frame: testMode || demoMode ? nil : NSStringFromRect(bw.window.frame)) }
         }
         var saved = SavedLayouts(current: first.workspace.currentRow, rows: rowStore.rows)
         saved.windows = others.isEmpty ? nil : others
@@ -1688,17 +1689,19 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         return m.numberOfItems > 0 ? m : nil
     }
 
-    /// Merge row `from` into row `into`: its tabs become `into`'s tabs (and panes). Nothing restarts.
-    func mergeRow(_ from: String, into: String) {
+    /// Merge row `from` into row `into`: its tabs become `into`'s tabs (and panes), at `index` among them
+    /// (at the end with nil). Nothing restarts.
+    func mergeRow(_ from: String, into: String, at index: Int? = nil) {
         guard from != into else { return }
-        daemon.command(.mergeRows(from: from, into: into)) { [weak self] ack in
+        daemon.command(.mergeRows(from: from, into: into, index: index)) { [weak self] ack in
             self?.report(ack)
         }
     }
 
-    /// Move one tab into row `into`, or out into a row of its own with nil.
-    func moveTab(_ session: String, into: String?) {
-        daemon.command(.moveTab(session: session, container: into, index: nil)) { [weak self] ack in
+    /// Move one tab into row `into` (at `index` among its tabs, at the end with nil), or out into a row of its own
+    /// with nil: at `index` among the rows of `section` (the ungrouped rows with nil), or right after the old one.
+    func moveTab(_ session: String, into: String?, at index: Int? = nil, section: String? = nil) {
+        daemon.command(.moveTab(session: session, container: into, index: index, section: section)) { [weak self] ack in
             self?.report(ack)
         }
     }

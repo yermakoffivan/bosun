@@ -130,18 +130,25 @@ pub enum CmdOp {
     },
     /// Move one tab into another row (`container_id`, at `index` among
     /// its tabs, appended when absent), or with `container_id: null`
-    /// out into a new row of its own right after the old one.
+    /// out into a new row of its own: at `index` among the rows of
+    /// `section` (the ungrouped rows when absent), or right after the
+    /// old one when `index` is absent.
     MoveTab {
         session: String,
         container_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         index: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        section: Option<String>,
     },
-    /// Move every tab of row `from` into row `into`, in order, as one
-    /// sidebar change.
+    /// Move every tab of row `from` into row `into`, in order, at
+    /// `index` among its tabs (appended when absent), as one sidebar
+    /// change.
     MergeRows {
         from: String,
         into: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
     },
     InsertSection {
         name: String,
@@ -1149,15 +1156,29 @@ mod tests {
                 session: "s".into(),
                 container_id: Some("con-1".into()),
                 index: Some(0),
+                section: None,
             },
             CmdOp::MoveTab {
                 session: "s".into(),
                 container_id: None,
                 index: None,
+                section: None,
+            },
+            CmdOp::MoveTab {
+                session: "s".into(),
+                container_id: None,
+                index: Some(2),
+                section: Some("sec-1".into()),
             },
             CmdOp::MergeRows {
                 from: "con-2".into(),
                 into: "con-1".into(),
+                index: None,
+            },
+            CmdOp::MergeRows {
+                from: "con-2".into(),
+                into: "con-1".into(),
+                index: Some(1),
             },
             CmdOp::InsertSection {
                 name: "Work".into(),
@@ -1230,6 +1251,7 @@ mod tests {
                     session: "bosun-a".into(),
                     container_id: None,
                     index: None,
+                    section: None,
                 }
             })
         );
@@ -1255,9 +1277,21 @@ mod tests {
                 op: CmdOp::MergeRows {
                     from: "con-2".into(),
                     into: "con-1".into(),
+                    index: None,
                 }
             })
         );
+        let m: ClientMsg = serde_json::from_str(
+            r#"{"t":"cmd","id":6,"op":"merge_rows","from":"con-2","into":"con-1","index":0}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            m,
+            ClientMsg::Cmd(CmdEnvelope {
+                op: CmdOp::MergeRows { index: Some(0), .. },
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -703,6 +703,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
 
     func outlineView(_ outlineView: NSOutlineView, draggingSession session: NSDraggingSession, willBeginAt screenPoint: NSPoint, forItems draggedItems: [Any]) {
         dragStarted = true
+        if debugDrag { print("drag: began at \(screenPoint) items \(draggedItems.count)"); fflush(stdout) }
         cancelPendingRename()
         setHover(nil)
         draggingKind = (draggedItems.first as? SidebarItem)?.kind
@@ -714,6 +715,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     /// A drag let go outside every Bosun window tears its row (or tab) off into a new window.
     func outlineView(_ outlineView: NSOutlineView, draggingSession session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
         defer { draggingKind = nil }
+        if debugDrag { print("drag: ended at \(screenPoint) operation \(operation.rawValue)"); fflush(stdout) }
         guard operation == [], let kind = draggingKind, !app.isOverBosunWindow(screenPoint) else { return }
         // On the next turn: the drag's own cleanup runs first.
         DispatchQueue.main.async { [app] in MainActor.assumeIsolated { app.sidebarDraggedOut(kind, at: screenPoint) } }
@@ -725,6 +727,16 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     }
 
     func outlineView(_ outlineView: NSOutlineView, validateDrop info: NSDraggingInfo, proposedItem item: Any?, proposedChildIndex index: Int) -> NSDragOperation {
+        let op = validate(outlineView, info, item, index)
+        if debugDrag {
+            let p = outlineView.convert(info.draggingLocation, from: nil)
+            print("drag: \(String(format: "%.2f", Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 1000))) at \(Int(p.x)),\(Int(p.y)) proposed \((item as? SidebarItem)?.key ?? "root")#\(index) dragged \(draggedItem(info)?.key ?? "nil") filtered \(filtered != nil) -> \(op.rawValue)")
+            fflush(stdout)
+        }
+        return op
+    }
+
+    private func validate(_ outlineView: NSOutlineView, _ info: NSDraggingInfo, _ item: Any?, _ index: Int) -> NSDragOperation {
         let target = item as? SidebarItem
         guard let dragged = draggedItem(info) else {
             // Files: only onto a session row. Anywhere else is refused, so the cursor says so before the drop.
@@ -745,54 +757,68 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             let row = outlineView.row(forItem: item)
             return row >= 0 && pointerY > outlineView.rect(ofRow: row).midY
         }
-        /// The row under the pointer while it's over the middle of that row (or of one of its tabs), which
-        /// means "merge into it"; nearer a row's top or bottom edge means "put it here" as before.
-        func mergeTarget() -> SidebarItem? {
+        /// The row a drop goes into, and where among its tabs: over the middle of a row's own line, after its
+        /// tabs (nil); over one of its tabs, before or after that tab by the pointer. Nearer a row's top or bottom
+        /// edge, or at the bottom of its last tab, it's nil, which means "put it beside the row" as before.
+        func intoTarget() -> (row: SidebarItem, index: Int?)? {
             let p = outlineView.convert(info.draggingLocation, from: nil)
             let r = outlineView.row(at: p)
             guard r >= 0, let under = outlineView.item(atRow: r) as? SidebarItem else { return nil }
             let rect = outlineView.rect(ofRow: r)
-            guard abs(p.y - rect.midY) < rect.height * 0.3 else { return nil }
+            let middle = abs(p.y - rect.midY) < rect.height * 0.3
             switch under.kind {
-            case .row: return under
-            case .tab: return under.parent
+            case .row: return middle ? (under, nil) : nil
+            case .tab:
+                guard let row = under.parent else { return nil }
+                // A filtered row may not show every tab, so only "after its tabs" is taken.
+                if limited { return middle ? (row, nil) : nil }
+                guard let i = row.children.firstIndex(where: { $0 === under }) else { return nil }
+                let lower = p.y > rect.midY
+                if lower, i == row.children.count - 1, p.y > rect.maxY - rect.height * 0.25 { return nil }
+                return (row, i + (lower ? 1 : 0))
             case .section, .heading: return nil
             }
         }
-        switch dragged.kind {
-        case .row:
-            if let m = mergeTarget(), m !== dragged {
-                outlineView.setDropItem(m, dropChildIndex: NSOutlineViewDropOnItemIndex)
-                return .move
-            }
-            if limited { return [] }
-            // Over a multi-tab row or one of its tabs (the outline proposes dropping inside it): drop beside
-            // that row in its own list instead, above or below by the pointer.
+        /// Where a row (or a tab coming out of its row) goes among the rows: beside the row under the pointer,
+        /// above or below by the pointer, or at the outline's own spot between rows or in a section. False when
+        /// there's nowhere to put it.
+        func placeRow() -> Bool {
+            // Over a multi-tab row or one of its tabs (the outline proposes dropping inside it): beside that row
+            // in its own list instead.
             var over = target
             if let t = over, case .tab = t.kind { over = t.parent }
             if let t = over, case .row = t.kind {
                 let list = t.parent?.children ?? roots
-                guard let i = list.firstIndex(where: { $0 === t }) else { return [] }
+                guard let i = list.firstIndex(where: { $0 === t }) else { return false }
                 outlineView.setDropItem(t.parent, dropChildIndex: i + (below(t) ? 1 : 0))
-                return .move
+                return true
             }
             if over == nil {
-                if index == NSOutlineViewDropOnItemIndex { return [] }
-                if index <= ungroupedCount { return .move }
+                if index == NSOutlineViewDropOnItemIndex { return false }
+                if index <= ungroupedCount { return true }
                 // Between sections: land at the end of the section above.
                 let sectionIdx = index - ungroupedCount - 1
                 if sectionIdx >= 0, sectionIdx < roots.count - ungroupedCount {
                     let sec = roots[ungroupedCount + sectionIdx]
                     outlineView.setDropItem(sec, dropChildIndex: sec.children.count)
-                    return .move
+                    return true
                 }
-                return []
+                return false
             }
             if let t = over, case .section = t.kind {
                 if index == NSOutlineViewDropOnItemIndex { outlineView.setDropItem(t, dropChildIndex: t.children.count) }
+                return true
+            }
+            return false
+        }
+        switch dragged.kind {
+        case .row:
+            if let into = intoTarget(), into.row !== dragged {
+                outlineView.setDropItem(into.row, dropChildIndex: into.index ?? NSOutlineViewDropOnItemIndex)
                 return .move
             }
-            return []
+            if limited { return [] }
+            return placeRow() ? .move : []
         case .section:
             if limited { return [] }
             // Sections only go between top-level items, but the outline proposes drops inside whatever is
@@ -809,15 +835,24 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             return .move
         case .tab:
             guard let row = dragged.parent else { return [] }
-            if let m = mergeTarget(), m !== row {
-                outlineView.setDropItem(m, dropChildIndex: NSOutlineViewDropOnItemIndex)
-                return .move
+            if let into = intoTarget() {
+                if into.row !== row {
+                    outlineView.setDropItem(into.row, dropChildIndex: into.index ?? NSOutlineViewDropOnItemIndex)
+                    return .move
+                }
+                // Over one of its own row's tabs: a reorder, before or after that tab.
+                if let i = into.index {
+                    outlineView.setDropItem(row, dropChildIndex: i)
+                    return .move
+                }
             }
             if let target, target === row {
                 if limited { return [] }
                 return index == NSOutlineViewDropOnItemIndex ? [] : .move
             }
-            // Out of its row: it becomes a row of its own, which goes right after the old one, so show the gap there.
+            // Out of its row it becomes a row of its own, where it's let go.
+            if !limited, placeRow() { return .move }
+            // With a filter, it goes right after the old row, so show the gap there.
             let list = row.parent?.children ?? roots
             guard let i = list.firstIndex(where: { $0 === row }) else { return [] }
             outlineView.setDropItem(row.parent, dropChildIndex: i + 1)
@@ -834,21 +869,34 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             app.dropOnSidebar(session: s, pasteboard: info.draggingPasteboard)
             return true
         }
-        // Merges and moves out of a row go to the daemon, which owns the tmux side of them too.
-        if index == NSOutlineViewDropOnItemIndex, let target, case .row(let into) = target.kind {
+        // Merges and moves into or out of a row go to the daemon, which owns the tmux side of them too. (A tab
+        // dropped among its own row's tabs is a reorder, below.)
+        if let target, case .row(let into) = target.kind, index == NSOutlineViewDropOnItemIndex || target !== dragged.parent {
+            let at = index == NSOutlineViewDropOnItemIndex ? nil : index
             switch dragged.kind {
-            case .row(let from): DispatchQueue.main.async { [app] in MainActor.assumeIsolated { app.mergeRow(from, into: into) } }
-            case .tab(let s): DispatchQueue.main.async { [app] in MainActor.assumeIsolated { app.moveTab(s, into: into) } }
+            case .row(let from): DispatchQueue.main.async { [app] in MainActor.assumeIsolated { app.mergeRow(from, into: into, at: at) } }
+            case .tab(let s): DispatchQueue.main.async { [app] in MainActor.assumeIsolated { app.moveTab(s, into: into, at: at) } }
             case .section, .heading: return false
             }
             return true
         }
-        if case .tab(let s) = dragged.kind, target !== dragged.parent {
-            DispatchQueue.main.async { [app] in MainActor.assumeIsolated { app.moveTabToOwnRow(s) } }
-            return true
-        }
         var sb = app.daemon.state.sidebar
         let ungroupedCount = sb.ungrouped.count
+        if case .tab(let s) = dragged.kind, target !== dragged.parent {
+            // A row of its own where it was let go: among the ungrouped rows or in a section. With a filter, the
+            // outline's positions aren't the sidebar's, so it goes right after its old row.
+            var at: Int?
+            var section: String?
+            if filtered == nil, index != NSOutlineViewDropOnItemIndex {
+                if let target, case .section(let sid) = target.kind {
+                    (at, section) = (index, sid)
+                } else if target == nil {
+                    at = min(index, ungroupedCount)
+                }
+            }
+            DispatchQueue.main.async { [app] in MainActor.assumeIsolated { app.moveTab(s, into: nil, at: at, section: section) } }
+            return true
+        }
         var changed = false
         switch dragged.kind {
         case .row(let id):
@@ -880,8 +928,9 @@ final class SidebarOutlineView: NSOutlineView {
     var dragCapture: ((NSDraggingSession, [NSDraggingItem], NSEvent) -> Void)?
 
     /// Outside the app's windows a let-go tears the item off, so the drag image shouldn't slide back there.
+    /// (No super: NSTableView doesn't implement this optional NSDraggingSource method, and the call would
+    /// throw on the drag's first move, which AppKit swallows by ending the drag.)
     override func draggingSession(_ session: NSDraggingSession, movedTo screenPoint: NSPoint) {
-        super.draggingSession(session, movedTo: screenPoint)
         if let app = controller?.app { session.animatesToStartingPositionsOnCancelOrFail = app.isOverBosunWindow(screenPoint) }
     }
 

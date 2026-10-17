@@ -86,6 +86,12 @@ extension FocusTest {
         await waitUntil(3) { ws.layout.count == 3 }
         let webPanes = ws.layout.panes
         let webViews = views(of: webPanes)
+        // The let-go point has to be on screen beside the window, or the new window is pulled back over the first.
+        // The test modes start from your saved frame, which may fill the screen: make room (it's never saved).
+        if let screen = w.screen?.visibleFrame, w.frame.maxX + 400 > screen.maxX {
+            w.setFrame(NSRect(x: screen.minX, y: w.frame.minY, width: min(w.frame.width, screen.width / 2), height: w.frame.height), display: true)
+            await sleep(200)
+        }
         let outside = NSPoint(x: w.frame.maxX + 240, y: w.frame.midY)
         if let from = rowPoint(rowItem(f.web), 0.5) {
             let o = app.sidebar.outline

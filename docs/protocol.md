@@ -196,15 +196,15 @@ Replaces the sidebar model after a drag and drop reorder, a move between section
 {"t":"cmd","id":18,"op":"move_tab","session":"bosun-api-2-9f8e7d6c","container_id":"con-1","index":0}
 ```
 
-Moves one tab into another row, at `index` among that row's tabs (appended when absent). With `"container_id": null` the tab moves out into a new row of its own, placed right after its old row. A row left with no tabs disappears, and the target row keeps its active tab. The session keeps running: only the grouping changes. The change is saved to `config.toml` and to each moved session's `@bosun_container_id`, so it survives a tmux server restart, and a TUI on the same config picks it up on its next reload. Moving a tab into the row it's already in is acked and changes nothing; an unknown session or row is an error.
+Moves one tab into another row, at `index` among that row's tabs (appended when absent). With `"container_id": null` the tab moves out into a new row of its own: at `index` among the rows of section `section` (or among the ungrouped rows when `section` is absent), or right after its old row when `index` is absent. An unknown section is an error. A row left with no tabs disappears, and the target row keeps its active tab. The session keeps running: only the grouping changes. The change is saved to `config.toml` and to each moved session's `@bosun_container_id`, so it survives a tmux server restart, and a TUI on the same config picks it up on its next reload. Moving a tab into the row it's already in is acked and changes nothing; an unknown session or row is an error.
 
 #### `merge_rows`
 
 ```json
-{"t":"cmd","id":19,"op":"merge_rows","from":"con-2","into":"con-1"}
+{"t":"cmd","id":19,"op":"merge_rows","from":"con-2","into":"con-1","index":1}
 ```
 
-Moves every tab of row `from` to the end of row `into`, in order, as one sidebar change (one `sidebar` delta). Row `from` disappears.
+Moves every tab of row `from` into row `into`, in order, at `index` among that row's tabs (appended when absent), as one sidebar change (one `sidebar` delta). Row `from` disappears, and the target row keeps its active tab.
 
 #### `insert_section`
 

@@ -943,21 +943,27 @@ impl Daemon {
                 session,
                 container_id,
                 index,
+                section,
             } => {
+                let sidebar = &mut self.app.sidebar;
+                let r = match (container_id.as_deref(), index) {
+                    (None, Some(i)) => sidebar.move_tab_to_new_row(&session, section.as_deref(), i),
+                    (container, index) => sidebar.move_tab(&session, container, index),
+                };
+                self.after_move(client, id, r.map(|row| row.map(|r| vec![r])));
+            }
+            CmdOp::MergeRows { from, into, index } => {
                 let r = self
                     .app
                     .sidebar
-                    .move_tab(&session, container_id.as_deref(), index);
-                self.after_move(client, id, r.map(|row| row.map(|r| vec![r])));
-            }
-            CmdOp::MergeRows { from, into } => {
-                let r = self.app.sidebar.merge_rows(&from, &into).map(|moved| {
-                    if moved.is_empty() {
-                        None
-                    } else {
-                        Some(vec![into.clone()])
-                    }
-                });
+                    .merge_rows(&from, &into, index)
+                    .map(|moved| {
+                        if moved.is_empty() {
+                            None
+                        } else {
+                            Some(vec![into.clone()])
+                        }
+                    });
                 self.after_move(client, id, r);
             }
             CmdOp::InsertSection { name } => {

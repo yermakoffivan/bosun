@@ -442,6 +442,12 @@ extension FocusTest {
         await showRow(review1Session ?? api)
         let shownBefore = ws.activeSession
 
+        // The test drags below never reach the window server, so they never get the moved-to callback a real drag
+        // makes on every move. Make it here: passing it on to NSTableView (which has none) threw, and AppKit ended
+        // every real drag on its first move.
+        app.sidebar.outline.draggingSession(NSDraggingSession(), movedTo: .zero)
+        r.check("sidebar: the drag source's moved-to callback runs without throwing", true)
+
         // a) A row onto the lower edge of the next row: reordered among the ungrouped rows.
         if let from = rowPoint(rowItem(api), 0.5), let to = rowPoint(rowItem(docs), 0.92) {
             let res = await outlineDrag(from: from, to: to)
@@ -474,14 +480,27 @@ extension FocusTest {
             let tabs = app.daemon.state.sidebar.container(holding: web)?.tabs.map { app.displayName($0.session) } ?? []
             r.check("sidebar: a tab dragged above its sibling reorders the row's tabs", res.accepted && Array(tabs.prefix(3)) == ["web tests", "web", "web shell"], "\(tabs) op \(res.op.rawValue)")
         }
-        // e) A row dropped on the middle of one of a multi-tab row's tabs merges into that row.
+        // e) A row dropped on the upper half of one of a multi-tab row's tabs merges into that row, just before that tab.
         if let shell = session("shell"), let webTab = app.sidebar.itemFor(session: web),
-           let from = rowPoint(rowItem(shell), 0.5), let to = rowPoint(webTab, 0.5, x: 80) {
+           let from = rowPoint(rowItem(shell), 0.5), let to = rowPoint(webTab, 0.3, x: 80) {
             let res = await outlineDrag(from: from, to: to)
             await waitUntil(2) { app.daemon.state.sidebar.container(holding: web)?.tabs.contains { $0.session == shell } == true }
             let tabs = app.daemon.state.sidebar.container(holding: web)?.tabs.map { app.displayName($0.session) } ?? []
-            r.check("sidebar: a row dropped on another row's tab merges into that row", res.accepted && tabs.contains("shell"),
-                    "\(tabs) op \(res.op.rawValue)")
+            // (Every tab of the dropped row goes in, in order, so look at where "shell" and "web" ended up.)
+            let shellAt = tabs.firstIndex(of: "shell"), webAt = tabs.firstIndex(of: "web")
+            r.check("sidebar: a row dropped on another row's tab merges into that row, before that tab",
+                    res.accepted && tabs.first == "web tests" && shellAt == 1 && webAt.map { $0 > 1 } == true, "\(tabs) op \(res.op.rawValue)")
+        }
+        // h) A tab dragged out of its row to the top edge of a row in a section: a row of its own in that section,
+        // just above that row (not right after its old row).
+        if let webShell = session("web shell"), let tabItem = app.sidebar.itemFor(session: webShell),
+           let from = rowPoint(tabItem, 0.5, x: 80), let to = rowPoint(rowItem(parser), 0.1) {
+            let res = await outlineDrag(from: from, to: to)
+            await waitUntil(2) { app.daemon.state.sidebar.container(holding: webShell)?.tabs.count == 1 }
+            let work = app.daemon.state.sidebar.sections.first { $0.name == "Work" }.map { names($0.members) } ?? []
+            let at = work.firstIndex(of: "web shell"), parserAt = work.firstIndex(of: "parser")
+            r.check("sidebar: a tab dragged out to the edge of a row in a section becomes a row there",
+                    res.accepted && at != nil && parserAt != nil && at! + 1 == parserAt!, "Work: \(work) op \(res.op.rawValue)")
         }
         // f) Finder-style rename tells a click from a drag: dragging the selected row's name never renames.
         await showRow(docs)

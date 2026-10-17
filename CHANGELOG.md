@@ -4,6 +4,17 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.3] — 2026-10-17
+
+### Added
+
+- **Drops at a position inside a row in Bosun for Mac.** A row or a tab dragged over another row's tabs lands where you let go: the top half of a tab puts it before that tab and the bottom half after, with the line showing where. The middle of a row's own line still adds it after the row's tabs, and the bottom of a row's last tab still means "after this row". A tab dragged out of its row now goes wherever you drop it (between rows, among the ungrouped rows, or into a section) instead of always right after its old row, and dropping it on its own row's tabs reorders it. With a filter on, a dragged-out tab still goes right after its old row, since the filtered list doesn't show real positions.
+- **`merge_rows` and `move_tab` take a position in `bosun serve`.** `merge_rows` has an optional `index` among the target row's tabs, and `move_tab` with `"container_id": null` takes an optional `index` and `section` to place the new row. Without them both work as before. See `docs/protocol.md`.
+
+### Fixed
+
+- **Dragging in the Bosun for Mac sidebar.** Since 2.2.1 a row or tab picked up in the sidebar stopped following the pointer: the drop line showed once and the drag then ended on its own. The new-window tear-off passed AppKit's drag-moved callback on to NSTableView, which doesn't have one, and the error ended every drag on its first move.
+
 ## [2.2.2] — 2026-10-17
 
 ### Changed

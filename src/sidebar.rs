@@ -183,6 +183,8 @@ pub enum MoveError {
     UnknownSession(String),
     /// No row has this container id.
     UnknownContainer(String),
+    /// No section has this id.
+    UnknownSection(String),
 }
 
 impl std::fmt::Display for MoveError {
@@ -190,6 +192,7 @@ impl std::fmt::Display for MoveError {
         match self {
             MoveError::UnknownSession(s) => write!(f, "no sidebar row has the session {s}"),
             MoveError::UnknownContainer(c) => write!(f, "no sidebar row with id {c}"),
+            MoveError::UnknownSection(s) => write!(f, "no section with id {s}"),
         }
     }
 }
@@ -814,11 +817,53 @@ impl SidebarModel {
         }
     }
 
-    /// Move every tab of row `from` into row `into`, in order, after
-    /// its existing tabs, and remove `from`. `into`'s active tab stays
-    /// as it was. Returns the tabs that moved (empty when `from` and
-    /// `into` are the same row).
-    pub fn merge_rows(&mut self, from: &str, into: &str) -> Result<Vec<String>, MoveError> {
+    /// Move the tab `internal` out of its row into a new row of its
+    /// own at `index` (clamped) in section `section`, or among the
+    /// ungrouped rows with `None`. Returns the new row's id, or `None`
+    /// when nothing changed: the tab is already a row of its own.
+    pub fn move_tab_to_new_row(
+        &mut self,
+        internal: &str,
+        section: Option<&str>,
+        index: usize,
+    ) -> Result<Option<String>, MoveError> {
+        let from = self
+            .slot_of_tab(internal)
+            .ok_or_else(|| MoveError::UnknownSession(internal.to_string()))?;
+        let bucket = match section {
+            None => None,
+            Some(sid) => Some(
+                self.sections
+                    .iter()
+                    .position(|s| s.id == sid)
+                    .ok_or_else(|| MoveError::UnknownSection(sid.to_string()))?,
+            ),
+        };
+        if self.container_at_mut(from).members.len() == 1 {
+            return Ok(None);
+        }
+        // The old row keeps a tab, so it stays and `index` still
+        // counts the rows the client saw.
+        self.take_tab(from, internal);
+        let row = Container::single(internal.to_string(), internal.to_string());
+        let id = row.id.clone();
+        let list = self.bucket_mut(bucket);
+        let at = index.min(list.len());
+        list.insert(at, row);
+        Ok(Some(id))
+    }
+
+    /// Move every tab of row `from` into row `into`, in order, at
+    /// `index` among its tabs (clamped; after its existing tabs when
+    /// `None`), and remove `from`. `into`'s active tab stays as it
+    /// was. Returns the tabs that moved (empty when `from` and `into`
+    /// are the same row).
+    pub fn merge_rows(
+        &mut self,
+        from: &str,
+        into: &str,
+        index: Option<usize>,
+    ) -> Result<Vec<String>, MoveError> {
         let src = self
             .container_slot(from)
             .ok_or_else(|| MoveError::UnknownContainer(from.to_string()))?;
@@ -830,9 +875,11 @@ impl SidebarModel {
         }
         let moved = std::mem::take(&mut self.container_at_mut(src).members);
         let t = self.container_at_mut(dst);
+        let mut at = index.unwrap_or(t.members.len()).min(t.members.len());
         for m in &moved {
             if !t.contains_internal(m) {
-                t.members.push(m.clone());
+                t.members.insert(at, m.clone());
+                at += 1;
             }
         }
         self.drop_if_empty(from);
@@ -1215,6 +1262,61 @@ members = ["bosun-gamma"]
     }
 
     #[test]
+    fn move_tab_to_new_row_places_it_where_asked() {
+        let mut m = SidebarModel {
+            ungrouped: vec![row(&["a1", "a2"], 1), con("b")],
+            sections: vec![Section {
+                members: vec![con("w1"), con("w2")],
+                ..sec("g1", "Work", &[])
+            }],
+        };
+        let id = m.move_tab_to_new_row("a2", None, 0).unwrap().unwrap();
+        assert_eq!(m.ungrouped[0].id, id);
+        assert_eq!(tabs(&m.ungrouped[0]), vec!["a2"]);
+        assert_eq!(tabs(&m.ungrouped[1]), vec!["a1"]);
+        assert_eq!(
+            m.ungrouped[1].active, "a1",
+            "the old row's next tab takes over"
+        );
+
+        let mut m = SidebarModel {
+            ungrouped: vec![row(&["a1", "a2"], 0)],
+            sections: vec![Section {
+                members: vec![con("w1"), con("w2")],
+                ..sec("g1", "Work", &[])
+            }],
+        };
+        let sid = m.sections[0].id.clone();
+        m.move_tab_to_new_row("a2", Some(&sid), 1).unwrap();
+        let names: Vec<_> = m.sections[0].members.iter().map(|c| tabs(c)[0]).collect();
+        assert_eq!(names, vec!["w1", "a2", "w2"]);
+        assert_eq!(
+            m.move_tab_to_new_row("a1", Some(&sid), 9),
+            Ok(None),
+            "a single tab is already its own row"
+        );
+        assert_eq!(m.ungrouped.len(), 1);
+    }
+
+    #[test]
+    fn move_tab_to_new_row_errors() {
+        let mut m = SidebarModel {
+            ungrouped: vec![row(&["a1", "a2"], 0)],
+            sections: vec![],
+        };
+        let before = m.clone();
+        assert_eq!(
+            m.move_tab_to_new_row("nope", None, 0),
+            Err(MoveError::UnknownSession("nope".into()))
+        );
+        assert_eq!(
+            m.move_tab_to_new_row("a2", Some("sec-x"), 0),
+            Err(MoveError::UnknownSection("sec-x".into()))
+        );
+        assert_eq!(m, before);
+    }
+
+    #[test]
     fn move_tab_no_ops_and_errors() {
         let mut m = SidebarModel {
             ungrouped: vec![row(&["a1", "a2"], 0), con("b")],
@@ -1248,7 +1350,7 @@ members = ["bosun-gamma"]
         let from = m.ungrouped[0].id.clone();
         let into = m.sections[0].members[0].id.clone();
         assert_eq!(
-            m.merge_rows(&from, &into),
+            m.merge_rows(&from, &into, None),
             Ok(vec!["k1".to_string(), "k1b".to_string()])
         );
         assert!(m.ungrouped.is_empty());
@@ -1259,6 +1361,28 @@ members = ["bosun-gamma"]
     }
 
     #[test]
+    fn merge_rows_honours_and_clamps_the_index() {
+        let mut m = SidebarModel {
+            ungrouped: vec![row(&["k1", "k1b"], 0), row(&["k2", "k2b"], 1)],
+            sections: vec![],
+        };
+        let from = m.ungrouped[0].id.clone();
+        let into = m.ungrouped[1].id.clone();
+        m.merge_rows(&from, &into, Some(1)).unwrap();
+        assert_eq!(tabs(&m.ungrouped[0]), vec!["k2", "k1", "k1b", "k2b"]);
+        assert_eq!(m.ungrouped[0].active, "k2b");
+
+        let mut m = SidebarModel {
+            ungrouped: vec![con("a"), con("b")],
+            sections: vec![],
+        };
+        let a = m.ungrouped[0].id.clone();
+        let b = m.ungrouped[1].id.clone();
+        m.merge_rows(&b, &a, Some(9)).unwrap();
+        assert_eq!(tabs(&m.ungrouped[0]), vec!["a", "b"]);
+    }
+
+    #[test]
     fn merge_rows_into_itself_or_unknown_rows() {
         let mut m = SidebarModel {
             ungrouped: vec![con("a"), con("b")],
@@ -1266,13 +1390,13 @@ members = ["bosun-gamma"]
         };
         let a = m.ungrouped[0].id.clone();
         let before = m.clone();
-        assert_eq!(m.merge_rows(&a, &a), Ok(vec![]));
+        assert_eq!(m.merge_rows(&a, &a, None), Ok(vec![]));
         assert_eq!(
-            m.merge_rows("con-x", &a),
+            m.merge_rows("con-x", &a, None),
             Err(MoveError::UnknownContainer("con-x".into()))
         );
         assert_eq!(
-            m.merge_rows(&a, "con-y"),
+            m.merge_rows(&a, "con-y", None),
             Err(MoveError::UnknownContainer("con-y".into()))
         );
         assert_eq!(m, before);
@@ -1289,7 +1413,7 @@ members = ["bosun-gamma"]
         };
         let a = m.ungrouped[0].id.clone();
         let b = m.ungrouped[1].id.clone();
-        m.merge_rows(&b, &a).unwrap();
+        m.merge_rows(&b, &a, None).unwrap();
         m.reconcile(&[("a".into(), None), ("b".into(), Some(b.clone()))]);
         assert_eq!(m.ungrouped.len(), 1);
         assert_eq!(tabs(&m.ungrouped[0]), vec!["a", "b"]);
