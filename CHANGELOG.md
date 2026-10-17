@@ -4,10 +4,11 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.2.1] — 2026-10-16
+## [2.2.1] — 2026-10-17
 
 ### Added
 
+- **Bosun for Mac.** A native app (AppKit and libghostty) for the same sessions as the TUI, running over `bosun serve`. Each sidebar row is a workspace whose tabs open as split panes of real terminals, and the keyboard always stays in the active terminal, so typing or dropping a file never lands in the sidebar by mistake. Cmd+Return zooms a pane; Cmd+N opens another window, and a row dragged out of the sidebar (or a pane dragged out by its header) opens in a window of its own. Cmd+K jumps to any session, Cmd+F filters the sidebar, and notifications and the Dock badge tell you when an agent is waiting or done. It's signed and notarized, for Apple silicon on macOS 15 or later: `brew install --cask yetidevworks/bosun/bosun-app` (it installs the `bosun` formula too). See `macos/Bosun/README.md`.
 - **`get_theme` in `bosun serve`.** Reads any theme's palette without changing anything, so the Mac app's Light and Dark theme popups preview each theme as you move through them. See `docs/protocol.md`.
 - **A light and a dark theme for Bosun for Mac.** Two new `config.toml` keys, `theme_light` and `theme_dark`, name the themes the Mac app shows while macOS is in Light and Dark mode, switching as the appearance changes. Either can be left out to use `theme`. The TUI can't tell the macOS appearance, so it keeps using `theme` as before, and it now keeps both keys when it saves `config.toml` instead of dropping them.
 - **`bosun serve` sends the light/dark pair.** `theme_light` and `theme_dark` are settings that `apply_setting` can change (`null` unsets one), and their palettes come in the snapshot and in a new `theme_pair` delta, so a client can switch the moment the appearance changes. Setting them never changes `theme`. See `docs/protocol.md`.
