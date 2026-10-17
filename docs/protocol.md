@@ -366,6 +366,17 @@ The settings panel as data. Keys: `theme`, `theme_light` and `theme_dark` (a the
 
 Every color slot of the active theme as `#rrggbb`: backgrounds (`bg` the deepest, then `panel`, `panel_alt`, `selection_bg` for the selected row), text (`text`, `text_muted`), `accent`, `shadow`, `dim_fg` (text dimmed behind a modal) and one color per status. `status_done` is already resolved: themes that don't set it use `accent`, as the TUI does.
 
+A theme can also carry a `terminal` object, the theme's `[terminal]` table, with the colours a graphical client paints its terminals with:
+
+```json
+"terminal":{"ghostty":"Nord","background":"#2e3440","foreground":"#d8dee9","cursor":"#eceff4",
+ "selection_bg":"#eceff4","selection_fg":"#4c566a",
+ "palette":["#3b4252","#bf616a","#a3be8c","#ebcb8b","#81a1c1","#b48ead","#88c0d0","#e5e9f0",
+            "#596377","#bf616a","#a3be8c","#ebcb8b","#81a1c1","#b48ead","#8fbcbb","#eceff4"]}
+```
+
+`palette` always has 16 entries: ANSI 0-7, then the bright 8-15. `ghostty` is the name of the Ghostty theme the colours were taken from, for reference; it is left out when there isn't one, and a client uses the colours, not the name. The key is optional and additive: a daemon that predates it never sends it, a theme without a `[terminal]` table leaves it out, and a client treats a missing `terminal` as "no table" (Bosun for Mac then falls back to its own name map and a generated palette). It needs no protocol version bump. A `[terminal]` table in a theme file that isn't exactly 16 valid colours is dropped by the daemon (with a warning in its log) rather than sent. The TUI ignores the table.
+
 #### Light and dark themes
 
 ```json

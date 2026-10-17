@@ -26,11 +26,7 @@ architecture, designed around a few rules that keep it simple and robust:
   `set-option -t <session>`, never globally, so non-bosun sessions on the
   same server are untouched.
 - **Opencode aesthetic.** Borderless, subtly shaded panels, bold accents,
-  modal dialogs with left accent bars and drop shadow. Fifteen built-in
-  themes — ten dark (opencode, tokyonight, dracula, catppuccin-mocha,
-  one-dark-pro, ayu-mirage, nord, gruvbox-dark, rose-pine, github-dark)
-  and five light (github-light, one-light, solarized-light, ayu-light,
-  quiet-light) — switched live with `T`.
+  modal dialogs with left accent bars and drop shadow. 28 built-in themes (17 dark and 11 light, listed under [Themes](#themes)), switched live with `T`.
 
 ## What's new in 2.0
 
@@ -134,8 +130,7 @@ you can click into and drive without leaving bosun.
   affected row shows a `⟳` marker and a `killing…` / `restarting…`
   label; a create (which has no row yet) shows `⟳ creating <name>…` in
   the status bar. Clears the moment the operation lands
-- Fifteen built-in themes (10 dark + 5 light) plus user themes from
-  `$XDG_CONFIG_HOME/bosun/themes/*.toml`; live preview picker on `T`
+- 28 built-in themes (17 dark + 11 light) plus user themes from `$XDG_CONFIG_HOME/bosun/themes/*.toml`; live preview picker on `T`
 - Two-way mouse navigation: click rows to jump, click the embed to focus,
   drag the divider to resize
 - Config file at `$XDG_CONFIG_HOME/bosun/config.toml` with `theme`,
@@ -492,14 +487,12 @@ events itself. The big interactions:
 
 ## Themes
 
-Fifteen themes ship built in (ten dark, five light). Press `T` on the
-main list to open the picker — arrow keys live-preview the whole UI
-including the modal itself, `Enter` applies and writes the choice to
-`config.toml`, `Esc` reverts.
+28 themes ship built in (17 dark, 11 light). Press `T` on the main list to open the picker — arrow keys live-preview the whole UI including the modal itself, `Enter` applies and writes the choice to `config.toml`, `Esc` reverts. The list scrolls on a short terminal.
 
 Dark:
 
 - `opencode` (default)
+- `bosun` (the app icon's navy, cream and mint)
 - `tokyonight`
 - `dracula`
 - `catppuccin-mocha`
@@ -509,6 +502,12 @@ Dark:
 - `gruvbox-dark`
 - `rose-pine`
 - `github-dark`
+- `kanagawa-wave`
+- `everforest-dark`
+- `flexoki-dark`
+- `monokai-pro`
+- `oxocarbon`
+- `poimandres`
 
 Light:
 
@@ -517,6 +516,12 @@ Light:
 - `solarized-light`
 - `ayu-light`
 - `quiet-light`
+- `kanagawa-lotus`
+- `everforest-light`
+- `flexoki-light`
+- `catppuccin-latte`
+- `rose-pine-dawn`
+- `tokyonight-day`
 
 ### Custom themes
 
@@ -542,6 +547,21 @@ status_running = "#62d98c"
 status_waiting = "#f4c169"
 status_idle    = "#7c8495"
 status_error   = "#ff5d6b"
+```
+
+A theme file can also carry an optional `[terminal]` table. The TUI ignores it; Bosun for Mac paints its terminals with it (see `macos/Bosun/README.md`). It has `background`, `foreground`, `cursor`, `selection_bg` and `selection_fg` as hex colors, a `palette` of exactly 16 hex colors (ANSI 0-7, then bright 8-15) and an optional `ghostty` name for reference. A table that doesn't parse is ignored, and the theme still loads without it.
+
+```toml
+[terminal]
+background     = "#0b0d12"
+foreground     = "#e6e9ef"
+cursor         = "#7c5cff"
+selection_bg   = "#1e2433"
+selection_fg   = "#e6e9ef"
+palette        = [  # 0-7 normal, 8-15 bright
+  "#25272d", "#ff5d6b", "#62d98c", "#f4c169", "#6ec8ff", "#b692b5", "#68d0c6", "#e6e9ef",
+  "#7c8495", "#ff7a86", "#7ee0a1", "#f6cc84", "#88d2ff", "#c4a6c2", "#83d9d0", "#ebedf2",
+]
 ```
 
 See `themes/opencode.toml` in the repo for the authoritative reference.
@@ -762,7 +782,7 @@ src/
   util/
     hysteresis.rs            status transition smoother
     collision.rs             session-name collision helper
-themes/                      15 built-in theme .toml files (embedded via include_str!)
+themes/                      28 built-in theme .toml files (embedded via include_str!)
 tests/
   snapshot_session_list.rs
   integration_*.rs           real-tmux integration tests (feature = tmux-it)
