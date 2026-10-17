@@ -164,6 +164,16 @@ sudo apt install tmux    # Debian/Ubuntu
 brew install yetidevworks/bosun/bosun
 ```
 
+### Bosun for Mac
+
+A native Mac app (Apple silicon, macOS 15 or later) runs over the same sessions as the TUI, with real terminals for every tab. It's signed and notarized, and its cask installs the `bosun` formula with it:
+
+```bash
+brew install --cask yetidevworks/bosun/bosun-app
+```
+
+See [`macos/Bosun/README.md`](macos/Bosun/README.md) for what it does.
+
 ### From crates.io
 
 ```bash

@@ -36,6 +36,8 @@ BOSUN_BUILD_DIR=build-mine ./build.sh   # the same into build-mine/, leaving bui
 
 It needs the Developer ID identity in the keychain and `NOTARY_PROFILE` naming a notarytool keychain profile (without it the build is signed but not notarized, and Gatekeeper refuses it on other Macs). With a `skulkworks/den` checkout beside the repo the DMG gets Den's laid-out window; without one it's a plain DMG. `./release.sh verify` checks a build: the signature, the hardened runtime, both tickets and Gatekeeper's verdict. `./release.sh package` redoes only the notarizing and the DMG for an app already built.
 
+The app ships under YetiDevWorks with the CLI: the same version, the same GitHub release and the same Homebrew tap. Notarizing needs the keychain, so this part runs here rather than in CI. After the tag's release run has finished, `./release.sh && ./release.sh publish` uploads the DMG to that release as `Bosun-<version>.dmg` and writes the `bosun-app` cask into `yetidevworks/homebrew-bosun` (it depends on the `bosun` formula, Apple silicon and macOS 15). `publish` refuses a DMG that isn't notarized or whose version doesn't match `Cargo.toml`, and a tag with no release yet.
+
 To run the test modes against the signed app, point `dev.sh` at it: `BOSUN_BUILD_DIR=build-dist/den/build ./dev.sh run --focustest`.
 
 ## Running
