@@ -475,7 +475,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             if let ed = window.firstResponder as? NSTextView, let field = ed.delegate as? NSTextField,
                field.bounds.contains(field.convert(e.locationInWindow, from: nil)) { return }
             window.makeFirstResponder(nil)
-        case .sheet:
+        case .sheet, .filter:
             break
         }
     }

@@ -4,11 +4,14 @@ import Foundation
 /// The keyboard-ownership rules from the design (section 7b), with no views involved.
 ///
 /// The active tile's terminal owns the keyboard while the window is key. Only an open
-/// "exception" (in-place rename, the palette, a sheet) borrows it, and when that closes
+/// "exception" (in-place rename, the palette, a sheet, the sidebar filter's field) borrows it, and when that closes
 /// the keyboard goes straight back to the active terminal.
 public struct FocusModel: Equatable, Sendable {
     public enum Exception: String, Equatable, Sendable {
         case rename, palette, sheet
+        /// The sidebar filter's field while it has the ring. What was typed can stay applied after the
+        /// keyboard has gone back (a chip with no ring), but only the field with its ring holds the keyboard.
+        case filter
     }
 
     public enum ClickResult: Equatable, Sendable {

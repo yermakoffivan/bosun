@@ -119,6 +119,13 @@ public struct RGB: Equatable, Sendable {
 
     public var isDark: Bool { luminance < 0.25 }
 
+    /// Ink for text or a glyph drawn on this colour, by the TUI's `Theme::on` rule: near-black over
+    /// light colours, near-white over dark ones.
+    public var ink: RGB {
+        let l = 0.299 * r * 255 + 0.587 * g * 255 + 0.114 * b * 255
+        return l > 140 ? RGB(hex: "#101218")! : RGB(hex: "#f2f3f5")!
+    }
+
     public func mixed(with o: RGB, _ t: Double) -> RGB {
         RGB(r: r + (o.r - r) * t, g: g + (o.g - g) * t, b: b + (o.b - b) * t)
     }
