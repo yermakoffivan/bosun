@@ -1,3 +1,4 @@
+import AppKit
 import BosunCore
 import SwiftUI
 
@@ -18,6 +19,10 @@ final class ThemePairModel: ObservableObject {
     @Published private(set) var supported = false
     /// Sends the change: the config key and a theme name, or nil for "Same as Theme".
     var onSet: ((String, String?) -> Void)?
+    /// A popup's highlighted entry, to show live (a theme name).
+    var onPreview: ((String?) -> Void)?
+    /// A popup closed: whether something was chosen.
+    var onPreviewEnd: ((Bool) -> Void)?
 
     func update(from st: BosunState) {
         let known = st.themes.map(\.name)
@@ -75,12 +80,83 @@ struct ThemePairSection: View {
         }
     }
 
+    /// A popup rather than a SwiftUI Picker: AppKit's menu says which entry is highlighted, so moving through
+    /// the list (pointer or arrow keys) previews each theme before anything is chosen.
     private func picker(_ title: String, _ side: ThemePairModel.Side) -> some View {
-        Picker(title, selection: model.binding(side)) {
-            Text("Same as Theme").tag("")
-            Divider()
-            ForEach(model.names, id: \.self) { Text($0).tag($0) }
+        LabeledContent(title) {
+            ThemePopUp(names: model.names, selection: model.binding(side).wrappedValue, sameAs: model.theme,
+                       onPreview: { model.onPreview?($0) }, onEnd: { model.onPreviewEnd?($0) },
+                       onChoose: { model.set(side, $0) })
+                .disabled(!model.supported)
+                .fixedSize()
         }
-        .disabled(!model.supported)
+    }
+}
+
+/// A theme popup that previews the highlighted theme. "Same as Theme" (an empty name) previews `sameAs`.
+struct ThemePopUp: NSViewRepresentable {
+    let names: [String]
+    let selection: String
+    let sameAs: String
+    let onPreview: (String) -> Void
+    let onEnd: (Bool) -> Void
+    let onChoose: (String) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSPopUpButton {
+        let b = NSPopUpButton(frame: .zero, pullsDown: false)
+        b.target = context.coordinator
+        b.action = #selector(Coordinator.chose(_:))
+        b.menu?.delegate = context.coordinator
+        return b
+    }
+
+    func updateNSView(_ b: NSPopUpButton, context: Context) {
+        context.coordinator.parent = self
+        let wanted = [""] + names
+        if context.coordinator.shown != wanted {
+            context.coordinator.shown = wanted
+            b.removeAllItems()
+            b.addItem(withTitle: "Same as Theme")
+            b.lastItem?.representedObject = ""
+            b.menu?.addItem(.separator())
+            for n in names {
+                b.addItem(withTitle: n)
+                b.lastItem?.representedObject = n
+            }
+        }
+        if let item = b.itemArray.first(where: { ($0.representedObject as? String) == selection }), b.selectedItem !== item {
+            b.select(item)
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSMenuDelegate {
+        var parent: ThemePopUp?
+        var shown: [String] = []
+        private var chosen = false
+
+        @objc func chose(_ sender: NSPopUpButton) {
+            chosen = true
+            parent?.onChoose(sender.selectedItem?.representedObject as? String ?? "")
+        }
+
+        func menuWillOpen(_ menu: NSMenu) { chosen = false }
+
+        func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
+            guard let parent, let name = item?.representedObject as? String else { return }
+            parent.onPreview(name.isEmpty ? parent.sameAs : name)
+        }
+
+        func menuDidClose(_ menu: NSMenu) {
+            // The popup sends its action after the menu closes: decide on the next turn.
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.parent?.onEnd(self.chosen)
+                }
+            }
+        }
     }
 }

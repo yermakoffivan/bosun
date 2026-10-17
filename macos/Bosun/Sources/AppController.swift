@@ -103,6 +103,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             // KVO fires on the thread that changed it, which for NSApp's appearance is the main thread.
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.appearanceChanged() } }
         }
+        themePairModel.onPreview = { [weak self] name in self?.previewTheme(name) }
+        themePairModel.onPreviewEnd = { [weak self] chosen in self?.endThemePreview(chosen: chosen) }
         themePairModel.onSet = { [weak self] key, name in
             self?.daemon.command(.applySetting(key: key, value: name.map { .string($0) } ?? .null)) { [weak self] in self?.report($0) }
         }
@@ -788,6 +790,12 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 structure = true
                 chrome = true
             case .theme, .themePair:
+                // A chosen theme's preview has done its job once the daemon's change is here.
+                if previewHoldTimer != nil {
+                    previewHoldTimer?.invalidate()
+                    previewHoldTimer = nil
+                    previewPalette = nil
+                }
                 applyTheme()
             case .keybindings:
                 nav = NavBindings(st.keybindings)
@@ -971,9 +979,57 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         applyTheme()
     }
 
-    /// The chrome's theme: `theme`, or the side of the Light/Dark pair for the current appearance.
+    // MARK: Live theme preview (Settings' theme popups)
+
+    /// A theme shown while a theme popup in Settings is open and an entry is highlighted; nil shows the real one.
+    private(set) var previewPalette: ThemePalette?
+    /// Palettes fetched for previews, by name (until the popup closes, or the theme list changes).
+    private var previewCache: [String: ThemePalette] = [:]
+    /// The latest preview asked for, so a slow answer for an earlier highlight is dropped.
+    private var previewRequest = 0
+    /// After a choice the preview stays up until the daemon's change arrives, so the window doesn't flash
+    /// back to the old theme in between.
+    private var previewHoldTimer: Timer?
+
+    /// Show theme `name` on every window and the terminals, without changing anything (nil: stop).
+    func previewTheme(_ name: String?) {
+        previewRequest += 1
+        let request = previewRequest
+        previewHoldTimer?.invalidate()
+        previewHoldTimer = nil
+        guard let name else { setPreview(nil); return }
+        if let p = previewCache[name] { setPreview(p); return }
+        daemon.command(.getTheme(name: name)) { [weak self] ack in
+            guard let self, ack.ok, let p = ack.theme else { return }
+            self.previewCache[name] = p
+            if request == self.previewRequest { self.setPreview(p) }
+        }
+    }
+
+    /// The popup closed: without a choice the real theme comes back now; with one, once the daemon confirms it.
+    func endThemePreview(chosen: Bool) {
+        previewRequest += 1
+        previewCache.removeAll()
+        guard chosen, previewPalette != nil else { setPreview(nil); return }
+        previewHoldTimer?.invalidate()
+        previewHoldTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.previewHoldTimer = nil
+                self?.setPreview(nil)
+            }
+        }
+    }
+
+    private func setPreview(_ p: ThemePalette?) {
+        guard p != previewPalette else { return }
+        previewPalette = p
+        applyTheme()
+    }
+
+    /// The chrome's theme: `theme`, or the side of the Light/Dark pair for the current appearance (or a
+    /// preview while a theme popup is open).
     private func applyTheme() {
-        theme = AppTheme(daemon.state.palette(for: appearance))
+        theme = AppTheme(previewPalette ?? daemon.state.palette(for: appearance))
         themePairModel.update(from: daemon.state)
         for bw in windows { bw.applyTheme() }
         applyTerminalTheme()

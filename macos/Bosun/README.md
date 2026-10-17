@@ -172,7 +172,7 @@ The app's terminals attach to tmux as `xterm-ghostty-bosun`, a copy of Ghostty's
 
 ## Settings
 
-Bosun → Settings (Cmd+,): focus follows the mouse (on by default, only with two or more panes), the number of terminal views kept attached (12, from 4 to 27), the Light and Dark themes and whether the terminals follow the Bosun theme or use your Ghostty config (follow, by default; see Themes), and the notification settings (see Notifications). The warm pool counts views, not rows: the shown row's panes count, and a row's panes are used together, so recently shown rows stay warm as a whole and switch back in one frame. 12 holds the shown row plus two or three more rows of three panes; each view costs about 13–14 MB. The chrome follows Bosun's theme; View → Theme changes it for every client.
+Bosun → Settings (Cmd+,): focus follows the mouse (on by default, only with two or more panes), the number of terminal views kept attached (12, from 4 to 27), the Light and Dark themes (moving through either popup, with the pointer or the arrow keys, previews each theme on the window and the terminals before you choose; closing it without choosing puts the current theme back) and whether the terminals follow the Bosun theme or use your Ghostty config (follow, by default; see Themes), and the notification settings (see Notifications). The warm pool counts views, not rows: the shown row's panes count, and a row's panes are used together, so recently shown rows stay warm as a whole and switch back in one frame. 12 holds the shown row plus two or three more rows of three panes; each view costs about 13–14 MB. The chrome follows Bosun's theme; View → Theme changes it for every client.
 
 ## Themes
 

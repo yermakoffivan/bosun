@@ -574,11 +574,13 @@ public struct Ack: Codable, Equatable, Sendable {
     public var error: String?
     public var session: String?
     public var spec: Spec?
+    /// `get_theme`: the theme's palette.
+    public var theme: ThemePalette?
     public var pendingLaunch: PendingLaunch?
     public var messages: [String]
 
     enum CodingKeys: String, CodingKey {
-        case id, ok, error, session, spec, messages
+        case id, ok, error, session, spec, theme, messages
         case pendingLaunch = "pending_launch"
     }
 
@@ -595,6 +597,7 @@ public struct Ack: Codable, Equatable, Sendable {
         error = try c.decodeIfPresent(String.self, forKey: .error)
         session = try c.decodeIfPresent(String.self, forKey: .session)
         spec = try c.decodeIfPresent(Spec.self, forKey: .spec)
+        theme = try c.decodeIfPresent(ThemePalette.self, forKey: .theme)
         pendingLaunch = try c.decodeIfPresent(PendingLaunch.self, forKey: .pendingLaunch)
         messages = try c.decodeIfPresent([String].self, forKey: .messages) ?? []
     }
@@ -762,6 +765,8 @@ public enum Command: Equatable, Sendable {
     case restart(session: String, resume: Bool, deferLaunch: Bool)
     case launchAgent(session: String, resume: Bool?)
     case getSpec(session: String)
+    /// Any theme's palette, for a live preview (changes nothing).
+    case getTheme(name: String)
     case modify(session: String, spec: Spec)
     case deleteRecent(id: Int64)
     case sidebarSave(Sidebar)
@@ -786,6 +791,7 @@ public enum Command: Equatable, Sendable {
         case .restart: "restart"
         case .launchAgent: "launch_agent"
         case .getSpec: "get_spec"
+        case .getTheme: "get_theme"
         case .modify: "modify"
         case .deleteRecent: "delete_recent"
         case .sidebarSave: "sidebar_save"
@@ -866,6 +872,8 @@ public enum ClientMessage: Sendable {
                     if let r { try put("resume", r) } else { try c.encodeNil(forKey: AnyKey("resume")) }
                 case .getSpec(let s):
                     try put("session", s)
+                case .getTheme(let n):
+                    try put("name", n)
                 case .modify(let s, let spec):
                     try put("session", s); try put("spec", spec)
                 case .deleteRecent(let id):

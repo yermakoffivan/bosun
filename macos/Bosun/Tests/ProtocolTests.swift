@@ -156,6 +156,16 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(flags["ignore_size"] as? Bool, true)
     }
 
+    func testGetThemeEncodesAndItsAckCarriesThePalette() throws {
+        let m = try JSONSerialization.jsonObject(with: try ClientMessage.cmd(id: 30, .getTheme(name: "nord")).encoded()) as! [String: Any]
+        XCTAssertEqual(m["op"] as? String, "get_theme")
+        XCTAssertEqual(m["name"] as? String, "nord")
+        guard case .ack(let a) = try decode(#"{"t":"ack","id":30,"ok":true,"theme":"# + Self.themeJSON + "}}") else { return XCTFail() }
+        XCTAssertEqual(a.theme?.name, "nord")
+        guard case .ack(let other) = try decode(#"{"t":"ack","id":31,"ok":true}"#) else { return XCTFail() }
+        XCTAssertNil(other.theme)
+    }
+
     func testFrameRoundTrip() throws {
         var r = FrameReader()
         let a = Frame.encode(Data(#"{"t":"hello"}"#.utf8))

@@ -93,6 +93,7 @@ extension FocusTest {
         r.check("the Settings pickers show the pair", await waitUntil(3) {
             app.themePairModel.light == light && app.themePairModel.dark == dark && app.themePairModel.supported
         })
+        await themePreview(light: light, dark: dark)
         if let shots {
             app.showSettings()
             if let sw = app.settingsWindow {
@@ -117,6 +118,53 @@ extension FocusTest {
         ws.focusActiveTerminal()
         await waitUntil(2) { firstResponderIsActiveTerminal }
         r.check("the keyboard is still in the active terminal", firstResponderIsActiveTerminal)
+    }
+
+    /// Moving through a Settings theme popup previews each theme on the chrome before anything is chosen (driven
+    /// through the popup's own menu delegate, as AppKit calls it). macOS is in Dark mode here, so `dark` shows.
+    private func themePreview(light: String, dark: String) async {
+        app.showSettings()
+        await sleep(300)
+        func popUps(_ v: NSView?) -> [NSPopUpButton] {
+            guard let v else { return [] }
+            return (v as? NSPopUpButton).map { [$0] } ?? v.subviews.flatMap(popUps)
+        }
+        let found = popUps(app.settingsWindow?.contentView).filter { $0.menu?.delegate is ThemePopUp.Coordinator }
+        guard found.count == 2, let target = app.themePairModel.names.first(where: { ![light, dark, app.daemon.state.theme.name].contains($0) }) else {
+            r.check("preview: the Settings window has a Light and a Dark theme popup", false, "\(found.count) popups")
+            app.settingsWindow?.close()
+            return
+        }
+        let themeBefore = app.daemon.state.theme.name
+        for (i, side) in ["Light", "Dark"].enumerated() {
+            let popup = found[i]
+            guard let menu = popup.menu, let delegate = menu.delegate,
+                  let item = menu.items.first(where: { ($0.representedObject as? String) == target }) else { continue }
+            delegate.menuWillOpen?(menu)
+            delegate.menu?(menu, willHighlight: item)
+            r.check("preview: highlighting \(target) in the \(side) popup shows it on the chrome", await waitChrome(target), chromeDetail())
+            r.check("…without changing the daemon's theme or the pair", app.daemon.state.theme.name == themeBefore
+                    && app.themePairModel.light == light && app.themePairModel.dark == dark)
+            if side == "Light" {
+                // Closed without a choice: back to the real theme.
+                delegate.menuDidClose?(menu)
+                r.check("…closing the popup without choosing shows \(dark) again", await waitChrome(dark), chromeDetail())
+            } else {
+                // Chosen: the preview stays until the daemon confirms, so the chrome never flashes back.
+                delegate.menuDidClose?(menu)
+                popup.select(item)
+                _ = popup.target?.perform(popup.action, with: popup)
+                var steady = true
+                for _ in 0..<40 {
+                    if !chromeShows(target) { steady = false }
+                    await sleep(20)
+                }
+                r.check("…choosing it keeps it on screen with no flash back to \(dark)", steady && app.themePairModel.dark == target, chromeDetail())
+                r.check("…and it's the Dark theme now", await waitUntil(3) { app.daemon.state.themePair.dark == target && app.previewPalette == nil })
+                _ = await setPair(light, dark)
+            }
+        }
+        app.settingsWindow?.close()
     }
 
     /// A burst of theme previews (the TUI sends one per keystroke) reaches Ghostty as at most two config updates:
