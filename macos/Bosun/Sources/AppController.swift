@@ -207,7 +207,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         bw.workspace.relayout()
         bw.sidebar.reload()
         bw.applyTheme()
-        bw.sidebar.setStatus(statusText.text, reconnect: statusText.reconnect)
+        bw.sidebar.setStatus(headerStatus)
         if hadLiveSnapshot || st.server != nil { bw.workspace.startAttaching() }
         if front { bringForward(bw) } else { bw.window.orderFront(nil) }
         if assumeKeyForTests, bw === current { bw.focus.setWindowKey(true); bw.workspace.windowKeyChanged(true) }
@@ -285,7 +285,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         switch kind {
         case .row(let id): openRowInNewWindow(id, at: p)
         case .tab(let s): movePaneToNewWindow(s, at: p)
-        case .section: break
+        case .section, .heading: break
         }
     }
 
@@ -464,6 +464,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             closeShortcuts()
             closePalette()
             if focus.exception == .rename { window.makeFirstResponder(nil) }
+            sidebar.commitFilter()
             setCurrent(bw)
         }
         if e.window === window, shortcutsPanel != nil { closeShortcuts() }
@@ -475,7 +476,14 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             if let ed = window.firstResponder as? NSTextView, let field = ed.delegate as? NSTextField,
                field.bounds.contains(field.convert(e.locationInWindow, from: nil)) { return }
             window.makeFirstResponder(nil)
-        case .sheet, .filter:
+        case .filter:
+            // Clicking anywhere else keeps what's typed (as Return does) and hands the keyboard back; a
+            // click on a row then also selects it. The field itself and the magnifier deal with their own clicks.
+            let v = sidebar.view
+            let bar = v.filterBar, mag = v.header.magnifier
+            if bar.bounds.contains(bar.convert(e.locationInWindow, from: nil)) || mag.bounds.contains(mag.convert(e.locationInWindow, from: nil)) { return }
+            sidebar.commitFilter()
+        case .sheet:
             break
         }
     }
@@ -546,8 +554,11 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     /// Previous/next row along the sidebar order (rows whose tabs have all ended are skipped, as in the
     /// TUI). The whole main area switches to that row's panes.
     private func stepSession(forward: Bool) {
-        // Rows another window shows are skipped: stepping never pulls another window forward.
-        let all = daemon.state.sidebar.allRows.filter { $0.id == workspace.currentRow || !isShown(row: $0.id, elsewhereThan: current) }
+        // Rows another window shows are skipped: stepping never pulls another window forward. With a
+        // filter, only the rows it shows (the one on screen included).
+        let sb = daemon.state.sidebar
+        let rows = sidebar.filtered.map { f in f.visibleRows.compactMap { sb.container(id: $0) } } ?? sb.allRows
+        let all = rows.filter { $0.id == workspace.currentRow || !isShown(row: $0.id, elsewhereThan: current) }
         let live = all.filter { c in c.tabs.contains { isAlive($0.session) } }.map(\.id)
         guard !live.isEmpty else { return }
         let current = workspace.currentRow
@@ -588,11 +599,13 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     func sidebarActivated(session: String) {
         if focus.exception == .rename { window.makeFirstResponder(nil) }
+        sidebar.commitFilter()
         show(session)
     }
 
     func sidebarActivated(row id: String) {
         if focus.exception == .rename { window.makeFirstResponder(nil) }
+        sidebar.commitFilter()
         workspace.selectRow(id)
     }
 
@@ -619,6 +632,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             bw.sidebar.refreshRows([session])
             bw.workspace.updateChromeState()
         }
+        updateHeaderStatus()
     }
 
     func terminalPainted(_ session: String) {
@@ -816,6 +830,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         }
         if chrome { for bw in windows { bw.workspace.updateChromeState() }; updateTitle() }
         updateDockBadge()
+        updateHeaderStatus()
     }
 
     private var hadLiveSnapshot = false
@@ -846,24 +861,39 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         if first { for bw in windows { bw.workspace.startAttaching() } }
     }
 
-    /// The sidebar footer's connection status, for windows opened later.
-    private var statusText: (text: String?, reconnect: Bool) = (nil, false)
+    /// What every sidebar header's status line says (windows opened later start with it).
+    private(set) var headerStatus: HeaderStatus = .connecting
 
-    private func setStatus(_ text: String?, reconnect: Bool) {
-        statusText = (text, reconnect)
-        for bw in windows { bw.sidebar.setStatus(text, reconnect: reconnect) }
+    /// The app was pointed at a daemon of its own: the header says "dev".
+    private let devDaemon = ProcessInfo.processInfo.environment["BOSUN_SERVE_SOCKET"] != nil
+
+    private func setStatus(_ s: HeaderStatus) {
+        guard s != headerStatus else { return }
+        headerStatus = s
+        for bw in windows { bw.sidebar.setStatus(s) }
+    }
+
+    /// While connected: the rows with a live tab, and the tabs waiting on you and done, from the same
+    /// states the badges show. Recounted on the deltas that already refresh the rows.
+    func updateHeaderStatus() {
+        guard daemon.status == .connected else { return }
+        let rows = daemon.state.sidebar.allRows
+        let live = rows.filter { c in c.tabs.contains { isAlive($0.session) } }.count
+        let states = rows.flatMap(\.tabs).filter { isAlive($0.session) }.map { displayState($0.session) }
+        setStatus(.counts(sessions: live, waiting: states.filter { $0 == .waiting }.count, done: states.filter { $0 == .done }.count, dev: devDaemon))
     }
 
     private func statusChanged(_ s: DaemonClient.Status) {
         switch s {
         case .connected:
-            setStatus(nil, reconnect: false)
+            headerStatus = .connecting
+            updateHeaderStatus()
         case .connecting:
-            setStatus("Connecting…", reconnect: false)
+            setStatus(.connecting)
         case .disconnected(let why):
-            setStatus("Reconnecting… (\(why))", reconnect: true)
+            setStatus(.reconnecting("Reconnecting… (\(why))"))
         case .failed(let why):
-            setStatus(why, reconnect: true)
+            setStatus(.reconnecting(why))
             let alert = NSAlert()
             alert.messageText = "Can't use bosun serve"
             alert.informativeText = why
@@ -1040,6 +1070,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     private func runSheet(_ alert: NSAlert, _ done: @escaping (Bool) -> Void) {
         // The sheet belongs to this window, whichever window is key when it closes.
         let bw = current!
+        bw.sidebar.commitFilter()
         bw.focus.begin(.sheet)
         alert.beginSheetModal(for: bw.window) { resp in
             MainActor.assumeIsolated {
@@ -1059,6 +1090,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             daemon.command(.rename(session: s, display: name)) { [weak self] in self?.report($0) }
         case .section(let id):
             daemon.command(.renameSection(section: id, name: name)) { [weak self] in self?.report($0) }
+        case .heading:
+            break
         }
     }
 
@@ -1254,6 +1287,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     private func presentForm(_ model: NewSessionModel, onSubmit: @escaping (Spec) -> Void) {
         closePalette()
         closeShortcuts()
+        sidebar.commitFilter()
         let form = NewSessionFormView(model: model)
         let sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: NewSessionFormView.width, height: form.fittingHeight),
                              styleMask: [.titled], backing: .buffered, defer: false)
@@ -1310,7 +1344,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     /// What the panel lists: a title and the menu items whose key equivalents it shows. The keys are
     /// read from the menus, so the panel and the menus can't disagree.
     static let shortcutCatalog: [(group: String, rows: [(title: String, items: [String])])] = [
-        ("Sessions", [("New session", ["New Session…"]), ("Go to session", ["Go to Session…"]),
+        ("Sessions", [("New session", ["New Session…"]), ("Go to session", ["Go to Session…"]), ("Filter the sidebar", ["Filter Sessions"]),
                       ("Oldest waiting session", ["Oldest Waiting Session"]), ("Sidebar row 1 to 9", ["Row 1", "Row 9"])]),
         ("Panes (a row's tabs)", [("New terminal tab, split right", ["Split Right"]), ("New terminal tab, split down", ["Split Down"]),
                    ("New tab with an agent (sheet), split right", ["New Tab…"]),
@@ -1358,6 +1392,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     func showShortcuts() {
         guard !sheetOpen, shortcutsPanel == nil else { return }
         closePalette()
+        sidebar.commitFilter()
         if focus.exception == .rename { window.makeFirstResponder(nil) }
         let p = ShortcutsPanel(groups: shortcutGroups(),
                                footnote: "Navigation keys follow [keybindings] in Bosun's config.toml. Esc or ⌘/ closes this.",
@@ -1391,6 +1426,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         if palette != nil { closePalette(); return }
         guard !sheetOpen else { return }
         closeShortcuts()
+        // Cmd+K from the filter's field keeps the filter (as Return would) and opens the palette.
+        sidebar.commitFilter()
         let p = PaletteView(theme: theme)
         p.source = { [weak self] q in self?.paletteEntries(q) ?? [] }
         p.onClose = { [weak self] in self?.closePalette() }
@@ -1623,6 +1660,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         for (t, k, tag) in arrows { add(view, t, #selector(menuFocusTile(_:)), String(Character(k)), [.command, .option], target: self, tag: tag) }
         add(view, "Zoom Pane", #selector(menuZoomPane), "\r", target: self)
         view.addItem(.separator())
+        add(view, "Filter Sessions", #selector(menuFilter), "f", target: self)
+        view.addItem(.separator())
         let themeItem = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
         themeMenu.delegate = self
         themeItem.submenu = themeMenu
@@ -1704,6 +1743,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         newTab(in: c.id)
     }
     @objc func menuPalette() { showPalette() }
+    @objc func menuFilter() { sidebar.toggleFilter() }
     @objc func menuZoomPane() { workspace.toggleZoom() }
     @objc func menuNewWindow() { openWindow(row: nil) }
     @objc func menuCloseWindow() { window.performClose(nil) }
@@ -1720,10 +1760,11 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         perform([NavAction.nextSession, .previousSession, .nextTab, .previousTab, .sendNextKey][sender.tag])
     }
 
+    /// Cmd+1…9: the rows this window's sidebar shows, in order (with a filter, its rows).
     @objc func menuJump(_ sender: NSMenuItem) {
-        let rows = daemon.state.sidebar.visibleRows
+        let rows = sidebar.visibleRowIDs
         guard sender.tag - 1 < rows.count else { NSSound.beep(); return }
-        sidebarActivated(row: rows[sender.tag - 1].id)
+        sidebarActivated(row: rows[sender.tag - 1])
     }
 
     @objc func toggleNotifyWhenWaiting() { AppSettings.shared.notifyWhenWaiting.toggle() }

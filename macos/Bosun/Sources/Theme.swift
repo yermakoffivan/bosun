@@ -33,6 +33,12 @@ struct AppTheme {
         }
     }
 
+    /// Ink for a glyph on `accent` (the header's anchor tile), by the TUI's luminance rule.
+    var inkOnAccent: NSColor {
+        let ink = RGB(hex: palette.accent)?.ink ?? RGB(r: 1, g: 1, b: 1)
+        return NSColor(srgbRed: ink.r, green: ink.g, blue: ink.b, alpha: 1)
+    }
+
     /// A colour between two others, in sRGB.
     static func mix(_ a: NSColor, _ b: NSColor, _ t: CGFloat) -> NSColor {
         let x = a.usingColorSpace(.sRGB) ?? a, y = b.usingColorSpace(.sRGB) ?? b

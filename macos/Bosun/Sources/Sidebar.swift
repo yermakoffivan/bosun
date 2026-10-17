@@ -8,6 +8,8 @@ final class SidebarItem: NSObject {
         case section(String)
         case row(String)
         case tab(String)
+        /// A heading that isn't a section: "On screen", over the row a filter would otherwise hide.
+        case heading(String)
     }
 
     let kind: Kind
@@ -21,6 +23,7 @@ final class SidebarItem: NSObject {
         case .section(let id): "s:\(id)"
         case .row(let id): "r:\(id)"
         case .tab(let s): "t:\(s)"
+        case .heading(let id): "h:\(id)"
         }
     }
 }
@@ -45,6 +48,18 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     private var renaming: (item: SidebarItem, field: NSTextField, original: String)?
     /// Rows whose badge changed state recently (selftest hook): session → state.
     var onBadgeApplied: ((String, AgentState) -> Void)?
+    /// The row under the pointer, filled lightly (rows and tabs only).
+    private(set) weak var hoveredItem: SidebarItem?
+
+    // The filter (Cmd+F), this window's own and never saved.
+    /// What's typed, applied live while the field has the keyboard and kept after Return.
+    private(set) var filterQuery = ""
+    /// The field or the chip is showing.
+    private(set) var filterShown = false
+    /// The filter as applied to the sidebar now; nil without one.
+    private(set) var filtered: FilteredSidebar?
+    /// The row on screen when `filtered` was worked out (it decides the "On screen" extra).
+    private var filteredRow: String?
 
     init(app: AppController) {
         self.app = app
@@ -88,13 +103,28 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         view.addSubview(scroll)
         view.footer.onNew = { [weak self] in self?.app.newSession() }
         view.footer.onNewSection = { [weak self] in self?.app.newSection() }
-        view.footer.onReconnect = { [weak self] in self?.app.daemon.reconnectNow() }
+        view.header.onReconnect = { [weak self] in self?.app.daemon.reconnectNow() }
+        view.header.onFilter = { [weak self] in
+            guard let self else { return }
+            self.app.setCurrent(self.owner)
+            self.toggleFilter()
+        }
+        view.filterBar.field.delegate = self
+        view.filterBar.onActivate = { [weak self] in
+            guard let self else { return }
+            self.app.setCurrent(self.owner)
+            self.beginFilterEditing()
+        }
+        view.filterBar.onClear = { [weak self] in self?.clearFilter() }
+        view.emptyFilter.onClear = { [weak self] in self?.clearFilter() }
     }
 
     // MARK: Model
 
     func reload() {
         let sb = app.daemon.state.sidebar
+        filtered = computeFilter()
+        filteredRow = owner.workspace.currentRow
         var used = Set<String>()
         func item(_ kind: SidebarItem.Kind) -> SidebarItem {
             let probe = SidebarItem(kind: kind)
@@ -114,12 +144,32 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             } : []
             return r
         }
-        var newRoots: [SidebarItem] = sb.ungrouped.map { rowItem($0, parent: nil) }
-        for s in sb.sections {
-            let si = item(.section(s.id))
-            si.parent = nil
-            si.children = s.members.map { rowItem($0, parent: si) }
-            newRoots.append(si)
+        var newRoots: [SidebarItem] = []
+        if let f = filtered {
+            // Matching rows only, every section with one shown expanded, and the row on screen at the end
+            // under its own heading when it doesn't match.
+            newRoots = f.ungrouped.compactMap { sb.container(id: $0) }.map { rowItem($0, parent: nil) }
+            for fs in f.sections {
+                guard sb.sections.contains(where: { $0.id == fs.id }) else { continue }
+                let si = item(.section(fs.id))
+                si.parent = nil
+                si.children = fs.rows.compactMap { sb.container(id: $0) }.map { rowItem($0, parent: si) }
+                newRoots.append(si)
+            }
+            if let id = f.onScreen, let c = sb.container(id: id) {
+                let h = item(.heading("on-screen"))
+                h.parent = nil
+                h.children = [rowItem(c, parent: h)]
+                newRoots.append(h)
+            }
+        } else {
+            newRoots = sb.ungrouped.map { rowItem($0, parent: nil) }
+            for s in sb.sections {
+                let si = item(.section(s.id))
+                si.parent = nil
+                si.children = s.members.map { rowItem($0, parent: si) }
+                newRoots.append(si)
+            }
         }
         cache = cache.filter { used.contains($0.key) }
         roots = newRoots
@@ -128,15 +178,19 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         for r in roots { expandAsModel(r, sidebar: sb) }
         reloading = false
         syncSelection()
-        view.footer.isHidden = false
+        updateFilterChrome()
     }
 
     private func expandAsModel(_ item: SidebarItem, sidebar sb: Sidebar) {
         switch item.kind {
         case .section(let id):
-            let collapsed = sb.sections.first { $0.id == id }?.collapsed ?? false
+            // A filter shows every section with a match expanded, without touching its saved state.
+            let collapsed = filtered == nil && (sb.sections.first { $0.id == id }?.collapsed ?? false)
             if collapsed { outline.collapseItem(item) } else { outline.expandItem(item) }
             if !collapsed { for c in item.children { expandAsModel(c, sidebar: sb) } }
+        case .heading:
+            outline.expandItem(item)
+            for c in item.children { expandAsModel(c, sidebar: sb) }
         case .row:
             if !item.children.isEmpty { outline.expandItem(item) }
         case .tab:
@@ -146,6 +200,8 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
 
     /// Redraw status and names without reloading structure (status deltas land here).
     func refreshRows(_ sessions: Set<String>? = nil) {
+        // A state change can move a row in or out of a filter ("wait"): then the outline is rebuilt.
+        if filtered != nil, computeFilter() != filtered { reload(); return }
         outline.enumerateAvailableRowViews { rowView, row in
             guard let item = outline.item(atRow: row) as? SidebarItem else { return }
             if let sessions, !sessions.isEmpty {
@@ -160,13 +216,18 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
     }
 
-    private func isSection(_ item: SidebarItem) -> Bool { if case .section = item.kind { return true }; return false }
+    private func isSection(_ item: SidebarItem) -> Bool {
+        switch item.kind {
+        case .section, .heading: return true
+        case .row, .tab: return false
+        }
+    }
 
     private func sessions(of item: SidebarItem) -> Set<String> {
         switch item.kind {
         case .tab(let s): return [s]
         case .row(let id): return Set(app.daemon.state.sidebar.container(id: id)?.tabs.map(\.session) ?? [])
-        case .section: return []
+        case .section, .heading: return []
         }
     }
 
@@ -175,7 +236,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         switch item.kind {
         case .tab(let s): return s
         case .row(let id): return owner.workspace.rememberedPane(row: id)
-        case .section: return nil
+        case .section, .heading: return nil
         }
     }
 
@@ -184,7 +245,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         switch item.kind {
         case .row(let id): return id
         case .tab(let s): return app.daemon.state.sidebar.container(holding: s)?.id
-        case .section: return nil
+        case .section, .heading: return nil
         }
     }
 
@@ -194,13 +255,15 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         switch item.kind {
         case .row(let id): return id == owner.workspace.currentRow
         case .tab(let s): return rowID(for: item) == owner.workspace.currentRow && s == owner.workspace.layout.active
-        case .section: return false
+        case .section, .heading: return false
         }
     }
 
     /// Select the shown row (selection follows the main area, never the other way). Its tab rows show
     /// which pane is active (drawn by `SidebarRowView`).
     func syncSelection() {
+        // With a filter, the row on screen decides the "On screen" extra: a new one rebuilds the outline.
+        if filtered != nil, owner.workspace.currentRow != filteredRow { reload(); return }
         updatingSelection = true
         defer { updatingSelection = false }
         guard let id = owner.workspace.currentRow, let item = cache["r:\(id)"] else {
@@ -230,8 +293,8 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         outline.enumerateAvailableRowViews { rv, _ in rv.needsDisplay = true }
     }
 
-    func setStatus(_ text: String?, reconnect: Bool) {
-        view.footer.setStatus(text, reconnect: reconnect, theme: app.theme)
+    func setStatus(_ s: HeaderStatus) {
+        view.header.set(s)
     }
 
     // MARK: Clicks
@@ -242,16 +305,17 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     func rowClicked(_ row: Int) {
         guard let item = outline.item(atRow: row) as? SidebarItem else { return }
         if case .section(let id) = item.kind {
-            // A click anywhere on a section header toggles it.
-            app.setSectionCollapsed(id, outline.isItemExpanded(item))
+            // A click anywhere on a section header toggles it (with a filter, sections stay open).
+            if filtered == nil { app.setSectionCollapsed(id, outline.isItemExpanded(item)) }
             return
         }
+        if case .heading = item.kind { return }
         // A click in a window that isn't key acts in that window.
         app.setCurrent(owner)
         switch item.kind {
         case .row(let id): app.sidebarActivated(row: id)
         case .tab(let s): app.sidebarActivated(session: s)
-        case .section: break
+        case .section, .heading: break
         }
     }
 
@@ -270,6 +334,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
 
     /// Hovering a row (or one of its tabs) for 50 ms warms every pane of that row.
     func hovered(row: Int) {
+        setHover(row >= 0 ? outline.item(atRow: row) as? SidebarItem : nil)
         let id = row >= 0 ? (outline.item(atRow: row) as? SidebarItem).flatMap { rowID(for: $0) } : nil
         guard id != hoverRow else { return }
         hoverRow = id
@@ -280,6 +345,112 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
     }
 
+    /// The light fill under the pointer: rows and tabs, never headers.
+    func setHover(_ item: SidebarItem?) {
+        let new: SidebarItem? = item.flatMap { if case .row = $0.kind { return $0 } else if case .tab = $0.kind { return $0 } else { return nil } }
+        guard new !== hoveredItem else { return }
+        let old = hoveredItem
+        hoveredItem = new
+        for it in [old, new].compactMap({ $0 }) {
+            let r = outline.row(forItem: it)
+            if r >= 0 { outline.rowView(atRow: r, makeIfNecessary: false)?.needsDisplay = true }
+        }
+    }
+
+    // MARK: Filter
+
+    /// The filter's field has the keyboard (its ring shows).
+    var filterEditing: Bool { owner.focus.exception == .filter }
+
+    /// The rows Cmd+1…9 number and previous/next row walks: what this sidebar shows.
+    var visibleRowIDs: [String] { app.daemon.state.sidebar.visibleRows(filter: filtered).map(\.id) }
+
+    private func computeFilter() -> FilteredSidebar? {
+        guard SidebarFilter.normalized(filterQuery) != nil else { return nil }
+        let st = app.daemon.state
+        return SidebarFilter.apply(filterQuery, sidebar: st.sidebar, current: owner.workspace.currentRow, label: { [app] in app.rowLabel($0) }) { [app] s in
+            SidebarFilter.TabInfo(name: app.displayName(s), path: st.sessions[s]?.path, agent: st.sessions[s]?.agent,
+                                  state: app.displayState(s), alive: app.isAlive(s))
+        }
+    }
+
+    /// Cmd+F and the magnifier: open the field (or give it the keyboard again, the query selected); with
+    /// the field focused and empty, close it.
+    func toggleFilter() {
+        if filterEditing {
+            if view.filterBar.field.stringValue.isEmpty { clearFilter() } else { view.filterBar.field.currentEditor()?.selectAll(nil) }
+            return
+        }
+        beginFilterEditing()
+    }
+
+    /// The field borrows the keyboard (design 7b's temporary, visible exception), with the query selected.
+    func beginFilterEditing() {
+        guard let window = outline.window, !filterEditing else { return }
+        // One exception at a time: a rename in progress ends (keeping its name), the palette closes.
+        if owner.focus.exception == .rename { window.makeFirstResponder(nil) }
+        if owner.focus.exception == .palette, owner.palette != nil { app.closePalette() }
+        guard owner.focus.exception == nil else { NSSound.beep(); return }
+        filterShown = true
+        let field = view.filterBar.field
+        field.stringValue = filterQuery
+        view.filterBar.setEditing(true)
+        owner.focus.begin(.filter)
+        updateFilterChrome()
+        view.layoutSubtreeIfNeeded()
+        window.makeFirstResponder(field)
+        field.currentEditor()?.selectAll(nil)
+    }
+
+    /// Return, a click anywhere else, Cmd+K: keep what's typed as a chip and hand the keyboard back to the
+    /// active terminal. An empty field just closes.
+    func commitFilter() {
+        guard filterEditing else { return }
+        filterQuery = view.filterBar.field.stringValue
+        if SidebarFilter.normalized(filterQuery) == nil { clearFilter(); return }
+        endFilterEditing()
+        updateFilterChrome()
+    }
+
+    /// Esc, the chip's clear button, the empty state's Clear: no filter, field closed, keyboard back.
+    func clearFilter() {
+        let had = filtered != nil
+        filterQuery = ""
+        view.filterBar.field.stringValue = ""
+        filterShown = false
+        endFilterEditing()
+        if had { reload() } else { updateFilterChrome() }
+    }
+
+    private func endFilterEditing() {
+        if owner.focus.end(.filter) {
+            owner.workspace.focusActiveTerminal()
+            // No terminal to take it (an exited row): nothing holds the keyboard rather than the field.
+            if let w = outline.window, let ed = w.firstResponder as? NSTextView, ed.delegate === view.filterBar.field {
+                w.makeFirstResponder(nil)
+            }
+        }
+        view.filterBar.setEditing(false)
+    }
+
+    /// The field, the magnifier's dot, the footer hint and the empty state follow the filter.
+    private func updateFilterChrome() {
+        let theme = app.theme
+        view.filterBar.isHidden = !filterShown
+        view.filterBar.count.stringValue = filtered?.countLabel ?? ""
+        view.header.filterApplied = filtered != nil
+        view.footer.hint.isHidden = filtered == nil || filterEditing
+        if let f = filtered, f.isEmpty {
+            view.emptyFilter.isHidden = false
+            view.emptyFilter.set(query: f.query, theme: theme)
+        } else {
+            view.emptyFilter.isHidden = true
+        }
+        view.needsLayout = true
+        view.filterBar.needsLayout = true
+        view.footer.needsLayout = true
+    }
+
     // MARK: Rename
 
     func beginRename(_ item: SidebarItem) {
@@ -287,6 +458,8 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard row >= 0, let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? SidebarCellView,
               let window = outline.window else { return }
         endRename(commit: false)
+        // Starting a rename ends the filter's claim on the keyboard, never the query it applied.
+        if filterEditing { commitFilter() }
         let field = cell.nameField
         let original = field.stringValue
         renaming = (item, field, original)
@@ -325,12 +498,33 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+        if control === view.filterBar.field {
+            switch sel {
+            case #selector(NSResponder.insertNewline(_:)): commitFilter(); return true
+            case #selector(NSResponder.cancelOperation(_:)): clearFilter(); return true
+            // Up/Down do nothing here: Cmd+K is for jumping, and Cmd+1…9 follow the filter after Return.
+            case #selector(NSResponder.moveUp(_:)), #selector(NSResponder.moveDown(_:)): return true
+            default: return false
+            }
+        }
         if sel == #selector(NSResponder.insertNewline(_:)) { endRename(commit: true); return true }
         if sel == #selector(NSResponder.cancelOperation(_:)) { endRename(commit: false); return true }
         return false
     }
 
+    func controlTextDidChange(_ obj: Notification) {
+        // Every key narrows the list live.
+        guard (obj.object as? NSTextField) === view.filterBar.field, filterEditing else { return }
+        filterQuery = view.filterBar.field.stringValue
+        reload()
+    }
+
     func controlTextDidEndEditing(_ obj: Notification) {
+        if (obj.object as? NSTextField) === view.filterBar.field {
+            // The field lost the keyboard some other way: keep what's typed, as Return would.
+            if filterEditing { commitFilter() }
+            return
+        }
         // Clicking anywhere else ends the edit and keeps the new name.
         endRename(commit: true)
     }
@@ -341,6 +535,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard row >= 0, let item = outline.item(atRow: row) as? SidebarItem else { return app.sidebarBackgroundMenu() }
         switch item.kind {
         case .section(let id): return app.sectionMenu(for: id)
+        case .heading: return app.sidebarBackgroundMenu()
         case .row(let id):
             guard let c = app.daemon.state.sidebar.container(id: id) else { return nil }
             return app.sessionMenu(for: c.active, rowItem: item)
@@ -364,12 +559,15 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         return !it.children.isEmpty
     }
 
+
+
     // MARK: Delegate
 
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
         guard let it = item as? SidebarItem else { return 26 }
         switch it.kind {
         case .section: return 30
+        case .heading: return 28
         case .row: return 28
         case .tab: return 24
         }
@@ -386,7 +584,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let it = item as? SidebarItem else { return nil }
         let cell: NSView
-        if case .section = it.kind {
+        if isSection(it) {
             cell = outlineView.makeView(withIdentifier: SectionCellView.id, owner: nil) ?? SectionCellView()
         } else {
             cell = outlineView.makeView(withIdentifier: SidebarCellView.id, owner: nil) ?? SidebarCellView()
@@ -402,7 +600,10 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         case .section(let id):
             guard let c = cell as? SectionCellView, let s = st.sidebar.sections.first(where: { $0.id == id }) else { return }
             let waiting = s.members.flatMap(\.tabs).contains { app.displayState($0.session) == .waiting }
-            c.configure(name: s.name, count: s.members.count, collapsed: s.collapsed, waiting: waiting, theme: theme)
+            c.configure(name: s.name, count: s.members.count, collapsed: s.collapsed && filtered == nil, waiting: waiting, theme: theme)
+        case .heading:
+            guard let c = cell as? SectionCellView else { return }
+            c.configure(name: "On screen", count: 0, collapsed: false, waiting: false, theme: theme)
         case .row(let id):
             guard let c = cell as? SidebarCellView, let con = st.sidebar.container(id: id) else { return }
             let multi = con.tabs.count > 1
@@ -410,25 +611,32 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             let alive = con.tabs.contains { app.isAlive($0.session) }
             let name = app.rowLabel(con)
             let state: AgentState = multi ? aggregate(con) : app.displayState(session)
-            if renaming?.item !== item { c.nameField.stringValue = name }
             // A row another window shows says so: selecting it brings that window forward.
             let elsewhere = app.isShown(row: id, elsewhereThan: owner)
+            // The row on screen that a filter would hide, listed at the end, dimmed.
+            let extra: Bool = { if case .heading = item.parent?.kind { return true }; return false }()
             var t = multi ? "\(con.tabs.count) tabs" : trailing(for: session)
+            if extra { t = "on screen" }
             if elsewhere { t = t.isEmpty ? "⧉" : "⧉ " + t }
-            c.configure(state: state, exited: !alive, trailing: t,
-                        trailingColor: state == .waiting && !multi ? theme.waiting : theme.textMuted, indent: 0, theme: theme,
-                        tooltip: elsewhere ? [tooltip(session), "Shown in another window"].compactMap { $0 }.joined(separator: "\n") : tooltip(session))
+            c.configure(name: renaming?.item !== item ? name : nil, matches: filtered?.nameMatches[id],
+                        state: state, exited: !alive, trailing: t,
+                        trailingColor: state == .waiting && !multi && !extra ? theme.waiting : theme.textMuted, indent: 0, theme: theme,
+                        tooltip: elsewhere ? [tooltip(session), elsewhereTip].compactMap { $0 }.joined(separator: "\n") : tooltip(session),
+                        trailingTip: elsewhere ? elsewhereTip : nil, dimmed: extra)
             c.badge.onApplied = { [weak self] s in self?.onBadgeApplied?(session, s) }
         case .tab(let s):
             guard let c = cell as? SidebarCellView else { return }
             let alive = app.isAlive(s)
-            if renaming?.item !== item { c.nameField.stringValue = app.displayName(s) }
             let state = app.displayState(s)
-            c.configure(state: state, exited: !alive, trailing: trailing(for: s), trailingColor: state == .waiting ? theme.waiting : theme.textMuted,
-                        indent: 16, theme: theme, tooltip: tooltip(s))
+            let extra: Bool = { if case .heading = item.parent?.parent?.kind { return true }; return false }()
+            c.configure(name: renaming?.item !== item ? app.displayName(s) : nil, matches: filtered?.tabMatches[s],
+                        state: state, exited: !alive, trailing: trailing(for: s), trailingColor: state == .waiting ? theme.waiting : theme.textMuted,
+                        indent: 16, theme: theme, tooltip: tooltip(s), trailingTip: nil, dimmed: extra)
             c.badge.onApplied = { [weak self] st in self?.onBadgeApplied?(s, st) }
         }
     }
+
+    private let elsewhereTip = "Shown in another window — click to bring it forward"
 
     private func aggregate(_ c: Container) -> AgentState {
         let states = c.tabs.map { app.displayState($0.session) }
@@ -456,8 +664,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
 
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
         guard let it = item as? SidebarItem else { return false }
-        if case .section = it.kind { return false }
-        return true
+        return !isSection(it)
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
@@ -479,7 +686,8 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
 
     func outlineView(_ outlineView: NSOutlineView, shouldCollapseItem item: Any) -> Bool {
         guard let it = item as? SidebarItem else { return false }
-        if case .section = it.kind { return true }
+        // With a filter, sections stay open (their saved state is left alone).
+        if case .section = it.kind { return filtered == nil || reloading }
         return reloading
     }
 
@@ -487,6 +695,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
 
     func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> (any NSPasteboardWriting)? {
         guard let it = item as? SidebarItem, renaming == nil else { return nil }
+        if case .heading = it.kind { return nil }
         let pb = NSPasteboardItem()
         pb.setString(it.key, forType: rowDragType)
         return pb
@@ -495,6 +704,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     func outlineView(_ outlineView: NSOutlineView, draggingSession session: NSDraggingSession, willBeginAt screenPoint: NSPoint, forItems draggedItems: [Any]) {
         dragStarted = true
         cancelPendingRename()
+        setHover(nil)
         draggingKind = (draggedItems.first as? SidebarItem)?.kind
     }
 
@@ -527,6 +737,9 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         let ungroupedCount = app.daemon.state.sidebar.ungrouped.count
         let pointerY = outlineView.convert(info.draggingLocation, from: nil).y
+        // With a filter, the outline shows only some rows, so positions in it aren't positions in the
+        // sidebar: only merges (onto a row) and a tab out into its own row are taken.
+        let limited = filtered != nil
         /// Whether the pointer is in the lower half of `item`'s own row.
         func below(_ item: SidebarItem) -> Bool {
             let row = outlineView.row(forItem: item)
@@ -543,7 +756,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             switch under.kind {
             case .row: return under
             case .tab: return under.parent
-            case .section: return nil
+            case .section, .heading: return nil
             }
         }
         switch dragged.kind {
@@ -552,6 +765,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                 outlineView.setDropItem(m, dropChildIndex: NSOutlineViewDropOnItemIndex)
                 return .move
             }
+            if limited { return [] }
             // Over a multi-tab row or one of its tabs (the outline proposes dropping inside it): drop beside
             // that row in its own list instead, above or below by the pointer.
             var over = target
@@ -580,6 +794,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             }
             return []
         case .section:
+            if limited { return [] }
             // Sections only go between top-level items, but the outline proposes drops inside whatever is
             // under the pointer: take the top-level item there and go before or after it.
             var top = target
@@ -599,6 +814,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                 return .move
             }
             if let target, target === row {
+                if limited { return [] }
                 return index == NSOutlineViewDropOnItemIndex ? [] : .move
             }
             // Out of its row: it becomes a row of its own, which goes right after the old one, so show the gap there.
@@ -606,6 +822,8 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             guard let i = list.firstIndex(where: { $0 === row }) else { return [] }
             outlineView.setDropItem(row.parent, dropChildIndex: i + 1)
             return .move
+        case .heading:
+            return []
         }
     }
 
@@ -621,7 +839,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             switch dragged.kind {
             case .row(let from): DispatchQueue.main.async { [app] in MainActor.assumeIsolated { app.mergeRow(from, into: into) } }
             case .tab(let s): DispatchQueue.main.async { [app] in MainActor.assumeIsolated { app.moveTab(s, into: into) } }
-            case .section: return false
+            case .section, .heading: return false
             }
             return true
         }
@@ -643,6 +861,8 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             changed = sb.moveSection(id: id, toIndex: max(0, index - ungroupedCount))
         case .tab(let s):
             changed = sb.moveTab(session: s, toIndex: index)
+        case .heading:
+            break
         }
         // Saved on the next turn: saving reloads the outline, which mustn't happen inside its own drop handling.
         if changed { DispatchQueue.main.async { [app] in MainActor.assumeIsolated { app.daemon.saveSidebar(sb) } } }
@@ -699,6 +919,15 @@ final class SidebarOutlineView: NSOutlineView {
         }
     }
 
+    /// The section chevron (only sections have one) says what a click does.
+    override func makeView(withIdentifier identifier: NSUserInterfaceItemIdentifier, owner: Any?) -> NSView? {
+        let v = super.makeView(withIdentifier: identifier, owner: owner)
+        if identifier == NSOutlineView.disclosureButtonIdentifier, let b = v as? NSButton {
+            b.toolTip = "Collapse or expand this section (a click on its name does too)"
+        }
+        return v
+    }
+
     override func menu(for event: NSEvent) -> NSMenu? {
         let row = self.row(at: convert(event.locationInWindow, from: nil))
         return controller?.menu(forRow: row)
@@ -720,7 +949,8 @@ final class SidebarOutlineView: NSOutlineView {
 
     /// No disclosure triangles on rows (their tabs are always shown); sections keep theirs.
     override func frameOfOutlineCell(atRow row: Int) -> NSRect {
-        guard let item = item(atRow: row) as? SidebarItem, case .section = item.kind else { return .zero }
+        // With a filter, sections stay open, so they have no chevron either.
+        guard let item = item(atRow: row) as? SidebarItem, case .section = item.kind, controller?.filtered == nil else { return .zero }
         let f = super.frameOfOutlineCell(atRow: row)
         return NSRect(x: bounds.width - f.width - 10, y: f.minY, width: f.width, height: f.height)
     }
@@ -738,23 +968,38 @@ final class SidebarRowView: NSTableRowView {
     weak var item: SidebarItem?
     weak var controller: SidebarController?
 
+    /// The selected row: the selection fill and the same accent bar the active pane's tab gets, so "which
+    /// row am I on" reads on every theme (light themes' selection fills are close to their panels).
     override func drawSelection(in dirtyRect: NSRect) {
         guard let theme else { return }
+        let r = bounds.insetBy(dx: 6, dy: 0)
         theme.selection.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 0), xRadius: 6, yRadius: 6).fill()
+        NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6).fill()
+        SidebarRowView.accentBar(in: r, theme)
+    }
+
+    static func accentBar(in r: NSRect, _ theme: AppTheme) {
+        theme.accent.setFill()
+        NSBezierPath(roundedRect: NSRect(x: r.minX + 3, y: r.minY + 5, width: 3, height: r.height - 10), xRadius: 1.5, yRadius: 1.5).fill()
     }
 
     override func drawBackground(in dirtyRect: NSRect) {
         guard let theme, let item, let controller, !isSelected else { return }
+        let r = bounds.insetBy(dx: 6.5, dy: 0.5)
         // The shown row's tabs each have a pane on screen; the active pane's tab is marked (a fill and
         // an accent bar), so the row says which pane has the keyboard.
-        guard case .tab(let s) = item.kind, let ws = controller.owner?.workspace else { return }
-        guard controller.rowID(for: item) == ws.currentRow, s == ws.layout.active, ws.layout.count > 1 else { return }
-        let r = bounds.insetBy(dx: 6.5, dy: 0.5)
-        theme.panelAlt.setFill()
-        NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6).fill()
-        theme.accent.setFill()
-        NSBezierPath(roundedRect: NSRect(x: r.minX + 3, y: r.minY + 5, width: 3, height: r.height - 10), xRadius: 1.5, yRadius: 1.5).fill()
+        if case .tab(let s) = item.kind, let ws = controller.owner?.workspace,
+           controller.rowID(for: item) == ws.currentRow, s == ws.layout.active, ws.layout.count > 1 {
+            theme.panelAlt.setFill()
+            NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6).fill()
+            SidebarRowView.accentBar(in: r, theme)
+            return
+        }
+        // The row under the pointer answers it.
+        if controller.hoveredItem === item {
+            theme.panelAlt.withAlphaComponent(0.5).setFill()
+            NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6).fill()
+        }
     }
 
     /// A row being dropped onto (a merge): an accent outline in the theme's colours.
@@ -779,6 +1024,7 @@ final class SidebarCellView: NSTableCellView {
     private let trailing = NSTextField(labelWithString: "")
     /// The text on the right (for the test modes).
     var trailingText: String { trailing.stringValue }
+    var trailingTip: String? { trailing.toolTip }
     private var indent: CGFloat = 0
 
     init() {
@@ -814,17 +1060,43 @@ final class SidebarCellView: NSTableCellView {
         nameField.frame = NSRect(x: nx, y: (h - nameH) / 2, width: max(10, trailing.frame.minX - nx - 6), height: nameH)
     }
 
-    func configure(state: AgentState, exited: Bool, trailing t: String, trailingColor: NSColor, indent: CGFloat, theme: AppTheme, tooltip: String?) {
+    /// `name` nil leaves the field alone (it's being renamed). `matches` are the characters a filter
+    /// matched, underlined in the accent colour.
+    func configure(name: String?, matches: [Int]?, state: AgentState, exited: Bool, trailing t: String, trailingColor: NSColor,
+                   indent: CGFloat, theme: AppTheme, tooltip: String?, trailingTip: String?, dimmed: Bool) {
         self.indent = indent
         badge.set(state, exited: exited, theme: theme)
         if !nameField.isEditable {
-            nameField.textColor = exited ? theme.textMuted : theme.text
-            nameField.font = .systemFont(ofSize: indent > 0 ? 12.5 : 13, weight: state == .waiting || state == .done ? .medium : .regular)
+            let color = exited ? theme.textMuted : theme.text
+            let font = NSFont.systemFont(ofSize: indent > 0 ? 12.5 : 13, weight: state == .waiting || state == .done ? .medium : .regular)
+            nameField.textColor = color
+            nameField.font = font
+            if let name {
+                if let matches, !matches.isEmpty {
+                    nameField.attributedStringValue = SidebarCellView.underlined(name, matches, font: font, color: color, accent: theme.accent)
+                } else {
+                    nameField.stringValue = name
+                }
+            }
         }
         trailing.stringValue = t
         trailing.textColor = trailingColor
+        trailing.toolTip = trailingTip
         toolTip = tooltip
+        alphaValue = dimmed ? 0.55 : 1
         needsLayout = true
+    }
+
+    /// `name` with the characters at `offsets` underlined in the accent colour and a touch heavier.
+    static func underlined(_ name: String, _ offsets: [Int], font: NSFont, color: NSColor, accent: NSColor) -> NSAttributedString {
+        let out = NSMutableAttributedString(string: name, attributes: [.font: font, .foregroundColor: color])
+        let marked = NSFont.systemFont(ofSize: font.pointSize, weight: .semibold)
+        let chars = Array(name.indices)
+        for o in offsets where o < chars.count {
+            let r = NSRange(chars[o]..<name.index(after: chars[o]), in: name)
+            out.addAttributes([.underlineStyle: NSUnderlineStyle.single.rawValue, .underlineColor: accent, .font: marked], range: r)
+        }
+        return out
     }
 }
 
@@ -873,9 +1145,15 @@ final class SectionCellView: NSTableCellView {
     }
 }
 
-/// Sidebar column: titlebar spacer, the outline, and a footer with "+" and the connection status.
+/// Sidebar column: the header (under the traffic lights), the filter's field when it shows, the outline,
+/// and a footer with "+" and "New Section".
 final class SidebarContainerView: NSView {
-    var scroll: NSScrollView?
+    var scroll: NSScrollView? {
+        didSet { if let scroll { addSubview(emptyFilter, positioned: .above, relativeTo: scroll) } }
+    }
+    let header = SidebarHeader()
+    let filterBar = SidebarFilterBar()
+    let emptyFilter = SidebarEmptyFilterView()
     let footer = SidebarFooter()
     private let edge = CALayer()
     var theme: AppTheme? {
@@ -883,28 +1161,45 @@ final class SidebarContainerView: NSView {
             guard let theme else { return }
             layer?.backgroundColor = theme.panel.cgColor
             edge.backgroundColor = theme.shadow.cgColor
+            header.theme = theme
+            filterBar.theme = theme
             footer.theme = theme
         }
     }
-    static let titlebarInset: CGFloat = 38
-    static let footerHeight: CGFloat = 34
+    static let footerHeight: CGFloat = 28
 
     override var isFlipped: Bool { true }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
+        addSubview(header)
+        addSubview(filterBar)
         addSubview(footer)
+        emptyFilter.isHidden = true
+        filterBar.isHidden = true
         layer?.addSublayer(edge)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// Where the outline starts: under the header, and under the filter's field while it shows.
+    var outlineTop: CGFloat { SidebarHeader.height + (filterBar.isHidden ? 0 : SidebarFilterBar.space) }
+
     override func layout() {
         super.layout()
         let fh = SidebarContainerView.footerHeight
-        scroll?.frame = NSRect(x: 0, y: SidebarContainerView.titlebarInset, width: bounds.width,
-                               height: max(0, bounds.height - SidebarContainerView.titlebarInset - fh))
+        header.frame = NSRect(x: 0, y: 0, width: bounds.width, height: SidebarHeader.height)
+        filterBar.frame = NSRect(x: 10, y: SidebarHeader.height + 2, width: max(0, bounds.width - 20), height: SidebarFilterBar.height)
+        let top = outlineTop
+        let outline = NSRect(x: 0, y: top, width: bounds.width, height: max(0, bounds.height - top - fh))
+        scroll?.frame = outline
+        // While a filter matches nothing, its message sits at the top of the outline and the row on screen below it.
+        emptyFilter.frame = NSRect(x: 0, y: top, width: bounds.width, height: SidebarEmptyFilterView.height)
+        if let scroll {
+            let inset = emptyFilter.isHidden ? 0 : SidebarEmptyFilterView.height
+            if scroll.contentInsets.top != inset { scroll.contentInsets = NSEdgeInsets(top: inset, left: 0, bottom: 8, right: 0) }
+        }
         footer.frame = NSRect(x: 0, y: bounds.height - fh, width: bounds.width, height: fh)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -916,22 +1211,22 @@ final class SidebarContainerView: NSView {
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { [] }
 }
 
+/// "+" and "New Section"; while a filter is applied, a reminder that Cmd+1…9 follow it. (The connection
+/// status is in the header.)
 final class SidebarFooter: NSView {
     private let add = NSButton()
     private let addSection = NSButton()
-    private let status = NSTextField(labelWithString: "")
-    private let reconnect = NSButton(title: "Reconnect", target: nil, action: nil)
+    let hint = NSTextField(labelWithString: "⌘1–9 follow the filter")
     private let line = CALayer()
     var onNew: (() -> Void)?
     var onNewSection: (() -> Void)?
-    var onReconnect: (() -> Void)?
     var theme: AppTheme? {
         didSet {
             guard let theme else { return }
             line.backgroundColor = theme.shadow.cgColor
             add.contentTintColor = theme.textMuted
             addSection.contentTintColor = theme.textMuted
-            status.textColor = theme.textMuted
+            hint.textColor = theme.textMuted
         }
     }
 
@@ -952,16 +1247,10 @@ final class SidebarFooter: NSView {
             b.action = sel
             addSubview(b)
         }
-        status.font = .systemFont(ofSize: 11)
-        status.lineBreakMode = .byTruncatingTail
-        addSubview(status)
-        reconnect.bezelStyle = .push
-        reconnect.controlSize = .small
-        reconnect.refusesFirstResponder = true
-        reconnect.target = self
-        reconnect.action = #selector(reconnectClicked)
-        reconnect.isHidden = true
-        addSubview(reconnect)
+        hint.font = .systemFont(ofSize: 11)
+        hint.lineBreakMode = .byTruncatingTail
+        hint.isHidden = true
+        addSubview(hint)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -975,25 +1264,12 @@ final class SidebarFooter: NSView {
         CATransaction.commit()
         add.frame = NSRect(x: 10, y: (h - 22) / 2, width: 24, height: 22)
         addSection.frame = NSRect(x: 36, y: (h - 22) / 2, width: 26, height: 22)
-        var right = bounds.width - 10
-        if !reconnect.isHidden {
-            reconnect.sizeToFit()
-            reconnect.frame = NSRect(x: right - reconnect.frame.width, y: (h - reconnect.frame.height) / 2, width: reconnect.frame.width, height: reconnect.frame.height)
-            right = reconnect.frame.minX - 6
-        }
-        status.sizeToFit()
-        let sw = min(status.frame.width, right - 70)
-        status.frame = NSRect(x: right - sw, y: (h - status.frame.height) / 2, width: max(0, sw), height: status.frame.height)
-    }
-
-    func setStatus(_ text: String?, reconnect show: Bool, theme: AppTheme) {
-        status.stringValue = text ?? ""
-        status.toolTip = text
-        reconnect.isHidden = !show
-        needsLayout = true
+        hint.sizeToFit()
+        let right = bounds.width - 10
+        let hw = min(hint.frame.width, max(0, right - 70))
+        hint.frame = NSRect(x: right - hw, y: (h - hint.frame.height) / 2, width: hw, height: hint.frame.height)
     }
 
     @objc private func newClicked() { onNew?() }
     @objc private func sectionClicked() { onNewSection?() }
-    @objc private func reconnectClicked() { onReconnect?() }
 }
