@@ -30,6 +30,14 @@ BOSUN_BUILD_DIR=build-mine ./build.sh   # the same into build-mine/, leaving bui
 
 `build.sh` regenerates `Bosun.xcodeproj` from `project.yml` each time, so edit `project.yml`, not the project.
 
+## Signed release build
+
+`./release.sh` makes a build for other Macs, the same pipeline as the SkulkWorks apps: a Release build signed with Developer ID and the hardened runtime, notarized with `notarytool` and stapled, then a DMG that is signed, notarized and stapled too. Everything goes into `build-dist/` (the DMG is `build-dist/den/build/Bosun.dmg`), so it never touches `build/`. The signing settings are passed to `xcodebuild` by the script, so `build.sh` builds stay ad hoc. The version is the bosun crate's, from `Cargo.toml`, and the build number is the commit count.
+
+It needs the Developer ID identity in the keychain and `NOTARY_PROFILE` naming a notarytool keychain profile (without it the build is signed but not notarized, and Gatekeeper refuses it on other Macs). With a `skulkworks/den` checkout beside the repo the DMG gets Den's laid-out window; without one it's a plain DMG. `./release.sh verify` checks a build: the signature, the hardened runtime, both tickets and Gatekeeper's verdict. `./release.sh package` redoes only the notarizing and the DMG for an app already built.
+
+To run the test modes against the signed app, point `dev.sh` at it: `BOSUN_BUILD_DIR=build-dist/den/build ./dev.sh run --focustest`.
+
 ## Running
 
 To use it day to day, run `make install-mac` from the repo root. It builds into `build-release/` (so it never replaces a dev copy running from `build/`) and installs `~/Applications/Bosun.app`. Quit the installed app first.
