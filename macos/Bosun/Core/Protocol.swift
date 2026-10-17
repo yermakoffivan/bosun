@@ -94,6 +94,8 @@ public struct SessionInfo: Codable, Equatable, Sendable {
 
 public enum AgentState: String, Codable, Equatable, Sendable, CaseIterable {
     case running, waiting, done, idle, error, unknown
+    /// A done turn you've read (`SeenTracker`): drawn, never sent by the daemon.
+    case seen
 
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)

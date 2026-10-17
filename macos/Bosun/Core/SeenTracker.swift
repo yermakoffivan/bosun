@@ -6,9 +6,10 @@ import Foundation
 /// **Hook statuses** (the agent reports its own state, e.g. Claude Code): done means the agent finished its turn
 /// and it's the user's turn. The daemon sends the hook's `done_at` with the idle status, and the session shows done
 /// while that is newer than the last time the user gave the session input in this app (typed, pasted or dropped
-/// into its terminal). Being on screen doesn't clear it. A new status without `done_at` (the next prompt made it
-/// running, a permission prompt opened) ends it, and so does seeing it running, so a stale `done_at` can't bring
-/// it back.
+/// into its terminal). Being on screen doesn't clear it, but reading it does: once the pane has been the active pane
+/// of the front window for a moment, or Mark as Read was chosen, it shows as `seen` (done, and read) until the next
+/// turn. A new status without `done_at` (the next prompt made it running, a permission prompt opened) ends it, and
+/// so does seeing it running, so a stale `done_at` can't bring it back.
 ///
 /// **Detector statuses** (Bosun guesses from the pane): an idle session that ran and changed since this viewer
 /// last looked at it shows as done. "Ran" latches when the session is seen running, or reports done through its
@@ -32,6 +33,8 @@ public struct SeenTracker: Equatable, Sendable {
     private var viewed: Set<String> = []
     /// The last time the user gave each session input in this app, Unix ms.
     private var lastInput: [String: UInt64] = [:]
+    /// The last time each session's done turn was read, Unix ms.
+    private var lastRead: [String: UInt64] = [:]
 
     public init() {}
 
@@ -80,22 +83,34 @@ public struct SeenTracker: Equatable, Sendable {
         entries[session] = e
     }
 
-    /// The last input time of every session that has one, Unix ms (saved across launches).
-    public var inputTimes: [String: UInt64] { lastInput }
-
-    /// Input times saved by an earlier run. A newer time already noted wins.
-    public mutating func restoreInputs(_ times: [String: UInt64]) {
-        for (s, t) in times { lastInput[s] = max(lastInput[s] ?? 0, t) }
+    /// The session's done turn was read at `at` (Unix ms): focused for a moment, or marked read. A detector
+    /// status has no turn to keep, so it's simply seen.
+    public mutating func markRead(_ session: String, at: UInt64) {
+        lastRead[session] = max(lastRead[session] ?? 0, at)
+        if entries[session]?.hook == false { markSeen(session) }
     }
 
-    /// Drop the input times of sessions that no longer exist.
+    /// The last input time of every session that has one, Unix ms (saved across launches).
+    public var inputTimes: [String: UInt64] { lastInput }
+    /// The last read time of every session that has one, Unix ms (saved across launches).
+    public var readTimes: [String: UInt64] { lastRead }
+
+    /// Input and read times saved by an earlier run. A newer time already noted wins.
+    public mutating func restoreInputs(_ times: [String: UInt64], read: [String: UInt64] = [:]) {
+        for (s, t) in times { lastInput[s] = max(lastInput[s] ?? 0, t) }
+        for (s, t) in read { lastRead[s] = max(lastRead[s] ?? 0, t) }
+    }
+
+    /// Drop the input and read times of sessions that no longer exist.
     public mutating func pruneInputs(keeping sessions: Set<String>) {
         lastInput = lastInput.filter { sessions.contains($0.key) }
+        lastRead = lastRead.filter { sessions.contains($0.key) }
     }
 
     public mutating func forget(_ session: String) {
         entries[session] = nil
         lastInput[session] = nil
+        lastRead[session] = nil
     }
 
     /// What to draw for a session whose daemon state is `state`.
@@ -103,20 +118,25 @@ public struct SeenTracker: Equatable, Sendable {
         guard state == .idle, let e = entries[session] else { return state }
         if e.hook {
             guard let d = e.doneAt, d > e.ranAfter, d > (lastInput[session] ?? 0) else { return state }
-            return .done
+            return d > (lastRead[session] ?? 0) ? .done : .seen
         }
         guard e.ran, e.changed, !viewed.contains(session) else { return state }
         return .done
     }
 }
 
-/// The done rule's input times on disk (`inputs-<daemon>.json` in the app's Application Support folder), so a
-/// relaunch doesn't show every finished session as done again.
+/// The done rule's input and read times on disk (`inputs-<daemon>.json` in the app's Application Support folder),
+/// so a relaunch doesn't show every finished session as done again.
 public struct SavedInputs: Codable, Equatable, Sendable {
     public var version = 1
     public var inputs: [String: UInt64]
+    /// Absent in files written before read marks.
+    public var read: [String: UInt64]?
 
-    public init(_ inputs: [String: UInt64]) { self.inputs = inputs }
+    public init(_ inputs: [String: UInt64], read: [String: UInt64] = [:]) {
+        self.inputs = inputs
+        self.read = read.isEmpty ? nil : read
+    }
 
     public func encoded() -> Data? {
         let e = JSONEncoder()

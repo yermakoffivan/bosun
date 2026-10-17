@@ -4,6 +4,12 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.5] — 2026-10-17
+
+### Added
+
+- **Read and unread done turns in Bosun for Mac.** A done turn is unread (a filled dot in the done colour) until you've read it, then it shows as a hollow ring in the same colour, with "done · read" in the pane header, so you can tell a finished turn you've seen from one waiting for you, and from an idle session. Reading it means having its pane as the active pane of the front window for two seconds, or choosing **Mark as Read** from a row's or tab's right-click menu (a row marks all its done tabs). Read turns leave the header's done count and their notification, the next turn is unread again, and read marks survive a relaunch.
+
 ## [2.2.4] — 2026-10-17
 
 ### Added

@@ -31,6 +31,7 @@ public enum SidebarFilter {
         switch t.state {
         case .waiting: return ["waiting"]
         case .done: return ["done"]
+        case .seen: return ["done", "read"]
         case .running: return ["running"]
         case .error: return ["error"]
         case .idle, .unknown: return ["idle"]

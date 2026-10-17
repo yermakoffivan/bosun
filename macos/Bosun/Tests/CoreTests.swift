@@ -573,6 +573,49 @@ final class SeenTrackerTests: XCTestCase {
         XCTAssertEqual(t.display("a", state: .idle), .done)
     }
 
+    func testReadDoneTurnShowsSeenUntilTheNextTurn() {
+        var t = SeenTracker()
+        t.setViewed(["a"])
+        t.observe("a", status: hookDone(1_000), title: nil)
+        XCTAssertEqual(t.display("a", state: .idle), .done)
+        t.markRead("a", at: 1_100)
+        XCTAssertEqual(t.display("a", state: .idle), .seen)
+        // The next turn finishing is unread again.
+        t.observe("a", status: hookRunning, title: nil)
+        t.observe("a", status: hookDone(2_000), title: nil)
+        XCTAssertEqual(t.display("a", state: .idle), .done)
+        // Input clears a read turn as it does an unread one.
+        t.markRead("a", at: 2_100)
+        t.noteInput("a", at: 2_200)
+        XCTAssertEqual(t.display("a", state: .idle), .idle)
+        // Read times survive a relaunch, and go with the session.
+        var u = SeenTracker()
+        u.restoreInputs([:], read: t.readTimes)
+        u.observe("a", status: hookDone(2_000), title: nil)
+        XCTAssertEqual(u.display("a", state: .idle), .seen)
+        u.pruneInputs(keeping: [])
+        XCTAssertEqual(u.display("a", state: .idle), .done)
+    }
+
+    func testMarkReadOnADetectorSessionIsSeeing() {
+        var t = SeenTracker()
+        let idle = StatusInfo(state: .idle, source: "detector")
+        let running = StatusInfo(state: .running, source: "detector")
+        t.observe("a", status: idle, title: nil)
+        t.observe("a", status: running, title: nil)
+        t.observe("a", status: idle, title: nil)
+        XCTAssertEqual(t.display("a", state: .idle), .done)
+        t.markRead("a", at: 1)
+        XCTAssertEqual(t.display("a", state: .idle), .idle)
+    }
+
+    func testSavedInputsKeepReadTimesAndReadOldFiles() throws {
+        let s = SavedInputs(["a": 1], read: ["a": 2])
+        XCTAssertEqual(SavedInputs.decode(try XCTUnwrap(s.encoded())), s)
+        let old = try XCTUnwrap(#"{"version":1,"inputs":{"a":1}}"#.data(using: .utf8))
+        XCTAssertEqual(SavedInputs.decode(old), SavedInputs(["a": 1]))
+    }
+
     func testDetectorSessionsKeepTheSeenRule() {
         var t = SeenTracker()
         let idle = StatusInfo(state: .idle, source: "detector")

@@ -903,6 +903,13 @@ final class FocusTest: TestKit {
         await sleep(400)
         r.check("…and it stays done while the pane is on screen", showsDone(s))
         shot("14-done-header-and-row")
+        let doneCount = app.headerStatus
+        // Read in place: the active pane of the front window for two seconds.
+        let read = await waitUntil(AppController.readAfter + 1.5) { ws.headerStatus(s)?.state == .seen }
+        r.check("done: after two seconds as the front pane it's read: \"done · read\" in the header, a hollow ring in the done colour",
+                read && ws.headerStatus(s)?.text == "done · read" && sidebarBadge(s) == .seen && app.sidebar.itemFor(session: s) != nil,
+                "header \(String(describing: ws.headerStatus(s))), row \(String(describing: sidebarBadge(s)))")
+        r.check("…and the header's done count drops it", app.headerStatus != doneCount, "\(doneCount) → \(app.headerStatus)")
 
         await type("thanks\n")
         r.check("done: typing into the pane clears it", await waitUntil(2) { showsNotDone(s) },
@@ -930,8 +937,15 @@ final class FocusTest: TestKit {
                     "tab \(String(describing: sidebarBadge(f.webTests))), row \(String(describing: sidebarBadge(rowItem)))")
             await sleep(300)
             shot("15-done-in-a-multi-tab-row")
+            // Mark as Read on the row (before the two seconds are up): its done tab is read straight away.
+            let mark = app.sessionMenu(for: f.webTests, rowItem: rowItem).items.first { $0.title == "Mark as Read" }
+            r.check("done: the row's menu has Mark as Read while a tab is done", mark != nil)
+            if let mark { NSApp.sendAction(mark.action!, to: mark.target, from: mark) }
+            r.check("…which shows the tab and the row as read at once", await waitUntil(0.5) { sidebarBadge(f.webTests) == .seen && sidebarBadge(rowItem) == .seen },
+                    "tab \(String(describing: sidebarBadge(f.webTests))), row \(String(describing: sidebarBadge(rowItem)))")
+            r.check("…and the menu no longer offers it", app.sessionMenu(for: f.webTests, rowItem: rowItem).items.contains { $0.title == "Mark as Read" } == false)
             await type("seen\n")
-            r.check("…and typing into that pane clears all three", await waitUntil(2) { showsNotDone(f.webTests) && sidebarBadge(rowItem) != .done })
+            r.check("…and typing into that pane clears all three", await waitUntil(2) { showsNotDone(f.webTests) && sidebarBadge(rowItem) != .done && sidebarBadge(rowItem) != .seen })
             _ = await claudeHook(f.webTests, "SessionStart", #"{"hook_event_name":"SessionStart"}"#)
         }
         // Leave the fixture as it was: idle from its hook.

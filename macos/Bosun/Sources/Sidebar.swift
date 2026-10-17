@@ -634,7 +634,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
 
     private func aggregate(_ c: Container) -> AgentState {
         let states = c.tabs.map { app.displayState($0.session) }
-        for s in [AgentState.waiting, .error, .running, .done] where states.contains(s) { return s }
+        for s in [AgentState.waiting, .error, .running, .done, .seen] where states.contains(s) { return s }
         return states.first ?? .unknown
     }
 

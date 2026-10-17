@@ -27,7 +27,7 @@ struct AppTheme {
         switch state {
         case .running: running
         case .waiting: waiting
-        case .done: done
+        case .done, .seen: done
         case .error: error
         case .idle, .unknown: idle
         }
@@ -116,8 +116,8 @@ final class StatusBadge: NSView {
             ring.isHidden = true
             dot.isHidden = false
             switch (exited, state) {
-            case (true, _), (_, .idle), (_, .unknown):
-                // Hollow: nothing needs you.
+            case (true, _), (_, .idle), (_, .unknown), (_, .seen):
+                // Hollow: nothing needs you (a read done turn keeps the done colour).
                 dot.fillColor = nil
                 dot.strokeColor = color.cgColor
             default:

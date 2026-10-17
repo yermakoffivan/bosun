@@ -1142,6 +1142,8 @@ final class TileHeaderView: NSView {
             case .done:
                 text = "done"
                 color = theme.done
+            case .seen:
+                text = "done · read"
             case .running:
                 text = d ?? ""
             default:

@@ -314,12 +314,14 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         bw.focus.setWindowKey(true)
         bw.workspace.windowKeyChanged(true)
         bw.workspace.focusActiveTerminal()
+        checkReading()
     }
 
     func windowDidResignKey(_ notification: Notification) {
         guard !assumeKeyForTests, let bw = controller(for: notification.object as? NSWindow) else { return }
         bw.focus.setWindowKey(false)
         bw.workspace.windowKeyChanged(false)
+        checkReading()
     }
 
     func enableTestKey() {
@@ -345,7 +347,10 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     func appBecameActive() {
         notifier.recheck()
         reviewSeen()
+        checkReading()
     }
+
+    func appResignedActive() { checkReading() }
 
     func windowDidResize(_ notification: Notification) {
         guard controller(for: notification.object as? NSWindow) === current else { return }
@@ -629,6 +634,53 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         ws.owner.updateTitle()
         updateDockBadge()
         reviewSeen()
+        checkReading()
+    }
+
+    // MARK: Read
+
+    private var readTimer: Timer?
+    private var readCandidate: String?
+    /// How long a done pane has to be the active pane of the front window to count as read.
+    static let readAfter: TimeInterval = 2
+
+    /// The active pane of the window in front of you: the key window's, with the app active (in the test modes,
+    /// the window they treat as key).
+    private var frontPane: String? {
+        guard NSApp.isActive || assumeKeyForTests else { return nil }
+        return windows.first(where: isKey)?.workspace.activeSession
+    }
+
+    /// A done turn is read once its pane has been the front pane for `readAfter`. Called whenever any of that
+    /// may have changed.
+    func checkReading() {
+        let target = frontPane.flatMap { displayState($0) == .done ? $0 : nil }
+        guard target != readCandidate else { return }
+        readCandidate = target
+        readTimer?.invalidate()
+        readTimer = nil
+        guard let target else { return }
+        readTimer = Timer.scheduledTimer(withTimeInterval: Self.readAfter, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.readCandidate = nil
+                self.readTimer = nil
+                if self.frontPane == target, self.displayState(target) == .done { self.markRead([target]) }
+            }
+        }
+    }
+
+    /// Mark done turns read (focused for a moment, or Mark as Read): drawn as seen until the next turn.
+    func markRead(_ sessions: [String]) {
+        let now = UInt64(Date().timeIntervalSince1970 * 1000)
+        for s in sessions { seen.markRead(s, at: now) }
+        scheduleInputsSave()
+        for s in sessions where !attention.delivered.isEmpty { act(attention.seen(s)) }
+        for bw in windows {
+            bw.sidebar.refreshRows(Set(sessions))
+            bw.workspace.updateChromeState()
+        }
+        updateHeaderStatus()
     }
 
     /// The user typed, pasted or dropped into `session`'s terminal: a hook-reported done turn is now read,
@@ -733,13 +785,13 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     private func loadInputs() {
         guard let data = try? Data(contentsOf: inputsURL), let saved = SavedInputs.decode(data) else { return }
-        seen.restoreInputs(saved.inputs)
+        seen.restoreInputs(saved.inputs, read: saved.read ?? [:])
     }
 
     func saveInputs() {
         inputsTimer?.invalidate()
         inputsTimer = nil
-        guard let data = SavedInputs(seen.inputTimes).encoded() else { return }
+        guard let data = SavedInputs(seen.inputTimes, read: seen.readTimes).encoded() else { return }
         try? data.write(to: inputsURL, options: .atomic)
     }
 
@@ -849,6 +901,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         if chrome { for bw in windows { bw.workspace.updateChromeState() }; updateTitle() }
         updateDockBadge()
         updateHeaderStatus()
+        // A turn that finishes in the pane you're in starts counting towards read.
+        if !touched.isEmpty { checkReading() }
     }
 
     private var hadLiveSnapshot = false
@@ -1635,6 +1689,10 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             _ = item("Resume") { [weak self] in self?.restartExited(s, resume: true) }
         }
         _ = item("Rename") { [weak self] in self?.startRename(s) }
+        // A row's menu marks every done tab of the row; a tab's or a pane header's only that one.
+        let isRowItem: Bool = { if case .row = rowItem?.kind { return true }; return false }()
+        let unread = (isRowItem ? container?.tabs.map(\.session) ?? [s] : [s]).filter { displayState($0) == .done }
+        if !unread.isEmpty { _ = item("Mark as Read") { [weak self] in self?.markRead(unread) } }
         if let c = container {
             _ = item("New Tab in This Row…") { [weak self] in self?.newTab(in: c.id) }
             if case .tab = rowItem?.kind {
