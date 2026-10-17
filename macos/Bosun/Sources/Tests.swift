@@ -368,8 +368,8 @@ final class FocusTest: TestKit {
         await showRow(api)
         r.check("start: the active terminal is first responder", firstResponderIsActiveTerminal)
 
-        // --only a,b runs just those sections (rows, panes, zoom, newpanes, clientmoves, done, notify, appearance, links, sheet, empty,
-        // tiledrag, sidebardrag, shortcuts, windows).
+        // --only a,b runs just those sections (rows, panes, zoom, newpanes, clientmoves, done, notify, appearance, links, filter, sheet,
+        // empty, tiledrag, sidebardrag, shortcuts, header, windows).
         if let only = argValue("--only") {
             let parts = Set(only.split(separator: ",").map(String.init))
             if parts.contains("rows") { await rows(f) }
@@ -381,6 +381,7 @@ final class FocusTest: TestKit {
             if parts.contains("notify") { await notifications(f) }
             if parts.contains("appearance") { await appearancePair(f) }
             if parts.contains("links") { await links() }
+            if parts.contains("filter") { await filter(f) }
             await layoutSections(parts)
             if parts.contains("windows") { await windows(f) }
             await finish()
@@ -729,6 +730,9 @@ final class FocusTest: TestKit {
 
         // 17b. Cmd+click on URLs and paths.
         await links()
+
+        // 17c. The sidebar filter (Cmd+F).
+        await filter(f)
 
         // 18–22. Sheet layout, placeholders, pane drag, sidebar drag, the shortcuts panel.
         await layoutSections(nil)

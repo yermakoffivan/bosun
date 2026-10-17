@@ -13,6 +13,7 @@ extension FocusTest {
         if wants("tiledrag") { await tileDrag() }
         if wants("sidebardrag") { await sidebarDrag() }
         if wants("shortcuts") { await shortcuts() }
+        if wants("header") { await headerLayout() }
     }
 
     // MARK: Sheet layout

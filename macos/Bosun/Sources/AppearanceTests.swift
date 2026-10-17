@@ -34,10 +34,16 @@ extension FocusTest {
         r.check("Light appearance: the chrome shows theme_light (\(light))", await waitChrome(light), chromeDetail())
         r.check("…the window and titlebar are light", w.appearance?.bestMatch(from: [.aqua, .darkAqua]) == .aqua)
         r.check("…a light chrome isn't the dark one", !app.theme.isDark)
+        let lightHeader = headerShowsTheme()
+        r.check("…the sidebar header follows it: accent tile, its ink, the accent-to-done gradient (lighter)", lightHeader.ok, lightHeader.detail)
+        let lightInk = app.sidebar.view.header.anchor.strokeColor
         shot("30-appearance-light")
         await setAppearance(.darkAqua)
         r.check("switching NSApp to darkAqua: the chrome shows theme_dark (\(dark)) live", await waitChrome(dark), chromeDetail())
         r.check("…the window and titlebar are dark", w.appearance?.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua)
+        let darkHeader = headerShowsTheme()
+        r.check("…and the header recolours live", darkHeader.ok, darkHeader.detail)
+        r.check("…its anchor's ink flips with the accent's lightness (\(light) → \(dark))", lightInk != app.sidebar.view.header.anchor.strokeColor)
         shot("31-appearance-dark")
         r.check("the pair never changes theme (the TUI's)", app.daemon.state.theme.name == theme
                 && app.daemon.state.config.value("theme")?.stringValue == theme)
