@@ -204,4 +204,70 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(cached.sessionOrder, ["bosun-new-1"])
         XCTAssertEqual(cached.apply(try decode(#"{"t":"notice","seq":1,"message":"x"}"#)), .gap(expected: 0, got: 1))
     }
+
+    private static let themeJSON = ###"{"name":"nord","bg":"#2e3440","panel":"#3b4252","panel_alt":"#434c5e","selection_bg":"#4c566a","text":"#d8dee9","text_muted":"#81899c","accent":"#88c0d0","shadow":"#1a1f28","dim_fg":"#4c566a","status_running":"#a3be8c","status_waiting":"#ebcb8b","status_idle":"#6d7a90","status_error":"#bf616a","status_done":"#8fbcbb""###
+
+    func testThemeWithoutATerminalTableDecodesAsNil() throws {
+        // An older daemon's theme has no `terminal` key.
+        let p = try JSONDecoder().decode(ThemePalette.self, from: Data((Self.themeJSON + "}").utf8))
+        XCTAssertEqual(p.name, "nord")
+        XCTAssertNil(p.terminal)
+        // And a `null` reads the same.
+        let q = try JSONDecoder().decode(ThemePalette.self, from: Data((Self.themeJSON + #","terminal":null}"#).utf8))
+        XCTAssertNil(q.terminal)
+    }
+
+    func testThemeTerminalTableDecodesAndRoundTrips() throws {
+        let palette = (0..<16).map { String(format: "\"#%02x%02x%02x\"", $0, $0, $0) }.joined(separator: ",")
+        let table = ##","terminal":{"ghostty":"Nord","background":"#2e3440","foreground":"#d8dee9","cursor":"#eceff4","selection_bg":"#eceff4","selection_fg":"#4c566a","palette":["##
+            + palette + "]}}"
+        let p = try JSONDecoder().decode(ThemePalette.self, from: Data((Self.themeJSON + table).utf8))
+        let t = try XCTUnwrap(p.terminal)
+        XCTAssertEqual(t.ghostty, "Nord")
+        XCTAssertEqual(t.background, "#2e3440")
+        XCTAssertEqual(t.selectionBg, "#eceff4")
+        XCTAssertEqual(t.selectionFg, "#4c566a")
+        XCTAssertEqual(t.palette.count, 16)
+        XCTAssertEqual(t.palette[15], "#0f0f0f")
+        let again = try JSONDecoder().decode(ThemePalette.self, from: JSONEncoder().encode(p))
+        XCTAssertEqual(again, p)
+        // The ghostty name is optional.
+        let noName = table.replacingOccurrences(of: #""ghostty":"Nord","#, with: "")
+        XCTAssertNil(try JSONDecoder().decode(ThemePalette.self, from: Data((Self.themeJSON + noName).utf8)).terminal?.ghostty)
+        // It arrives in a theme message too.
+        let msg = try decode(##"{"t":"theme","seq":8,"theme":"## + Self.themeJSON + table + "}")
+        if case .theme(_, let th) = msg { XCTAssertEqual(th.terminal?.palette.count, 16) } else { XCTFail("not a theme message") }
+    }
+
+    /// The first-launch palette is the opencode theme file, so a first launch doesn't flash another theme.
+    func testFallbackPaletteMatchesTheOpencodeThemeFile() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let toml = try String(contentsOf: root.appendingPathComponent("themes/opencode.toml"), encoding: .utf8)
+        var values: [String: String] = [:]
+        var palette: [String] = []
+        var inTerminal = false
+        for raw in toml.split(whereSeparator: \.isNewline) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line == "[terminal]" { inTerminal = true; continue }
+            if inTerminal, line.hasPrefix("\"") {
+                palette += line.split(separator: ",").map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"")) }.filter { !$0.isEmpty }
+                continue
+            }
+            let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"")) }
+            if parts.count == 2 { values[(inTerminal ? "terminal." : "") + parts[0]] = parts[1] }
+        }
+        let f = ThemePalette.fallback
+        let expected: [(String, String)] = [
+            ("name", f.name), ("bg", f.bg), ("panel", f.panel), ("panel_alt", f.panelAlt), ("selection_bg", f.selectionBg),
+            ("text", f.text), ("text_muted", f.textMuted), ("accent", f.accent), ("shadow", f.shadow), ("dim_fg", f.dimFg),
+            ("status_running", f.statusRunning), ("status_waiting", f.statusWaiting), ("status_idle", f.statusIdle),
+            ("status_error", f.statusError), ("status_done", f.statusDone),
+            ("terminal.background", f.terminal?.background ?? ""), ("terminal.foreground", f.terminal?.foreground ?? ""),
+            ("terminal.cursor", f.terminal?.cursor ?? ""), ("terminal.selection_bg", f.terminal?.selectionBg ?? ""),
+            ("terminal.selection_fg", f.terminal?.selectionFg ?? ""),
+        ]
+        for (key, value) in expected { XCTAssertEqual(values[key], value, key) }
+        XCTAssertEqual(palette, f.terminal?.palette)
+    }
 }

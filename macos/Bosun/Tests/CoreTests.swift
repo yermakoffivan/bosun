@@ -746,7 +746,8 @@ final class MiscCoreTests: XCTestCase {
         XCTAssertFalse(RGB(hex: "#fafafa")!.isDark)
         XCTAssertNil(RGB(hex: "nope"))
         var p = ThemePalette.fallback
-        XCTAssertEqual(ThemeMap.configLines(for: p, available: ["TokyoNight"]).first, "background = #0a0a0a")
+        p.terminal = nil
+        XCTAssertEqual(ThemeMap.configLines(for: p, available: ["TokyoNight"]).first, "background = #0b0d12")
         p.name = "tokyonight"
         // A counterpart's colours are written out, so they beat colours set in the user's Ghostty config.
         let file = "# TokyoNight\npalette = 0=#15161e\nbackground = #1a1b26\nforeground=#c0caf5\nfont-size = 14\n\n"
@@ -756,6 +757,83 @@ final class MiscCoreTests: XCTestCase {
         XCTAssertEqual(ThemeMap.configLines(for: p, available: ["TokyoNight"]) { _ in nil }.count, 21)
         XCTAssertEqual(ThemeMap.configLines(for: p, available: []).count, 21)
         XCTAssertEqual(ThemeMap.generated(p).filter { $0.hasPrefix("palette = ") }.count, 16)
+    }
+
+    private func terminalTable(background: String = "#101010") -> TerminalPalette {
+        TerminalPalette(ghostty: "Some Theme", background: background, foreground: "#eeeeee", cursor: "#ff00ff",
+                        selectionBg: "#333333", selectionFg: "#fafafa",
+                        palette: (0..<16).map { String(format: "#%02x%02x%02x", $0 * 10, $0 * 12, $0 * 14) })
+    }
+
+    func testThemeMapPrefersTheThemesOwnTable() {
+        var p = ThemePalette.fallback
+        p.name = "tokyonight"
+        p.terminal = terminalTable()
+        let ghosttyFile = "background = #1a1b26\npalette = 0=#15161e\n"
+        // The table wins over the Ghostty counterpart in the name map, and over the generator.
+        let lines = ThemeMap.configLines(for: p, available: ["TokyoNight"]) { _ in ghosttyFile }
+        XCTAssertEqual(lines.count, 21)
+        XCTAssertEqual(Array(lines.prefix(5)), ["background = #101010", "foreground = #eeeeee", "cursor-color = #ff00ff",
+                                                "selection-background = #333333", "selection-foreground = #fafafa"])
+        XCTAssertEqual(lines[5], "palette = 0=#000000")
+        XCTAssertEqual(lines[20], "palette = 15=#96b4d2")
+        // A name the map has never heard of still gets its table.
+        p.name = "my-theme"
+        XCTAssertEqual(ThemeMap.configLines(for: p, available: []).first, "background = #101010")
+        // No table: the name map applies, as before the table existed.
+        p.name = "tokyonight"
+        p.terminal = nil
+        XCTAssertEqual(ThemeMap.configLines(for: p, available: ["TokyoNight"]) { _ in ghosttyFile },
+                       ["background = #1a1b26", "palette = 0=#15161e"])
+        // No table and no counterpart: generated.
+        p.name = "my-theme"
+        XCTAssertEqual(ThemeMap.configLines(for: p, available: ["TokyoNight"]) { _ in ghosttyFile }, ThemeMap.generated(p))
+    }
+
+    func testThemeMapIgnoresATableItCannotUse() {
+        var p = ThemePalette.fallback
+        p.name = "tokyonight"
+        let file = "background = #1a1b26\n"
+        var short = terminalTable()
+        short.palette.removeLast()
+        var bad = terminalTable()
+        bad.cursor = "magenta"
+        for t in [short, bad] {
+            p.terminal = t
+            XCTAssertNil(ThemeMap.tableLines(t))
+            XCTAssertEqual(ThemeMap.configLines(for: p, available: ["TokyoNight"]) { _ in file }, ["background = #1a1b26"])
+        }
+        p.terminal = terminalTable()
+        XCTAssertEqual(ThemeMap.tableLines(p.terminal!)?.count, 21)
+    }
+
+    func testGeneratedPaletteIsLiftedToReadOnTheBackground() {
+        // Status colours that mix to under 2:1 on a dark background.
+        var p = ThemePalette.fallback
+        p.terminal = nil
+        p.name = "dim"
+        p.bg = "#101418"; p.text = "#c8ccd4"; p.textMuted = "#7b818d"
+        p.statusError = "#5a2a2e"; p.statusRunning = "#2a4a30"; p.statusWaiting = "#4a3a20"; p.statusDone = "#203a5a"
+        let bg = RGB(hex: p.bg)!
+        let lines = ThemeMap.generated(p)
+        let palette = lines.filter { $0.hasPrefix("palette = ") }.map { String($0.split(separator: "=").last!.trimmingCharacters(in: .whitespaces)) }
+        XCTAssertEqual(palette.count, 16)
+        for i in Array(1...6) + Array(9...14) {
+            XCTAssertGreaterThanOrEqual(RGB(hex: palette[i])!.contrast(with: bg), 3 - 0.02, "ANSI \(i) \(palette[i])")
+        }
+        // Black stays near the background and white stays the text colour.
+        XCTAssertLessThan(RGB(hex: palette[0])!.contrast(with: bg), 2)
+        XCTAssertEqual(palette[7], "#c8ccd4")
+        // A palette that already reads is left as it was: the colour of a bright status stays within a hair.
+        p.statusError = "#ff5d6b"
+        let red = RGB(hex: ThemeMap.generated(p).filter { $0.hasPrefix("palette = 1=") }[0].split(separator: "=").last.map(String.init)!)!
+        XCTAssertGreaterThanOrEqual(red.contrast(with: bg), 3)
+        XCTAssertEqual(red.hex, "#ff5d6b")
+    }
+
+    func testContrastRatio() {
+        XCTAssertEqual(RGB(hex: "#000000")!.contrast(with: RGB(hex: "#ffffff")!), 21, accuracy: 0.001)
+        XCTAssertEqual(RGB(hex: "#777777")!.contrast(with: RGB(hex: "#777777")!), 1, accuracy: 0.001)
     }
 
     func testPercentile() {
