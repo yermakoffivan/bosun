@@ -6,6 +6,7 @@
   devctl.py SOCK cmd '{"op":...}'     send one command, print its ack
 """
 import json
+import os
 import socket
 import struct
 import sys
@@ -81,6 +82,13 @@ def spec(name, args, container=None):
 
 
 def fixture(c, agent):
+    # A daemon that just started may not have found the sessions already on the tmux server yet: wait for
+    # them, or every one of them would be created a second time ("api 2"…).
+    want = int(os.environ.get("BOSUN_FIXTURE_EXISTING", "0"))
+    for _ in range(50):
+        if len(c.snapshot["sessions"]) >= want:
+            break
+        c.resync()
     have = {s["display"] for s in c.snapshot["sessions"]}
     plan = [
         ("api", f"python3 {agent} api"),
