@@ -984,6 +984,25 @@ impl Daemon {
                 let r = self.set_theme(&name, persist);
                 self.ack_result(client, id, r);
             }
+            CmdOp::GetTheme { name } => {
+                let ack = if theme_entries().iter().any(|t| t.name == name) {
+                    let theme = Theme::load(&name, crate::config::user_themes_dir().as_deref());
+                    Ack {
+                        id,
+                        ok: true,
+                        theme: Some(Box::new(ThemeWire::from(&theme))),
+                        ..Default::default()
+                    }
+                } else {
+                    Ack {
+                        id,
+                        ok: false,
+                        error: Some(format!("unknown theme: {name}")),
+                        ..Default::default()
+                    }
+                };
+                self.send_to(client, &ServerMsg::Ack(ack));
+            }
             CmdOp::ApplySetting { key, value } => {
                 let r = self.apply_setting(&key, &value);
                 self.ack_result(client, id, r);
@@ -1371,6 +1390,7 @@ impl Daemon {
             error,
             session: f.session.clone(),
             spec: f.spec,
+            theme: None,
             pending_launch: f.pending_launch,
             messages: f.messages,
         };

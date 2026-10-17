@@ -156,6 +156,14 @@ Types the agent's launch command into a session sitting at a bare shell, rebuilt
 
 Reads the spec stored on a live session, to pre-fill a modify form. The `ack` carries it in `spec`. Sessions Bosun didn't create have none (`ok: false`).
 
+#### `get_theme`
+
+```json
+{"t":"cmd","id":9,"op":"get_theme","name":"flexoki-light"}
+```
+
+Reads any theme's palette, in the same form as `theme` in the snapshot (its `[terminal]` table included when it has one), so a client can preview themes while a picker is open. It changes nothing: no delta follows and nothing is written. The name must be one of `themes` (`ok: false` otherwise).
+
 #### `modify`
 
 ```json

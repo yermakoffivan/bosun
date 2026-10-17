@@ -108,6 +108,11 @@ pub enum CmdOp {
     GetSpec {
         session: String,
     },
+    /// Read any theme's palette (for a client's live preview while a
+    /// picker is open). Changes nothing; the ack carries it in `theme`.
+    GetTheme {
+        name: String,
+    },
     /// Store a new spec on a live session. Takes effect on the next
     /// restart.
     Modify {
@@ -318,6 +323,9 @@ pub struct Ack {
     /// `get_spec`: the stored spec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<SpecWire>,
+    /// `get_theme`: the theme's palette.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<Box<ThemeWire>>,
     /// `create`/`restart` with `defer_launch`: send `launch_agent`
     /// with these values once the terminal is attached.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1125,6 +1133,9 @@ mod tests {
             },
             CmdOp::GetSpec {
                 session: "s".into(),
+            },
+            CmdOp::GetTheme {
+                name: "nord".into(),
             },
             CmdOp::Modify {
                 session: "s".into(),

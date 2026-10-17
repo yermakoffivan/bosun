@@ -517,6 +517,41 @@ fn serve_theme_pair_palettes_and_settings() {
     let body = std::fs::read_to_string(&config).unwrap();
     assert!(!body.contains("theme_light"), "{body}");
 
+    // get_theme reads any theme's palette for a preview, and changes nothing.
+    let before = std::fs::read_to_string(&config).unwrap();
+    let seen = command(
+        &mut c,
+        20,
+        json!({"op": "get_theme", "name": "flexoki-light"}),
+    );
+    let ack = seen.last().unwrap();
+    assert_eq!(ack["ok"], true, "{seen:#?}");
+    assert_eq!(ack["theme"]["name"], "flexoki-light", "{ack}");
+    assert!(
+        ack["theme"]["bg"].as_str().unwrap().starts_with('#'),
+        "{ack}"
+    );
+    assert_eq!(
+        ack["theme"]["terminal"]["palette"]
+            .as_array()
+            .map(|p| p.len()),
+        Some(16),
+        "{ack}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|v| v["t"] == "theme" || v["t"] == "theme_pair"),
+        "{seen:#?}"
+    );
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), before);
+    let seen = command(
+        &mut c,
+        21,
+        json!({"op": "get_theme", "name": "no-such-theme"}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], false, "{seen:#?}");
+
     // A name no theme has, or a non-string, is refused.
     for (id, value) in [(3, json!("no-such-theme")), (4, json!(true))] {
         let seen = command(
