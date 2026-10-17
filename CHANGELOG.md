@@ -8,7 +8,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **Passthrough is on in Bosun's tmux server.** Bosun now sets `allow-passthrough on` on its own server, so programs in a session can reach the real terminal: inline images over the kitty graphics protocol (in Bosun for Mac, Ghostty or kitty) now draw instead of being dropped by tmux. Only Bosun's own server is changed; with `tmux_socket = "default"` your tmux keeps its own setting. A server started before this version picks it up the next time Bosun creates a session there.
+- **Passthrough is on in Bosun's tmux server.** Bosun now sets `allow-passthrough on` on its own server, so programs in a session can reach the real terminal: image viewers that wrap the kitty graphics protocol for tmux (`kitten icat`, `timg -pk`, yazi) now draw in Bosun for Mac, Ghostty or kitty instead of being dropped by tmux. Only Bosun's own server is changed; with `tmux_socket = "default"` your tmux keeps its own setting. A server started before this version picks it up the next time Bosun creates a session there.
+- **A Bosun for Mac screenshot in the README**, staged by `macos/Bosun/dev.sh demo`: a made-up project played by a script in place of the agents, so a retake never shows real sessions.
 
 ## [2.2.1] — 2026-10-17
 
