@@ -206,17 +206,18 @@ final class AppSettings {
         }
     }
 
-    /// True once, on the first launch where terminals follow the theme only because that is now the default:
-    /// the caller shows `TerminalSync.note`. An explicit choice either way (the setting is stored) never gets it.
-    func takeTerminalSyncNote() -> Bool {
+    /// Run once at launch, before the theme is applied: the first launch with terminal sync switches it on
+    /// (see `TerminalSync.migrate`). True when the caller should show `TerminalSync.note`.
+    func migrateTerminalSync() -> Bool {
         guard !testMode else { return false }
         let domain = Bundle.main.bundleIdentifier.flatMap { d.persistentDomain(forName: $0) } ?? [:]
         let stored = domain[Key.matchTerminalTheme] as? Bool
-        let noted = domain[Key.terminalSyncNoted] as? Bool ?? false
+        let migrated = domain[Key.terminalSyncNoted] as? Bool ?? false
         let existing = !domain.keys.filter { $0 != Key.terminalSyncNoted }.isEmpty
-        guard !noted else { return false }
-        d.set(true, forKey: Key.terminalSyncNoted)
-        return TerminalSync.shouldNote(stored: stored, alreadyNoted: noted, existingInstall: existing)
+        let m = TerminalSync.migrate(stored: stored, alreadyMigrated: migrated, existingInstall: existing)
+        if !migrated { d.set(true, forKey: Key.terminalSyncNoted) }
+        if m.turnOn { d.set(true, forKey: Key.matchTerminalTheme) }
+        return m.note
     }
 
     /// Terminal views kept attached, visible ones included. 12 holds the shown row and two or three

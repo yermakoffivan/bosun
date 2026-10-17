@@ -9,10 +9,11 @@ public enum TerminalSync {
     /// The title band's one-time note.
     public static let note = "Terminals now follow the Bosun theme (Settings → Theme to change)"
 
-    /// Whether this launch shows the note: the setting was never stored (so it is on only because of the
-    /// default), the note hasn't been shown, and the install isn't brand new (a first launch has nothing to
-    /// announce).
-    public static func shouldNote(stored: Bool?, alreadyNoted: Bool, existingInstall: Bool) -> Bool {
-        stored == nil && !alreadyNoted && existingInstall
+    /// The first launch with terminal sync switches it on for everyone, once, whatever was stored before
+    /// (it used to be off by default, so a stored off mostly means "never changed it"). An existing install
+    /// whose terminals change because of it is told. After that, an off chosen in Settings sticks.
+    public static func migrate(stored: Bool?, alreadyMigrated: Bool, existingInstall: Bool) -> (turnOn: Bool, note: Bool) {
+        guard !alreadyMigrated else { return (false, false) }
+        return (stored == false, existingInstall && stored != true)
     }
 }

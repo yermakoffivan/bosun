@@ -831,17 +831,22 @@ final class MiscCoreTests: XCTestCase {
         XCTAssertEqual(red.hex, "#ff5d6b")
     }
 
-    func testTerminalSyncNoteIsForExistingInstallsThatNeverChose() {
+    func testTerminalSyncSwitchesEveryoneOnOnce() {
         XCTAssertTrue(TerminalSync.defaultOn)
-        // Never stored, never told, not a first launch: the one launch where it flips.
-        XCTAssertTrue(TerminalSync.shouldNote(stored: nil, alreadyNoted: false, existingInstall: true))
-        // An explicit choice either way keeps its value and gets no note.
-        XCTAssertFalse(TerminalSync.shouldNote(stored: true, alreadyNoted: false, existingInstall: true))
-        XCTAssertFalse(TerminalSync.shouldNote(stored: false, alreadyNoted: false, existingInstall: true))
-        // Only once, and not on a brand-new install.
-        XCTAssertFalse(TerminalSync.shouldNote(stored: nil, alreadyNoted: true, existingInstall: true))
-        XCTAssertFalse(TerminalSync.shouldNote(stored: nil, alreadyNoted: false, existingInstall: false))
         XCTAssertEqual(TerminalSync.note, "Terminals now follow the Bosun theme (Settings → Theme to change)")
+        // First launch with sync: a stored off (the old default) is switched on and the user is told.
+        XCTAssertEqual(TerminalSync.migrate(stored: false, alreadyMigrated: false, existingInstall: true).turnOn, true)
+        XCTAssertEqual(TerminalSync.migrate(stored: false, alreadyMigrated: false, existingInstall: true).note, true)
+        // Never stored: on by the default already, still worth a note for an existing install.
+        XCTAssertEqual(TerminalSync.migrate(stored: nil, alreadyMigrated: false, existingInstall: true).turnOn, false)
+        XCTAssertEqual(TerminalSync.migrate(stored: nil, alreadyMigrated: false, existingInstall: true).note, true)
+        // Already following the theme: nothing changes, nothing to say.
+        XCTAssertEqual(TerminalSync.migrate(stored: true, alreadyMigrated: false, existingInstall: true).note, false)
+        // A brand-new install has nothing to announce.
+        XCTAssertEqual(TerminalSync.migrate(stored: nil, alreadyMigrated: false, existingInstall: false).note, false)
+        // After the first launch, an off chosen in Settings sticks.
+        XCTAssertEqual(TerminalSync.migrate(stored: false, alreadyMigrated: true, existingInstall: true).turnOn, false)
+        XCTAssertEqual(TerminalSync.migrate(stored: false, alreadyMigrated: true, existingInstall: true).note, false)
     }
 
     func testContrastRatio() {
