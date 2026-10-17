@@ -1622,6 +1622,16 @@ mod tests {
             other => panic!("expected AlreadyRunning, got {:?}", other.err()),
         }
         drop(first);
-        InstanceLock::acquire(&path).expect("lock is free again");
+        // A child another test forks in this instant holds a copy of the
+        // fd (and so the flock) until its exec closes it: allow a moment.
+        let mut again = InstanceLock::acquire(&path);
+        for _ in 0..50 {
+            if again.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            again = InstanceLock::acquire(&path);
+        }
+        again.expect("lock is free again");
     }
 }
