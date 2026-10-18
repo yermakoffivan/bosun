@@ -192,6 +192,10 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         updateFilterChrome()
     }
 
+    /// A section shows collapsed when it's saved that way, or has no rows (it opens again as its saved state says
+    /// once it has one).
+    private func shownCollapsed(_ s: Section) -> Bool { s.collapsed || s.members.isEmpty }
+
     /// Snoozed or Docked, for a section header.
     private func role(of item: SidebarItem) -> SectionRole? {
         guard case .section(let id) = item.kind else { return nil }
@@ -239,7 +243,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         switch item.kind {
         case .section(let id):
             // A filter shows every section with a match expanded, without touching its saved state.
-            let collapsed = filtered == nil && (sb.sections.first { $0.id == id }?.collapsed ?? false)
+            let collapsed = filtered == nil && (sb.sections.first { $0.id == id }.map(shownCollapsed) ?? false)
             if collapsed { outline.collapseItem(item) } else { outline.expandItem(item) }
             if !collapsed { for c in item.children { expandAsModel(c, sidebar: sb) } }
         case .heading:
@@ -358,8 +362,9 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     func rowClicked(_ row: Int) {
         guard let item = outline.item(atRow: row) as? SidebarItem else { return }
         if case .section(let id) = item.kind {
-            // A click anywhere on a section header toggles it (with a filter, sections stay open).
-            if filtered == nil { app.setSectionCollapsed(id, outline.isItemExpanded(item)) }
+            // A click anywhere on a section header toggles it (with a filter, sections stay open; one with no
+            // rows stays closed).
+            if filtered == nil, !item.children.isEmpty { app.setSectionCollapsed(id, outline.isItemExpanded(item)) }
             return
         }
         if case .heading = item.kind { return }
@@ -619,10 +624,10 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
 
     private func baseHeight(_ it: SidebarItem) -> CGFloat {
         switch it.kind {
-        case .section: return 30
-        case .heading: return 28
-        case .row: return 28
-        case .tab: return 24
+        case .section: return Fonts.height(30)
+        case .heading: return Fonts.height(28)
+        case .row: return Fonts.height(28)
+        case .tab: return Fonts.height(24)
         }
     }
 
@@ -655,12 +660,12 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             let waiting = s.members.flatMap(\.tabs).contains { app.displayState($0.session) == .waiting }
             c.chevronRoom = filtered == nil ? 20 : 0
             c.lead = lead(of: item)
-            c.configure(name: s.name, count: s.members.count, collapsed: s.collapsed && filtered == nil, waiting: waiting, theme: theme,
+            c.configure(name: s.name, count: s.members.count, collapsed: shownCollapsed(s) && filtered == nil, waiting: waiting, theme: theme,
                         onAdd: s.role != nil ? nil : { [weak self] in self?.app.newSession(section: id) })
         case .heading:
             guard let c = cell as? SectionCellView else { return }
             c.lead = 0
-            c.configure(name: "On screen", count: 0, collapsed: false, waiting: false, theme: theme)
+            c.configure(name: "On screen", count: nil, collapsed: false, waiting: false, theme: theme)
         case .row(let id):
             guard let c = cell as? SidebarCellView, let con = st.sidebar.container(id: id) else { return }
             let multi = con.tabs.count > 1
@@ -747,6 +752,12 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         if !reloading { updateBottomGap() }
         guard !reloading, let it = notification.userInfo?["NSObject"] as? SidebarItem, case .section(let id) = it.kind else { return }
         app.setSectionCollapsed(id, true)
+    }
+
+    /// A section with no rows stays closed.
+    func outlineView(_ outlineView: NSOutlineView, shouldExpandItem item: Any) -> Bool {
+        guard let it = item as? SidebarItem, case .section = it.kind else { return true }
+        return !it.children.isEmpty
     }
 
     func outlineView(_ outlineView: NSOutlineView, shouldCollapseItem item: Any) -> Bool {
@@ -1166,14 +1177,14 @@ final class SidebarCellView: NSTableCellView {
         super.init(frame: .zero)
         identifier = SidebarCellView.id
         textField = nameField
-        nameField.font = .systemFont(ofSize: 13, weight: .regular)
+        nameField.font = Fonts.ui(13)
         nameField.lineBreakMode = .byTruncatingTail
         nameField.isSelectable = false
         nameField.isEditable = false
         nameField.drawsBackground = false
         nameField.isBezeled = false
         nameField.cell?.isScrollable = true
-        trailing.font = .systemFont(ofSize: 11, weight: .regular)
+        trailing.font = Fonts.ui(11)
         trailing.alignment = .right
         trailing.lineBreakMode = .byTruncatingHead
         addSubview(badge)
@@ -1203,7 +1214,7 @@ final class SidebarCellView: NSTableCellView {
         badge.set(state, exited: exited, theme: theme)
         if !nameField.isEditable {
             let color = exited ? theme.textMuted : theme.text
-            let font = NSFont.systemFont(ofSize: indent > 0 ? 12.5 : 13, weight: state == .waiting || state == .done ? .medium : .regular)
+            let font = Fonts.ui(indent > 0 ? 12.5 : 13, state == .waiting || state == .done ? .medium : .regular)
             nameField.textColor = color
             nameField.font = font
             if let name {
@@ -1214,6 +1225,7 @@ final class SidebarCellView: NSTableCellView {
                 }
             }
         }
+        trailing.font = Fonts.ui(11)
         trailing.stringValue = t
         trailing.textColor = trailingColor
         trailing.toolTip = trailingTip
@@ -1225,7 +1237,7 @@ final class SidebarCellView: NSTableCellView {
     /// `name` with the characters at `offsets` underlined in the accent colour and a touch heavier.
     static func underlined(_ name: String, _ offsets: [Int], font: NSFont, color: NSColor, accent: NSColor) -> NSAttributedString {
         let out = NSMutableAttributedString(string: name, attributes: [.font: font, .foregroundColor: color])
-        let marked = NSFont.systemFont(ofSize: font.pointSize, weight: .semibold)
+        let marked = Fonts.ui(font.pointSize, .semibold, scaled: false)
         let chars = Array(name.indices)
         for o in offsets where o < chars.count {
             let r = NSRange(chars[o]..<name.index(after: chars[o]), in: name)
@@ -1252,9 +1264,7 @@ final class SectionCellView: NSTableCellView {
         super.init(frame: .zero)
         identifier = SectionCellView.id
         wantsLayer = true
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
         label.lineBreakMode = .byTruncatingTail
-        count.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         addSubview(label)
         addSubview(count)
         layer?.addSublayer(dot)
@@ -1289,13 +1299,18 @@ final class SectionCellView: NSTableCellView {
         addButton.frame = NSRect(x: bounds.width - chevronRoom - 18, y: (h - 16) / 2, width: 16, height: 16)
     }
 
-    func configure(name: String, count n: Int, collapsed: Bool, waiting: Bool, theme: AppTheme, onAdd: (() -> Void)? = nil) {
+    /// The row count beside the name.
+    var countText: String { count.stringValue }
+
+    func configure(name: String, count n: Int?, collapsed: Bool, waiting: Bool, theme: AppTheme, onAdd: (() -> Void)? = nil) {
         self.onAdd = onAdd
         addButton.isHidden = onAdd == nil
+        label.font = Fonts.ui(11, .semibold)
+        count.font = Fonts.digits(11)
         addButton.contentTintColor = theme.textMuted
         label.stringValue = name.uppercased()
         label.textColor = theme.textMuted
-        count.stringValue = collapsed ? "\(n)" : ""
+        count.stringValue = n.map { "\($0)" } ?? ""
         count.textColor = theme.dimFg
         dot.backgroundColor = theme.waiting.cgColor
         dot.isHidden = !(collapsed && waiting)

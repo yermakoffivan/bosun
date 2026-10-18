@@ -101,10 +101,8 @@ final class TitleBand: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        title.font = .systemFont(ofSize: 12.5, weight: .semibold)
         title.alignment = .center
         title.lineBreakMode = .byTruncatingMiddle
-        note.font = .systemFont(ofSize: 11.5)
         note.alignment = .right
         note.lineBreakMode = .byTruncatingTail
         addSubview(title)
@@ -127,6 +125,8 @@ final class TitleBand: NSView {
     }
 
     func set(title t: String, theme: AppTheme) {
+        title.font = Fonts.ui(12.5, .semibold)
+        note.font = Fonts.ui(11.5)
         title.stringValue = t
         title.textColor = theme.text
         note.textColor = theme.textMuted
@@ -175,7 +175,7 @@ final class PaletteView: NSView, NSTextFieldDelegate {
     var onClose: (() -> Void)?
     var source: ((String) -> [Entry])?
     static let width: CGFloat = 560
-    static let rowHeight: CGFloat = 34
+    static var rowHeight: CGFloat { max(34, Fonts.height(34)) }
     static let maxRows = 9
 
     override var isFlipped: Bool { true }
@@ -193,7 +193,7 @@ final class PaletteView: NSView, NSTextFieldDelegate {
         field.isBezeled = false
         field.drawsBackground = false
         field.focusRingType = .none
-        field.font = .systemFont(ofSize: 17)
+        field.font = Fonts.ui(17, scaled: false)
         field.placeholderString = "Go to session…"
         field.delegate = self
         field.cell?.sendsActionOnEndEditing = false
@@ -209,7 +209,7 @@ final class PaletteView: NSView, NSTextFieldDelegate {
         layer?.shadowColor = theme.shadow.cgColor
         field.textColor = theme.text
         field.placeholderAttributedString = NSAttributedString(string: "Go to session…",
-            attributes: [.foregroundColor: theme.textMuted, .font: NSFont.systemFont(ofSize: 17)])
+            attributes: [.foregroundColor: theme.textMuted, .font: Fonts.ui(17, scaled: false)])
         rows.forEach { $0.needsDisplay = true }
     }
 
@@ -295,11 +295,11 @@ final class PaletteRow: NSView {
         self.theme = theme
         super.init(frame: .zero)
         title.stringValue = entry.title
-        title.font = .systemFont(ofSize: 13.5, weight: .medium)
+        title.font = Fonts.ui(13.5, .medium)
         title.textColor = entry.exited ? theme.textMuted : theme.text
         title.lineBreakMode = .byTruncatingTail
         subtitle.stringValue = entry.subtitle
-        subtitle.font = .systemFont(ofSize: 11.5)
+        subtitle.font = Fonts.ui(11.5)
         subtitle.textColor = theme.textMuted
         subtitle.alignment = .right
         subtitle.lineBreakMode = .byTruncatingMiddle

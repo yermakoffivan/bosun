@@ -92,6 +92,15 @@ final class BosunWindow {
         }
     }
 
+    /// The interface font changed: everything is drawn again with it, and the sidebar's rows and the panes'
+    /// headers take its height.
+    func applyFonts() {
+        applyTheme()
+        sidebar.reload()
+        sidebar.view.needsLayout = true
+        workspace.applyFonts()
+    }
+
     func applyTheme() {
         let theme = app.theme
         window.appearance = theme.appearance

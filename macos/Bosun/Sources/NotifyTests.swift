@@ -222,7 +222,7 @@ extension FocusTest {
         }
 
         guard let shots else { return }
-        app.showSettings()
+        app.showSettings(tab: .notifications)
         if let sw = app.settingsWindow {
             var ok = false
             for _ in 0..<10 where !ok {

@@ -95,7 +95,7 @@ extension FocusTest {
         })
         await themePreview(light: light, dark: dark)
         if let shots {
-            app.showSettings()
+            app.showSettings(tab: .appearance)
             if let sw = app.settingsWindow {
                 var ok = false
                 for _ in 0..<10 where !ok {
@@ -183,7 +183,7 @@ extension FocusTest {
     /// Moving through a Settings theme popup previews each theme on the chrome before anything is chosen (driven
     /// through the popup's own menu delegate, as AppKit calls it). macOS is in Dark mode here, so `dark` shows.
     private func themePreview(light: String, dark: String) async {
-        app.showSettings()
+        app.showSettings(tab: .appearance)
         await sleep(300)
         func popUps(_ v: NSView?) -> [NSPopUpButton] {
             guard let v else { return [] }

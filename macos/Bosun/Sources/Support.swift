@@ -159,7 +159,8 @@ final class AppSettings {
 
     private init() {
         d.register(defaults: ["focusFollowsMouse": true, "matchTerminalTheme": TerminalSync.defaultOn, "poolSize": AppSettings.defaultPoolSize, "sidebarWidth": 248.0,
-                              Key.notifyWhenWaiting: true, Key.notifyWhenDone: true, Key.showDockBadge: true])
+                              Key.notifyWhenWaiting: true, Key.notifyWhenDone: true, Key.showDockBadge: true,
+                              Key.interfaceFontSize: Fonts.baseInterfaceSize])
     }
 
     enum Key {
@@ -168,6 +169,10 @@ final class AppSettings {
         static let showDockBadge = "showDockBadge"
         static let matchTerminalTheme = "matchTerminalTheme"
         static let terminalSyncNoted = "terminalSyncNoted"
+        static let terminalFontFamily = "terminalFontFamily"
+        static let terminalFontSize = "terminalFontSize"
+        static let interfaceFontFamily = "interfaceFontFamily"
+        static let interfaceFontSize = "interfaceFontSize"
     }
 
     /// The test modes share the installed app's defaults (same bundle id), so their changes to these stay in memory.
@@ -236,6 +241,41 @@ final class AppSettings {
     var poolSize: Int {
         get { max(AppSettings.poolSizeRange.lowerBound, min(AppSettings.poolSizeRange.upperBound, d.integer(forKey: "poolSize"))) }
         set { d.set(newValue, forKey: "poolSize"); changed() }
+    }
+
+    // Fonts. The test modes keep these in memory and start from the defaults, so the installed app's fonts
+    // never change what they measure.
+    private var testFonts: [String: Any] = [:]
+
+    private func fontValue(_ key: String) -> Any? { testMode ? testFonts[key] : d.object(forKey: key) }
+
+    private func setFontValue(_ key: String, _ v: Any?) {
+        if testMode { testFonts[key] = v } else if let v { d.set(v, forKey: key) } else { d.removeObject(forKey: key) }
+        changed()
+    }
+
+    /// The terminal font's family; nil uses the Ghostty config's.
+    var terminalFontFamily: String? {
+        get { (fontValue(Key.terminalFontFamily) as? String).flatMap { $0.isEmpty ? nil : $0 } }
+        set { setFontValue(Key.terminalFontFamily, newValue) }
+    }
+
+    /// The terminal font's size in points; 0 uses the Ghostty config's.
+    var terminalFontSize: Double {
+        get { (fontValue(Key.terminalFontSize) as? Double).map { $0 > 0 ? min(max($0, Fonts.terminalSizeRange.lowerBound), Fonts.terminalSizeRange.upperBound) : 0 } ?? 0 }
+        set { setFontValue(Key.terminalFontSize, newValue > 0 ? newValue : nil) }
+    }
+
+    /// The interface font's family; nil is the system font.
+    var interfaceFontFamily: String? {
+        get { (fontValue(Key.interfaceFontFamily) as? String).flatMap { $0.isEmpty ? nil : $0 } }
+        set { setFontValue(Key.interfaceFontFamily, newValue) }
+    }
+
+    /// The interface font's size in points (13 by default).
+    var interfaceFontSize: Double {
+        get { (fontValue(Key.interfaceFontSize) as? Double).map { min(max($0, Fonts.interfaceSizeRange.lowerBound), Fonts.interfaceSizeRange.upperBound) } ?? Fonts.baseInterfaceSize }
+        set { setFontValue(Key.interfaceFontSize, newValue) }
     }
 
     var sidebarWidth: CGFloat {

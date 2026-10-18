@@ -46,7 +46,8 @@ final class Workspace {
     private var spareChrome: [TileChromeView] = []
     private var dividers: [DividerView] = []
     private var lastLayout = SplitNode.Layout()
-    static let headerHeight: CGFloat = 26
+    /// A pane's header, taller with a larger interface font.
+    static var headerHeight: CGFloat { max(26, Fonts.height(26)) }
     static let gap: CGFloat = 1
     static let inset: CGFloat = 5
     private(set) var windowKey = true
@@ -564,6 +565,13 @@ final class Workspace {
     func relayout() {
         lastLayout = displayRoot.layout(in: area.bounds, gap: Workspace.gap)
         syncChrome()
+    }
+
+    /// The interface font changed: pane headers take its size and height.
+    func applyFonts() {
+        for v in chrome.values { v.needsLayout = true }
+        updateChromeState()
+        relayout()
     }
 
     /// Create/remove chrome views to match the tree, then position everything.
@@ -1084,9 +1092,6 @@ final class TileHeaderView: NSView {
             l.refusesFirstResponder = true
             addSubview(l)
         }
-        name.font = .systemFont(ofSize: 12, weight: .semibold)
-        detail.font = .systemFont(ofSize: 11.5, weight: .regular)
-        zoom.font = .systemFont(ofSize: 11, weight: .medium)
         zoom.alignment = .right
         zoom.isHidden = true
         addSubview(badge)
@@ -1120,6 +1125,9 @@ final class TileHeaderView: NSView {
 
     func update(name n: String?, group: String?, state: AgentState?, detail d: String?, elapsed: String? = nil, exitedText: String = "exited", exited: Bool, active: Bool,
                 zoomNote: String?, theme: AppTheme) {
+        name.font = Fonts.ui(12, .semibold)
+        detail.font = Fonts.ui(11.5)
+        zoom.font = Fonts.ui(11, .medium)
         zoom.isHidden = zoomNote == nil
         zoom.stringValue = zoomNote ?? ""
         zoom.textColor = theme.accent
@@ -1310,8 +1318,6 @@ final class PlaceholderView: NSView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        title.font = .systemFont(ofSize: 15, weight: .semibold)
-        hint.font = .systemFont(ofSize: 12.5)
         for l in [title, hint] {
             l.alignment = .center
             l.refusesFirstResponder = true
@@ -1337,6 +1343,8 @@ final class PlaceholderView: NSView {
 
     @MainActor
     func configure(session: String?, app: AppController, theme: AppTheme) {
+        title.font = Fonts.ui(15, .semibold)
+        hint.font = Fonts.ui(12.5)
         title.textColor = theme.text
         hint.textColor = theme.textMuted
         if let session, let c = app.daemon.state.sidebar.container(holding: session), app.daemon.state.sidebar.role(ofRow: c.id) == .docked {

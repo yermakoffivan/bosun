@@ -317,6 +317,16 @@ class TestKit {
         return app.sessionMenu(for: c.active, rowItem: SidebarItem(kind: .row(id)))
     }
 
+    func sectionCountText(_ id: String) -> String? {
+        let o = app.sidebar.outline
+        for row in 0..<o.numberOfRows {
+            if let it = o.item(atRow: row) as? SidebarItem, it.kind == .section(id) {
+                return (o.view(atColumn: 0, row: row, makeIfNecessary: false) as? SectionCellView)?.countText
+            }
+        }
+        return nil
+    }
+
     func sectionPoint(_ id: String) -> NSPoint? {
         let o = app.sidebar.outline
         for row in 0..<o.numberOfRows {
@@ -492,6 +502,8 @@ final class FocusTest: TestKit {
             if parts.contains("filter") { await filter(f) }
             if parts.contains("sectionnew") { await newSessionInSection() }
             if parts.contains("parking") { await parking(f) }
+            if parts.contains("fonts") { await fonts(f) }
+            if parts.contains("settings") { await settingsTabs() }
             await layoutSections(parts)
             if parts.contains("windows") { await windows(f) }
             if parts.contains("remove") { await removeFromSidebar() }
@@ -548,6 +560,27 @@ final class FocusTest: TestKit {
         r.check("typing after a collapse reaches the pane", await paneShows(docs, "got: after-collapse"))
         if let p = sectionPoint(work) { await click(p) }
         await waitUntil(2) { app.daemon.state.sidebar.sections.first { $0.id == work }?.collapsed == false }
+        let workCount = app.daemon.state.sidebar.sections.first { $0.id == work }?.members.count ?? -1
+        r.check("an open section shows its row count too", sectionCountText(work) == "\(workCount)", sectionCountText(work) ?? "-")
+
+        // A section with no rows shows closed, and a click doesn't open it or change its saved state.
+        app.daemon.command(.insertSection(name: "Empty"))
+        await waitUntil(3) { app.daemon.state.sidebar.sections.contains { $0.name == "Empty" } }
+        if let empty = app.daemon.state.sidebar.sections.first(where: { $0.name == "Empty" })?.id {
+            await waitUntil(2) { self.sectionPoint(empty) != nil }
+            let o = app.sidebar.outline
+            let shownClosed = { (0..<o.numberOfRows).contains { row in
+                (o.item(atRow: row) as? SidebarItem).map { $0.kind == .section(empty) && !o.isItemExpanded($0) } == true } }
+            r.check("a section with no rows shows closed, with a count of 0", shownClosed() && sectionCountText(empty) == "0",
+                    "count \(sectionCountText(empty) ?? "-")")
+            if let p = sectionPoint(empty) { await click(p) }
+            await sleep(300)
+            r.check("…and a click on it leaves it closed and its saved state alone",
+                    shownClosed() && app.daemon.state.sidebar.sections.first { $0.id == empty }?.collapsed == false)
+            r.check("…with the keyboard still in the terminal", firstResponderIsActiveTerminal)
+            app.removeSection(empty)
+            await waitUntil(3) { !app.daemon.state.sidebar.sections.contains { $0.id == empty } }
+        }
 
         // 4. Rename in place (double-click the row's name), Return, then type. A single click on the selected
         // row's name only selects it.
@@ -857,6 +890,9 @@ final class FocusTest: TestKit {
         await layoutSections(nil)
         await windows(f)
         await removeFromSidebar()
+        // 22b. The terminal and interface fonts.
+        await fonts(f)
+        await settingsTabs()
         // 23. Snoozing and docking a row, and getting it back. Last: undocking gives docs a new session.
         await parking(f)
         await finish()
@@ -1187,6 +1223,91 @@ final class FocusTest: TestKit {
         }
         // Leave the fixture as it was: idle from its hook.
         _ = await claudeHook(s, "SessionStart", #"{"hook_event_name":"SessionStart"}"#)
+    }
+
+    // MARK: Fonts
+
+    func fonts(_ f: Fixture) async {
+        await showRow(f.api)
+        let s = AppSettings.shared
+        let o = app.sidebar.outline
+        guard let item = app.sidebar.itemFor(session: f.api), let term = app.pool.view(for: f.api) else {
+            r.check("fonts: the api row is listed with its terminal", false)
+            return
+        }
+        let rowH = { o.rect(ofRow: o.row(forItem: item)).height }
+        let nameFont = { (o.view(atColumn: 0, row: o.row(forItem: item), makeIfNecessary: false) as? SidebarCellView)?.nameField.font }
+        let termH = { term.frame.height }
+        let (h0, th0, grid0) = (rowH(), termH(), term.gridSize)
+        let system = NSFont.systemFont(ofSize: 13).familyName
+        r.check("fonts: by default the interface is the system font at 13 pt", nameFont()?.pointSize == 13 && nameFont()?.familyName == system,
+                "\(String(describing: nameFont()))")
+
+        // The interface font: a family and a size, live.
+        let family = "Helvetica Neue"
+        s.interfaceFontFamily = family
+        s.interfaceFontSize = 16
+        await waitUntil(2) { nameFont()?.pointSize == 16 }
+        r.check("fonts: Interface font and size apply at once to the sidebar's rows", nameFont()?.familyName == family && nameFont()?.pointSize == 16,
+                "\(String(describing: nameFont()))")
+        r.check("…the rows grow with it", rowH() > h0, "\(h0) → \(rowH())")
+        await waitUntil(2) { termH() < th0 }
+        r.check("…and so do the pane headers (the terminal below gets shorter)", termH() < th0, "\(th0) → \(termH())")
+        r.check("…the terminal's own font is left alone", term.gridSize.cols == grid0.cols, "\(grid0) → \(term.gridSize)")
+        shot("24-interface-font")
+
+        // The terminal font: its size and family reach the terminals at once.
+        s.terminalFontSize = 24
+        await waitUntil(3) { term.gridSize.cols < grid0.cols }
+        r.check("fonts: Terminal size applies at once: the terminal's grid has fewer columns", term.gridSize.cols < grid0.cols, "\(grid0) → \(term.gridSize)")
+        s.terminalFontFamily = "Menlo"
+        let overrides = (try? String(contentsOf: Paths.cacheDir.appendingPathComponent("ghostty-overrides.conf"), encoding: .utf8)) ?? ""
+        r.check("…and Terminal font goes into the terminals' config, replacing the Ghostty config's families",
+                overrides.contains(#"font-family = """#) && overrides.contains(#"font-family = "Menlo""#) && overrides.contains("font-size = 24"), overrides.split(separator: "\n").filter { $0.hasPrefix("font") }.joined(separator: "; "))
+        shot("24b-terminal-font")
+
+        // Back to the defaults.
+        s.terminalFontFamily = nil
+        s.terminalFontSize = 0
+        s.interfaceFontFamily = nil
+        s.interfaceFontSize = Fonts.baseInterfaceSize
+        await waitUntil(3) { term.gridSize.cols == grid0.cols && rowH() == h0 && nameFont()?.familyName == system }
+        r.check("fonts: back to From Ghostty config and System, everything is as it was",
+                term.gridSize.cols == grid0.cols && rowH() == h0 && nameFont()?.familyName == system && termH() == th0,
+                "\(term.gridSize) \(rowH()) \(termH()) \(String(describing: nameFont()))")
+    }
+
+    // MARK: Settings window
+
+    func settingsTabs() async {
+        app.showSettings(tab: .general)
+        guard let sw = app.settingsWindow else {
+            r.check("settings: the Settings window opens", false)
+            return
+        }
+        await sleep(300)
+        let items = sw.toolbar?.items.map(\.label) ?? []
+        r.check("settings: a toolbar with a tab per group: General, Appearance, Fonts, Notifications",
+                items == SettingsTab.allCases.map(\.title), "\(items)")
+        r.check("…in the preferences style", sw.toolbarStyle == .preference)
+        var heights: [SettingsTab: CGFloat] = [:]
+        for tab in SettingsTab.allCases {
+            app.showSettings(tab: tab)
+            await sleep(500)
+            heights[tab] = sw.frame.height
+            r.check("…\(tab.title) shows its tab, titled with its name", sw.title == tab.title, sw.title)
+            if let shots {
+                sw.contentView?.layoutSubtreeIfNeeded()
+                sw.displayIfNeeded()
+                let ok = WindowSnapshot.write(sw, to: URL(fileURLWithPath: "\(shots)/25-settings-\(tab.rawValue).png"))
+                r.say("      screenshot 25-settings-\(tab.rawValue).png \(ok ? "" : "FAILED")")
+            }
+        }
+        r.check("…and the window takes each tab's height", Set(heights.values).count > 1, "\(heights.mapValues { Int($0) })")
+        let screen = sw.screen?.visibleFrame.height ?? 0
+        r.check("…never taller than the screen", heights.values.allSatisfy { $0 <= screen }, "\(heights.mapValues { Int($0) }) on \(Int(screen))")
+        sw.close()
+        ws.focusActiveTerminal()
     }
 
     // MARK: Pane navigation

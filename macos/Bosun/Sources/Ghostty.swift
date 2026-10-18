@@ -23,6 +23,8 @@ final class GhosttyRuntime {
     private var terminalThemeLines: [String] = []
     /// The lines the app wants now; they reach the config at most once per `configUpdateInterval`.
     private var wantedThemeLines: [String] = []
+    /// The terminal font lines (Settings → Fonts) in the config last built.
+    private var terminalFontLines = Fonts.terminalConfigLines(family: AppSettings.shared.terminalFontFamily, size: AppSettings.shared.terminalFontSize)
     private var lastConfigUpdate: TimeInterval = -.infinity
     private var configUpdateTimer: Timer?
     /// How many times a theme change rebuilt the config (the tests count them).
@@ -104,6 +106,7 @@ final class GhosttyRuntime {
         ]
         lines += GhosttyRuntime.unbinds.map { "keybind = \($0)=unbind" }
         lines += terminalThemeLines
+        lines += terminalFontLines
         let path = Paths.cacheDir.appendingPathComponent("ghostty-overrides.conf").path
         try? (lines.joined(separator: "\n") + "\n").write(toFile: path, atomically: true, encoding: .utf8)
         ghostty_config_load_file(cfg, path)
@@ -151,6 +154,51 @@ final class GhosttyRuntime {
         config = newConfig
         if let old { ghostty_config_free(old) }
     }
+
+    /// Set the terminal font (Settings → Fonts): every terminal redraws with it straight away.
+    func setTerminalFont(family: String?, size: Double) {
+        let lines = Fonts.terminalConfigLines(family: family, size: size)
+        guard lines != terminalFontLines, let app else { return }
+        terminalFontLines = lines
+        guard let newConfig = buildConfig() else { return }
+        configUpdates += 1
+        ghostty_app_update_config(app, newConfig)
+        let old = config
+        config = newConfig
+        if let old { ghostty_config_free(old) }
+    }
+
+    /// The font size the Ghostty config gives terminals (Ghostty's own default without one).
+    lazy var configFontSize: Double? = {
+        guard let cfg = ghostty_config_new() else { return nil }
+        defer { ghostty_config_free(cfg) }
+        ghostty_config_load_default_files(cfg)
+        ghostty_config_load_recursive_files(cfg)
+        ghostty_config_finalize(cfg)
+        var size: Float = 0
+        let key = "font-size"
+        guard ghostty_config_get(cfg, &size, key, UInt(key.utf8.count)), size > 0 else { return nil }
+        return Double(size)
+    }()
+
+    /// The first font family the Ghostty config files name, read from the files (the C API doesn't give lists).
+    lazy var configFontFamily: String? = {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let files = [home.appendingPathComponent(".config/ghostty/config"),
+                     home.appendingPathComponent("Library/Application Support/com.mitchellh.ghostty/config")]
+        var family: String?
+        for f in files {
+            guard let text = try? String(contentsOf: f, encoding: .utf8) else { continue }
+            for line in text.split(separator: "\n") {
+                let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                guard parts.count == 2, parts[0] == "font-family" else { continue }
+                let v = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                // An empty value clears the list; the first family after it is the one used.
+                if v.isEmpty { family = nil } else if family == nil { family = v }
+            }
+        }
+        return family
+    }()
 
     func setAppFocus(_ focused: Bool) {
         if let app { ghostty_app_set_focus(app, focused) }

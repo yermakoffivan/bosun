@@ -39,7 +39,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     private(set) var theme = AppTheme(.fallback)
     private(set) var nav = NavBindings(nil) { didSet { updateNavMenu() } }
     private var navItems: [NavAction: NSMenuItem] = [:]
-    private(set) var settingsWindow: NSWindow?
+    private var settings: SettingsWindowController?
+    var settingsWindow: NSWindow? { settings?.window }
     private var waitingSince: [String: Date] = [:]
     private var monitors: [Any] = []
     private(set) var themeMenu = NSMenu(title: "Theme")
@@ -1190,7 +1191,22 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         for bw in windows { bw.workspace.updateChromeState() }
     }
 
+    /// The interface font last drawn with (family and size).
+    private var appliedInterfaceFont = AppController.interfaceFontKey
+
+    private static var interfaceFontKey: String { "\(AppSettings.shared.interfaceFontFamily ?? "")|\(AppSettings.shared.interfaceFontSize)" }
+
+    /// Settings → Fonts: terminals take the terminal font at once, and the windows the interface font.
+    private func applyFonts() {
+        GhosttyRuntime.shared.setTerminalFont(family: AppSettings.shared.terminalFontFamily, size: AppSettings.shared.terminalFontSize)
+        let key = AppController.interfaceFontKey
+        guard key != appliedInterfaceFont else { return }
+        appliedInterfaceFont = key
+        for bw in windows { bw.applyFonts() }
+    }
+
     private func settingsChanged() {
+        applyFonts()
         for bw in windows { bw.focus.followsMouse = AppSettings.shared.focusFollowsMouse }
         pool.capacity = AppSettings.shared.poolSize
         pool.evict(keeping: visibleSessions)
@@ -1658,16 +1674,16 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     /// The open new-session / modify form's model (the focus test switches agents through it).
     var formModel: NewSessionModel? { current.formModel }
 
-    @objc func showSettings() {
-        if settingsWindow == nil {
-            let w = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(themePair: themePairModel, editor: editorModel)))
-            w.title = "Bosun Settings"
-            w.styleMask = [.titled, .closable]
-            w.isReleasedWhenClosed = false
-            settingsWindow = w
+    @objc func showSettings() { showSettings(tab: nil) }
+
+    /// The Settings window, on `tab` (nil: the one it was last on).
+    func showSettings(tab: SettingsTab?) {
+        if settings == nil {
+            settings = SettingsWindowController(themePair: themePairModel, editor: editorModel)
+            settings?.window.center()
         }
-        settingsWindow?.center()
-        settingsWindow?.makeKeyAndOrderFront(nil)
+        if let tab { settings?.show(tab) }
+        settings?.window.makeKeyAndOrderFront(nil)
     }
 
     // MARK: Keyboard shortcuts panel
@@ -1986,7 +2002,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         let app = sub("Bosun")
         add(app, "About Bosun", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), target: NSApp)
         app.addItem(.separator())
-        add(app, "Settings…", #selector(showSettings), ",", target: self)
+        add(app, "Settings…", #selector(showSettings as () -> Void), ",", target: self)
         app.addItem(.separator())
         add(app, "Notify When Waiting", #selector(toggleNotifyWhenWaiting), target: self)
         add(app, "Notify When Done", #selector(toggleNotifyWhenDone), target: self)

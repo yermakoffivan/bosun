@@ -18,6 +18,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Dragging a row into or out of these sections does the same, and the daemon keeps them, so the TUI shows them too.
 - **`park_row` and `unpark_row` in `bosun serve`.** They snooze, dock and bring back rows. The sidebar carries `role` on the Snoozed and Docked sections and `parked` (where a row came from, when it wakes) on their rows. See `docs/protocol.md`.
 - **`started_at`, `create`'s `section` and `set_section_defaults` in `bosun serve`.** Status entries carry `started_at` (when the current turn started) while running or waiting, `create` takes an optional `section` id for the new row, and `set_section_defaults` stores a section's starting values for new sessions, sent in the section's `defaults`. See `docs/protocol.md`.
+- **Terminal and interface fonts in Bosun for Mac.** Settings → Fonts has two sets. **Terminal font** and its size default to your Ghostty config, and can be any installed fixed-width family and any size from 8 to 32 pt. **Interface font** and its size default to the system font at 13 pt (as before), and can be any installed family from 11 to 16 pt. The interface font is used in the sidebar, pane headers, the title bar and the session palette, and sidebar rows and pane headers grow with it. Both apply to every window and terminal as you change them.
+
+### Changed
+
+- **Bosun for Mac's Settings window has tabs.** General, Appearance, Fonts and Notifications sit in the window's toolbar, as in other Mac apps, and the window takes the height of the tab shown and opens on the last one you used.
+- **Section headers in Bosun for Mac show their row count while open too**, not only when collapsed, and a section with no rows stays closed until a row goes in.
 
 ### Fixed
 

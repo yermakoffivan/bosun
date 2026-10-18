@@ -74,7 +74,7 @@ struct ThemePairSection: View {
             }
             .pickerStyle(.radioGroup)
             Text(matchTerminalTheme
-                 ? "The terminals change colour with the theme above, including with Light and Dark mode. Your Ghostty config file is never changed; font, padding and everything else in it still apply."
+                 ? "The terminals change colour with the theme above, including with Light and Dark mode. Your Ghostty config file is never changed; padding and everything else in it still apply, and its font unless the Fonts tab sets one."
                  : "The terminals keep the colours from your Ghostty config, and View → Theme changes only the app around them. Your Ghostty config file is never changed.")
                 .font(.caption).foregroundStyle(.secondary)
         }

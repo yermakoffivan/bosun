@@ -66,7 +66,6 @@ final class SidebarHeader: NSView {
         wordmark.font = .systemFont(ofSize: 13, weight: .semibold)
         addSubview(wordmark)
 
-        status.font = .systemFont(ofSize: 11)
         status.lineBreakMode = .byTruncatingTail
         addSubview(status)
         statusDot.cornerRadius = 3
@@ -138,7 +137,8 @@ final class SidebarHeader: NSView {
     func set(_ s: HeaderStatus) {
         current = s
         guard let theme else { return }
-        let font = NSFont.systemFont(ofSize: 11)
+        let font = Fonts.ui(11)
+        status.font = font
         let muted: [NSAttributedString.Key: Any] = [.foregroundColor: theme.textMuted, .font: font]
         let text = NSMutableAttributedString()
         var dot: NSColor?
@@ -292,13 +292,11 @@ final class SidebarFilterBar: NSView {
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
-        field.font = .systemFont(ofSize: 12)
         field.lineBreakMode = .byTruncatingTail
         field.cell?.isScrollable = true
         field.cell?.sendsActionOnEndEditing = false
         addSubview(field)
         for l in [count, hint] {
-            l.font = .systemFont(ofSize: 10.5)
             l.lineBreakMode = .byClipping
             addSubview(l)
         }
@@ -333,9 +331,12 @@ final class SidebarFilterBar: NSView {
         layer?.borderWidth = editing ? 2 : 0
         layer?.borderColor = theme.accent.cgColor
         icon.contentTintColor = theme.textMuted
+        field.font = Fonts.ui(12)
+        count.font = Fonts.ui(10.5)
+        hint.font = Fonts.ui(10.5)
         field.textColor = theme.text
         field.placeholderAttributedString = NSAttributedString(string: "Filter sessions",
-            attributes: [.foregroundColor: theme.textMuted, .font: NSFont.systemFont(ofSize: 12)])
+            attributes: [.foregroundColor: theme.textMuted, .font: Fonts.ui(12)])
         count.textColor = theme.textMuted
         hint.textColor = theme.textMuted
         clear.contentTintColor = theme.textMuted
@@ -395,7 +396,6 @@ final class SidebarEmptyFilterView: NSView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        label.font = .systemFont(ofSize: 12)
         label.alignment = .center
         label.maximumNumberOfLines = 2
         label.lineBreakMode = .byTruncatingMiddle
@@ -413,7 +413,8 @@ final class SidebarEmptyFilterView: NSView {
     func set(query: String, theme: AppTheme) {
         label.stringValue = "No sessions match “\(query)”"
         label.textColor = theme.textMuted
-        let font = NSFont.systemFont(ofSize: 12)
+        let font = Fonts.ui(12)
+        label.font = font
         let t = NSMutableAttributedString(string: "Clear filter", attributes: [.foregroundColor: theme.accent, .font: font])
         t.append(NSAttributedString(string: "  esc", attributes: [.foregroundColor: theme.textMuted.withAlphaComponent(0.75), .font: font]))
         clear.attributedTitle = t
