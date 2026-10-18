@@ -190,7 +190,7 @@ Removes one row from the recents list, by its `id`.
   "sections":[{"id":"sec-1","name":"Work","collapsed":false,"members":[]}]}}
 ```
 
-Replaces the sidebar model after a drag and drop reorder, a move between sections, a collapse toggle or a tab reorder. Send back the [sidebar](#sidebar) from the last snapshot or delta, changed; a row's `name` and, on tabs, everything but `session` are ignored. Ids must be unique, every row needs at least one tab, `active` must be one of its tabs, and a session may appear only once. Sections and rows keep their ids, and a section's `defaults` stay as they are whether or not they're sent. The change is written to `config.toml` (where the TUI reads it), and section membership is remembered by display name as it is in the TUI, so a session that is restarted or recreated lands back in its section. Sessions the model leaves out are added back as ungrouped rows on the next refresh.
+Replaces the sidebar model after a drag and drop reorder, a move between sections, a collapse toggle or a tab reorder. Send back the [sidebar](#sidebar) from the last snapshot or delta, changed; a row's `name` and, on tabs, everything but `session` are ignored. Ids must be unique, every row needs at least one tab, `active` must be one of its tabs, and a session may appear only once. Sections and rows keep their ids, and a section's `defaults` and `role` and a row's `parked` stay as the daemon has them whether or not they're sent (moving a row into or out of Snoozed or Docked parks or unparks it; see `park_row`). The change is written to `config.toml` (where the TUI reads it), and section membership is remembered by display name as it is in the TUI, so a session that is restarted or recreated lands back in its section. Sessions the model leaves out are added back as ungrouped rows on the next refresh.
 
 #### `move_tab`
 
@@ -223,6 +223,24 @@ Adds an empty section at the end.
 ```
 
 Renames a section by id. Remembered section membership follows the new name.
+
+#### `park_row` and `unpark_row`
+
+```json
+{"t":"cmd","id":15,"op":"park_row","container_id":"con-1","role":"snoozed","wake_at":1792134462123}
+{"t":"cmd","id":16,"op":"park_row","container_id":"con-1","role":"snoozed","until_needed":true}
+{"t":"cmd","id":17,"op":"park_row","container_id":"con-1","role":"docked"}
+{"t":"cmd","id":18,"op":"unpark_row","container_id":"con-1"}
+```
+
+`park_row` moves a row to the end of the built-in Snoozed or Docked section, made when it's first needed (collapsed, after the user's own sections, Snoozed before Docked) and removed when its last row leaves. The row remembers the section and index it came from in its `parked` (see [Sidebar](#sidebar)); parking a row that's already parked moves it between the two and keeps where it came from.
+
+- **Snoozed:** its sessions keep running. It goes back by itself at `wake_at` (Unix ms), or with `until_needed` as soon as one of its tabs needs you: a hook reports a finished turn after the row was snoozed, or a tab is waiting, done or in error when it wasn't at the moment it was snoozed.
+- **Docked:** its live sessions are killed, and the row stays with its exited tabs.
+
+`unpark_row` puts a parked row back at its old index in its old section (among the ungrouped rows if that section is gone); it's acknowledged and does nothing for a row that isn't parked. A row leaving Docked has each exited tab resumed: recreated from its recents entry (matched by display name, as the TUI's restart does) in the dead tab's place, with the agent's resume invocation. The tabs resume one at a time; one with no recents entry stays exited.
+
+Moving a row into or out of Snoozed or Docked with `sidebar_save` does the same: a row dragged into Docked is docked, one dragged into Snoozed is snoozed until it needs you, and one dragged out goes where it was dropped (resumed, if it was docked). New sessions can't be created in either section.
 
 #### `set_section_defaults`
 
@@ -353,10 +371,13 @@ This is the state Bosun detects for the session itself. The TUI also shows an id
  "sections":[
    {"id":"sec-1","name":"Work","collapsed":false,"banner_font":"metalix",
     "defaults":{"path":"~/work","agent":"codex","options":{…}},
-    "members":[…rows like the ones above…]}]}
+    "members":[…rows like the ones above…]},
+   {"id":"sec-2","name":"Snoozed","collapsed":true,"role":"snoozed",
+    "members":[{"id":"con-2","name":"docs","active":"bosun-docs-3c4d5e6f","tabs":[…],
+                "parked":{"at":1792130862123,"from_section":"sec-1","from_index":2,"wake_at":1792134462123}}]}]}
 ```
 
-Ungrouped rows come first, then each section's header and rows, the same order as the TUI. Each row has one or more tabs; `active` is the session name of the shown tab. A row's `name` is its label as the TUI shows it: the display name of its active tab (for an exited tab, the name recovered from recents), so it changes when the active tab changes or is renamed. A tab with `alive: false` is a session that has ended; the TUI keeps such rows (as "exited") so they can be restarted, unless `remove_dead_sessions` is on. Its `display` is the best name Bosun can recover from the recents list. `banner_font` is left out when the section uses the global one, and `defaults` when the section has none (see `set_section_defaults`).
+Ungrouped rows come first, then each section's header and rows, the same order as the TUI. Each row has one or more tabs; `active` is the session name of the shown tab. A row's `name` is its label as the TUI shows it: the display name of its active tab (for an exited tab, the name recovered from recents), so it changes when the active tab changes or is renamed. A tab with `alive: false` is a session that has ended; the TUI keeps such rows (as "exited") so they can be restarted, unless `remove_dead_sessions` is on. Its `display` is the best name Bosun can recover from the recents list. `banner_font` is left out when the section uses the global one, and `defaults` when the section has none (see `set_section_defaults`). `role` is `snoozed` or `docked` on the built-in sections parked rows go to (see `park_row`), and a row in one has `parked`: when it was parked (`at`, Unix ms), the section and index it goes back to (`from_section` is absent for the ungrouped rows), and for a snoozed row `wake_at` or `until_needed`.
 
 #### Recents
 

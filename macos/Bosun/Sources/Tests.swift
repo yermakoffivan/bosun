@@ -295,6 +295,28 @@ class TestKit {
         }
     }
 
+    /// Choose `path` (a title, then submenu titles) from `menu`.
+    @discardableResult
+    func choose(_ menu: NSMenu, _ path: [String]) -> Bool {
+        var m = menu
+        for (n, title) in path.enumerated() {
+            guard let i = m.items.firstIndex(where: { $0.title == title }) else { return false }
+            if n == path.count - 1 {
+                m.performActionForItem(at: i)
+                return true
+            }
+            guard let sub = m.items[i].submenu else { return false }
+            m = sub
+        }
+        return false
+    }
+
+    /// A row's right-click menu, as the sidebar builds it.
+    func rowMenu(_ id: String) -> NSMenu? {
+        guard let c = app.daemon.state.sidebar.container(id: id) else { return nil }
+        return app.sessionMenu(for: c.active, rowItem: SidebarItem(kind: .row(id)))
+    }
+
     func sectionPoint(_ id: String) -> NSPoint? {
         let o = app.sidebar.outline
         for row in 0..<o.numberOfRows {
@@ -454,7 +476,7 @@ final class FocusTest: TestKit {
         r.check("start: the active terminal is first responder", firstResponderIsActiveTerminal)
 
         // --only a,b runs just those sections (rows, panes, zoom, termcolours, newpanes, clientmoves, done, notify, appearance, links, filter, sheet,
-        // empty, tiledrag, sidebardrag, shortcuts, header, windows, sectionnew).
+        // empty, tiledrag, sidebardrag, shortcuts, header, windows, sectionnew, parking).
         if let only = argValue("--only") {
             let parts = Set(only.split(separator: ",").map(String.init))
             if parts.contains("rows") { await rows(f) }
@@ -469,6 +491,7 @@ final class FocusTest: TestKit {
             if parts.contains("links") { await links() }
             if parts.contains("filter") { await filter(f) }
             if parts.contains("sectionnew") { await newSessionInSection() }
+            if parts.contains("parking") { await parking(f) }
             await layoutSections(parts)
             if parts.contains("windows") { await windows(f) }
             if parts.contains("remove") { await removeFromSidebar() }
@@ -834,6 +857,8 @@ final class FocusTest: TestKit {
         await layoutSections(nil)
         await windows(f)
         await removeFromSidebar()
+        // 23. Snoozing and docking a row, and getting it back. Last: undocking gives docs a new session.
+        await parking(f)
         await finish()
     }
 
@@ -986,6 +1011,78 @@ final class FocusTest: TestKit {
 
     /// Claude's Stop hook marks a turn done while the pane is on screen; typing into the pane clears it, and so
     /// does the next prompt; the next turn finishing shows it again. A multi-tab row's badge shows a tab's done.
+    func parking(_ f: Fixture) async {
+        let st = { self.app.daemon.state.sidebar }
+        guard let row = rowID(f.docs), let home = st().location(ofRow: row) else {
+            r.check("parking: the docs fixture has a row", false)
+            return
+        }
+        let backHome = { st().location(ofRow: row) == home && st().container(id: row)?.parked == nil }
+        await showRow(f.api)
+
+        // Snooze for an hour: into a collapsed Snoozed section, still running, with its time left.
+        r.check("parking: a row's menu offers Snooze with 1 to 48 hours and Until It Needs Me, and Dock",
+                rowMenu(row).map { m in
+                    let sub = m.items.first { $0.title == "Snooze" }?.submenu?.items.map(\.title) ?? []
+                    return sub.filter { !$0.isEmpty } == ["For 1 Hour", "For 2 Hours", "For 3 Hours", "For 6 Hours", "For 12 Hours",
+                                                          "For 24 Hours", "For 48 Hours", "Until It Needs Me"] && m.items.contains { $0.title == "Dock" }
+                } == true)
+        if let m = rowMenu(row) { choose(m, ["Snooze", "For 1 Hour"]) }
+        let snoozed = await waitUntil(3) { st().role(ofRow: row) == .snoozed }
+        let sec = st().section(holdingRow: row)
+        r.check("…Snooze For 1 Hour moves the row into a collapsed Snoozed section", snoozed && sec?.name == "Snoozed" && sec?.collapsed == true)
+        r.check("…its session keeps running", app.isAlive(f.docs))
+        if let sec { app.setSectionCollapsed(sec.id, false) }
+        await waitUntil(2) { self.sidebarTrailing(f.docs) != nil }
+        r.check("…and the row says how long is left", ["1h left", "59m left"].contains(sidebarTrailing(f.docs) ?? ""), sidebarTrailing(f.docs) ?? "-")
+        shot("16a-snoozed-row")
+        r.check("…its menu offers Wake Now and Snooze Again", rowMenu(row).map { m in
+            m.items.contains { $0.title == "Wake Now" } && m.items.contains { $0.title == "Snooze Again" } } == true)
+
+        // Typing into it brings it back.
+        await showRow(f.docs)
+        await type("back\n")
+        r.check("parking: typing into a snoozed row brings it back where it was", await waitUntil(3) { backHome() },
+                "\(String(describing: st().location(ofRow: row)))")
+        r.check("…and the keys reach it", await paneShows(f.docs, "got: back"))
+        r.check("…and the empty Snoozed section goes", !st().sections.contains { $0.role == .snoozed })
+
+        // Until it needs you: back when its agent's turn ends.
+        await showRow(f.api)
+        if let m = rowMenu(row) { choose(m, ["Snooze", "Until It Needs Me"]) }
+        await waitUntil(3) { st().role(ofRow: row) == .snoozed }
+        await sleep(1200)
+        r.check("parking: snoozed until it needs you, it stays snoozed while nothing does", st().role(ofRow: row) == .snoozed
+                && st().container(id: row)?.parked?.untilNeeded == true)
+        _ = await claudeHook(f.docs, "Stop", #"{"hook_event_name":"Stop","stop_hook_active":false}"#)
+        r.check("…and comes back when its agent finishes", await waitUntil(4) { backHome() })
+
+        // Dock: killed, kept in Docked; undock: back, resumed in place.
+        if let m = rowMenu(row) { choose(m, ["Dock"]) }
+        let docked = await waitUntil(5) { st().role(ofRow: row) == .docked && !self.app.isAlive(f.docs) }
+        r.check("parking: Dock moves the row into Docked and ends its session", docked)
+        if let sec = st().section(holdingRow: row) { app.setSectionCollapsed(sec.id, false) }
+        await waitUntil(2) { self.sidebarTrailing(f.docs) == "docked" }
+        r.check("…the row says docked", sidebarTrailing(f.docs) == "docked", sidebarTrailing(f.docs) ?? "-")
+        app.sidebarActivated(row: row)
+        await waitUntil(2) { ws.currentRow == row }
+        r.check("…showing it offers Undock and Resume", ws.placeholderTitle?.hasSuffix("is docked") == true, ws.placeholderTitle ?? "-")
+        shot("16b-docked-row")
+        r.check("…and its menu offers Undock and Resume, not Restart", rowMenu(row).map { m in
+            m.items.contains { $0.title == "Undock and Resume" } && !m.items.contains { $0.title == "Restart" } } == true)
+        if let m = rowMenu(row) { choose(m, ["Undock and Resume"]) }
+        let undocked = await waitUntil(8) {
+            backHome() && st().container(id: row).map { c in c.tabs.count == 1 && self.app.isAlive(c.active) } == true
+        }
+        r.check("parking: Undock and Resume puts the row back where it was with a live session", undocked,
+                "\(String(describing: st().container(id: row)))")
+        if let c = st().container(id: row) {
+            r.check("…resumed in the dead tab's place, under the same name", app.displayName(c.active) == "docs" && c.active != f.docs)
+            r.check("…running its agent again", await paneShows(c.active, "fake agent · docs", timeout: 6))
+        }
+        r.check("…and no Docked section is left", !st().sections.contains { $0.role != nil })
+    }
+
     func doneState(_ f: Fixture) async {
         let s = f.api
         await showRow(s)

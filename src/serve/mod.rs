@@ -36,7 +36,7 @@ use crate::app::AppState;
 use crate::config::{Config, WorktreeLocation};
 use crate::error::{BosunError, Result};
 use crate::events::{AppMsg, Command, SettingChange};
-use crate::sidebar::SidebarModel;
+use crate::sidebar::{SectionRole, SidebarModel};
 use crate::store::Store;
 use crate::tmux::TokioTmuxClient;
 use crate::ui::Theme;
@@ -293,6 +293,9 @@ struct Inflight {
     /// A create's target section: the new row moves there once the
     /// session appears.
     section: Option<String>,
+    /// The daemon's own create resuming a tab of an undocked row: the
+    /// agent launches with its resume invocation.
+    resume: bool,
 }
 
 struct ClientConn {
@@ -329,6 +332,14 @@ struct Daemon {
     config_mtime: Option<SystemTime>,
     file_config: Config,
     turns: turns::TurnClock,
+    /// Tabs of undocked rows waiting to be resumed, as (dead tab, row
+    /// id), one at a time: each takes its dead tab's place through the
+    /// TUI's restart swap, which holds one at a time.
+    resumes: VecDeque<(String, String)>,
+    resuming: bool,
+    /// For each row snoozed until it needs you, the tabs that already
+    /// needed you (see `wake_snoozed`).
+    snooze_baseline: HashMap<String, std::collections::HashSet<String>>,
 }
 
 impl Daemon {
@@ -366,6 +377,9 @@ impl Daemon {
             agent_hooks: config.agent_hooks,
             file_config: config.clone(),
             turns: turns::TurnClock::default(),
+            resumes: VecDeque::new(),
+            resuming: false,
+            snooze_baseline: HashMap::new(),
             config,
             store,
             client,
@@ -434,10 +448,12 @@ impl Daemon {
                         break;
                     };
                     self.handle_app_msg(msg);
+                    self.wake_snoozed();
                     self.publish();
                 }
                 _ = tick.tick() => {
                     self.check_config_file();
+                    self.wake_snoozed();
                     self.publish();
                 }
                 _ = async {
@@ -494,11 +510,140 @@ impl Daemon {
         }
     }
 
+    /// Docking kills a row's live sessions; leaving Docked resumes its
+    /// exited ones.
+    fn parking_effects(
+        &mut self,
+        changes: Vec<(String, Option<SectionRole>, Option<SectionRole>)>,
+    ) {
+        for (row, was, now) in changes {
+            let Some(c) = self.app.sidebar.find_container(&row) else {
+                continue;
+            };
+            let tabs = c.members.clone();
+            let docked = Some(SectionRole::Docked);
+            if now == docked && was != docked {
+                let live: Vec<String> = tabs
+                    .into_iter()
+                    .filter(|t| self.app.session_by_name(t).is_some())
+                    .collect();
+                if !live.is_empty() {
+                    self.app.recently_killed.extend(live.iter().cloned());
+                    let _ = self.cmd_tx.send(Command::KillContainer { tabs: live });
+                }
+            } else if was == docked && now != docked {
+                for t in tabs {
+                    if self.app.session_by_name(&t).is_none() {
+                        self.resumes.push_back((t, row.clone()));
+                    }
+                }
+            }
+        }
+        self.start_next_resume();
+    }
+
+    /// Resume the next exited tab of an undocked row: created from its
+    /// recents entry (by display name, as the TUI's restart does) into
+    /// the dead tab's place, launching into the agent's resume command.
+    fn start_next_resume(&mut self) {
+        if self.resuming {
+            return;
+        }
+        while let Some((dead, row)) = self.resumes.pop_front() {
+            let still_there = self
+                .app
+                .sidebar
+                .find_container(&row)
+                .is_some_and(|c| c.contains_internal(&dead));
+            if !still_there || self.app.session_by_name(&dead).is_some() {
+                continue;
+            }
+            let name = self.app.dead_display_for(&dead);
+            let Some(recent) = self.app.recents.iter().find(|r| r.name == name) else {
+                tracing::warn!("undock: no recents entry for {name}, so {dead} stays exited");
+                continue;
+            };
+            let mut spec = recent.to_spec();
+            spec.container_id = Some(row);
+            spec.resume = true;
+            self.app.pending_restart_swap = Some(dead);
+            self.forward(
+                0,
+                0,
+                InflightKind::Create {
+                    defer_launch: false,
+                },
+                vec![Command::CreateSession(spec)],
+            );
+            if let Some(f) = self.inflight.back_mut() {
+                f.resume = true;
+            }
+            self.resuming = true;
+            return;
+        }
+    }
+
+    /// Wake snoozed rows whose time has come, or that wait for an agent
+    /// that now needs you: a hook's done after the row was snoozed, or a
+    /// tab waiting, done or in error that wasn't when it was snoozed (a
+    /// detector's done can linger from before).
+    fn wake_snoozed(&mut self) {
+        use protocol::StatusWire as W;
+        let mut needing = std::collections::HashSet::new();
+        let mut done_at = HashMap::new();
+        for v in &self.app.sessions {
+            let info = StatusInfo::from(v);
+            if matches!(info.state, W::Waiting | W::Error | W::Done) {
+                needing.insert(v.name().to_string());
+            }
+            if let Some(d) = info.done_at {
+                done_at.insert(v.name().to_string(), d);
+            }
+        }
+        // What already needed you when each row was snoozed (first seen
+        // here, so a restarted daemon starts again from now); a tab that
+        // stops needing you leaves it, so needing you again counts.
+        let mut baseline = std::mem::take(&mut self.snooze_baseline);
+        let rows: Vec<(String, Vec<String>)> = self
+            .app
+            .sidebar
+            .snoozed()
+            .filter(|c| c.parked.as_ref().is_some_and(|p| p.until_needed))
+            .map(|c| (c.id.clone(), c.members.clone()))
+            .collect();
+        baseline.retain(|row, _| rows.iter().any(|(r, _)| r == row));
+        for (row, tabs) in &rows {
+            let seen = baseline.entry(row.clone()).or_insert_with(|| {
+                tabs.iter()
+                    .filter(|t| needing.contains(*t))
+                    .cloned()
+                    .collect()
+            });
+            seen.retain(|t| needing.contains(t));
+        }
+        let due = self
+            .app
+            .sidebar
+            .due_to_wake(now_ms(), |row, tab, parked_at| {
+                done_at.get(tab).is_some_and(|d| *d > parked_at)
+                    || (needing.contains(tab)
+                        && !baseline.get(row).is_some_and(|b| b.contains(tab)))
+            });
+        for row in &due {
+            baseline.remove(row);
+        }
+        self.snooze_baseline = baseline;
+        if due.is_empty() {
+            return;
+        }
+        for row in &due {
+            let _ = self.app.sidebar.unpark(row);
+        }
+        self.save_sidebar_and_history();
+    }
+
     fn track_turns(&mut self) {
-        let now = SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now = now_ms();
         for v in &self.app.sessions {
             let info = StatusInfo::from(v);
             self.turns.observe(v.name(), info.state, info.source, now);
@@ -850,6 +995,7 @@ impl Daemon {
             spec: None,
             pending_launch: None,
             section: None,
+            resume: false,
         });
     }
 
@@ -863,12 +1009,15 @@ impl Daemon {
             } => {
                 let section = section.filter(|_| spec.container_id.is_none());
                 if let Some(sid) = &section {
-                    if !self.app.sidebar.sections.iter().any(|s| &s.id == sid) {
-                        return self.ack_result(
-                            client,
-                            id,
-                            Err(format!("no section with id {sid}")),
-                        );
+                    let e = match self.app.sidebar.sections.iter().find(|s| &s.id == sid) {
+                        None => Some(format!("no section with id {sid}")),
+                        Some(s) if s.role.is_some() => {
+                            Some(format!("new sessions can't go into {}", s.name))
+                        }
+                        Some(_) => None,
+                    };
+                    if let Some(e) = e {
+                        return self.ack_result(client, id, Err(e));
                     }
                 }
                 match spec.to_spec() {
@@ -1023,6 +1172,35 @@ impl Daemon {
                 });
                 self.ack_result(client, id, r);
             }
+            CmdOp::ParkRow {
+                container_id,
+                role,
+                wake_at,
+                until_needed,
+            } => {
+                let r = self
+                    .app
+                    .sidebar
+                    .park(&container_id, role, wake_at, until_needed, now_ms());
+                match r {
+                    Ok(was) => {
+                        self.save_sidebar_and_history();
+                        self.parking_effects(vec![(container_id, was, Some(role))]);
+                        self.ack_result(client, id, Ok(()));
+                    }
+                    Err(e) => self.ack_result(client, id, Err(e.to_string())),
+                }
+            }
+            CmdOp::UnparkRow { container_id } => match self.app.sidebar.unpark(&container_id) {
+                Ok(was) => {
+                    if was.is_some() {
+                        self.save_sidebar_and_history();
+                        self.parking_effects(vec![(container_id, was, None)]);
+                    }
+                    self.ack_result(client, id, Ok(()));
+                }
+                Err(e) => self.ack_result(client, id, Err(e.to_string())),
+            },
             CmdOp::SetSectionDefaults { section, defaults } => {
                 let r = defaults
                     .as_ref()
@@ -1335,19 +1513,14 @@ impl Daemon {
                 None => {}
             }
         }
-        // Section defaults change only through `set_section_defaults`.
-        for s in &mut model.sections {
-            s.defaults = self
-                .app
-                .sidebar
-                .sections
-                .iter()
-                .find(|old| old.id == s.id)
-                .and_then(|old| old.defaults.clone());
-        }
+        // Roles, parking and section defaults aren't in a client's
+        // layout; a row dragged into or out of Docked is docked or
+        // undocked.
+        let changes = self.app.sidebar.adopt(&mut model, now_ms(), true);
         self.app.sidebar = model;
         self.app.selected = 0;
         self.save_sidebar_and_history();
+        self.parking_effects(changes);
     }
 
     /// Write the sidebar after a change, with section history following
@@ -1363,6 +1536,11 @@ impl Daemon {
                 .sections
                 .iter()
                 .find(|s| s.members.iter().any(|c| c.contains_internal(v.name())));
+            // A parked row keeps the section it had: Snoozed and Docked
+            // are never where a restart should put it.
+            if section.is_some_and(|s| s.role.is_some()) {
+                continue;
+            }
             match section {
                 Some(s) => {
                     let prev = self.app.session_history.insert(display, s.name.clone());
@@ -1521,7 +1699,7 @@ impl Daemon {
                 } else {
                     let _ = self.cmd_tx.send(Command::LaunchAgent {
                         internal: session,
-                        resume: None,
+                        resume: f.resume.then_some(true),
                     });
                 }
             }
@@ -1536,6 +1714,10 @@ impl Daemon {
             InflightKind::Create { .. } | InflightKind::Restart { .. }
         ) {
             self.reload_recents();
+        }
+        if f.resume {
+            self.resuming = false;
+            self.start_next_resume();
         }
     }
 
@@ -1589,8 +1771,17 @@ impl Daemon {
             let _ = self.cmd_tx.send(Command::SetAgentHooks(new.agent_hooks));
         }
         if new.sidebar != old.sidebar && new.sidebar != self.app.sidebar {
-            self.app.sidebar = new.sidebar.clone();
+            // A row the TUI moved into or out of Snoozed or Docked is
+            // parked or unparked, as for a client's `sidebar_save`.
+            let mut model = new.sidebar.clone();
+            let changes = self.app.sidebar.adopt(&mut model, now_ms(), false);
+            let fixed = model != new.sidebar;
+            self.app.sidebar = model;
             self.app.selected = 0;
+            if fixed {
+                self.save_sidebar_and_history();
+            }
+            self.parking_effects(changes);
         }
         if new.session_history != old.session_history {
             self.app.session_history = new.session_history.clone();
@@ -1671,6 +1862,13 @@ fn spawn_connection(
         let _ = events.send((id, ClientEvent::Closed));
     });
     tx
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

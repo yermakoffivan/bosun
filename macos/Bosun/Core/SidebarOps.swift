@@ -35,6 +35,14 @@ extension Sidebar {
         sections.first { $0.members.contains { $0.id == id } }
     }
 
+    /// Snoozed or Docked, for a parked row.
+    public func role(ofRow id: String) -> SectionRole? { section(holdingRow: id)?.role }
+
+    /// A row snoozed until a time (not until it needs you): it stays quiet, no notifications.
+    public func isQuietlySnoozed(_ c: Container) -> Bool {
+        role(ofRow: c.id) == .snoozed && c.parked?.untilNeeded != true
+    }
+
     /// The order previous/next session walks: each row's active tab, live sessions only, as the TUI does.
     public func cycleOrder(isAlive: (String) -> Bool) -> [String] {
         allRows.map(\.active).filter(isAlive)

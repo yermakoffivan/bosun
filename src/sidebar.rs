@@ -47,6 +47,53 @@ pub struct Section {
     /// for Mac's new-session sheet. `None`: the usual defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defaults: Option<SectionDefaults>,
+    /// The built-in Snoozed or Docked section. `None`: one of the
+    /// user's own sections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<SectionRole>,
+}
+
+/// The built-in sections a row is parked in, kept after the user's own
+/// sections, Snoozed before Docked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SectionRole {
+    /// Out of the way for a while; its sessions keep running, and it
+    /// goes back by itself at `wake_at` or when it needs you.
+    Snoozed,
+    /// Finished with: its sessions are killed on the way in and
+    /// resumed on the way out.
+    Docked,
+}
+
+impl SectionRole {
+    pub fn title(self) -> &'static str {
+        match self {
+            SectionRole::Snoozed => "Snoozed",
+            SectionRole::Docked => "Docked",
+        }
+    }
+}
+
+/// Where a parked row came from, so it goes back to the same place,
+/// and when a snoozed one wakes.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Parked {
+    /// When it was parked, Unix ms.
+    pub at: u64,
+    /// The section it came from; `None` for the ungrouped rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_section: Option<String>,
+    /// Its index there.
+    #[serde(default)]
+    pub from_index: usize,
+    /// Snoozed: when it wakes, Unix ms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_at: Option<u64>,
+    /// Snoozed: wake as soon as one of its agents is waiting, done or
+    /// in error.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub until_needed: bool,
 }
 
 /// A section's starting values for a new session: its folder, agent
@@ -94,6 +141,7 @@ impl Section {
             collapsed: false,
             banner_font: None,
             defaults: None,
+            role: None,
         }
     }
 }
@@ -114,6 +162,9 @@ pub struct Container {
     /// Internal tmux name of the currently-active tab. Always one
     /// of `members`; invariant maintained by all mutators.
     pub active: String,
+    /// Set while the row is in the Snoozed or Docked section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked: Option<Parked>,
 }
 
 impl Container {
@@ -125,6 +176,7 @@ impl Container {
             name,
             active: internal.clone(),
             members: vec![internal],
+            parked: None,
         }
     }
 
@@ -138,6 +190,7 @@ impl Container {
             name,
             active: internal.clone(),
             members: vec![internal],
+            parked: None,
         }
     }
 
@@ -949,6 +1002,194 @@ impl SidebarModel {
         Ok(moved)
     }
 
+    /// The index of the `role` section, made (collapsed, after the
+    /// user's own sections, Snoozed before Docked) when there isn't one.
+    fn role_section(&mut self, role: SectionRole) -> usize {
+        if let Some(i) = self.sections.iter().position(|s| s.role == Some(role)) {
+            return i;
+        }
+        let mut sec = Section::new(role.title());
+        sec.role = Some(role);
+        sec.collapsed = true;
+        let at = self
+            .sections
+            .iter()
+            .position(|s| s.role.is_some_and(|r| r > role))
+            .unwrap_or(self.sections.len());
+        self.sections.insert(at, sec);
+        at
+    }
+
+    /// The role of the section a row is in, if it's parked there.
+    pub fn role_of(&self, container_id: &str) -> Option<SectionRole> {
+        match self.container_slot(container_id)? {
+            (Some(si), _) => self.sections[si].role,
+            (None, _) => None,
+        }
+    }
+
+    /// Move row `container_id` into the `role` section (at its end),
+    /// remembering where it came from. A row already parked keeps its
+    /// origin, so snoozing a docked row and waking it still takes it
+    /// home; `wake_at` and `until_needed` are replaced. Returns the
+    /// role it was in before, if any.
+    pub fn park(
+        &mut self,
+        container_id: &str,
+        role: SectionRole,
+        wake_at: Option<u64>,
+        until_needed: bool,
+        now: u64,
+    ) -> Result<Option<SectionRole>, MoveError> {
+        let (bucket, i) = self
+            .container_slot(container_id)
+            .ok_or_else(|| MoveError::UnknownContainer(container_id.to_string()))?;
+        let was = bucket.and_then(|si| self.sections[si].role);
+        let mut row = self.bucket_mut(bucket).remove(i);
+        let mut parked = match (was, row.parked.take()) {
+            (Some(_), Some(p)) => p,
+            _ => Parked {
+                at: now,
+                from_section: bucket.map(|si| self.sections[si].id.clone()),
+                from_index: i,
+                ..Parked::default()
+            },
+        };
+        parked.wake_at = wake_at;
+        parked.until_needed = until_needed;
+        row.parked = Some(parked);
+        let si = self.role_section(role);
+        let list = &mut self.sections[si].members;
+        // Re-parking in the same section keeps its place.
+        let at = if was == Some(role) {
+            i.min(list.len())
+        } else {
+            list.len()
+        };
+        list.insert(at, row);
+        self.drop_empty_role_sections();
+        Ok(was)
+    }
+
+    /// Move a parked row back where it came from (its section at its old
+    /// index, clamped; the ungrouped rows when that section is gone).
+    /// Returns the role it was parked in, or `None` when it wasn't.
+    pub fn unpark(&mut self, container_id: &str) -> Result<Option<SectionRole>, MoveError> {
+        let (bucket, i) = self
+            .container_slot(container_id)
+            .ok_or_else(|| MoveError::UnknownContainer(container_id.to_string()))?;
+        let Some(role) = bucket.and_then(|si| self.sections[si].role) else {
+            return Ok(None);
+        };
+        let mut row = self.bucket_mut(bucket).remove(i);
+        let parked = row.parked.take().unwrap_or_default();
+        let home = parked.from_section.as_deref().and_then(|id| {
+            self.sections
+                .iter()
+                .position(|s| s.id == id && s.role.is_none())
+        });
+        let list = self.bucket_mut(home);
+        let at = parked.from_index.min(list.len());
+        list.insert(at, row);
+        self.drop_empty_role_sections();
+        Ok(Some(role))
+    }
+
+    fn drop_empty_role_sections(&mut self) {
+        self.sections
+            .retain(|s| s.role.is_none() || !s.members.is_empty());
+    }
+
+    /// Snoozed rows due to wake at `now` (Unix ms): `wake_at` has come,
+    /// or `until_needed` and `needs_you` says one of its tabs needs you
+    /// (it's given the row, the tab and the time the row was parked).
+    pub fn due_to_wake(
+        &self,
+        now: u64,
+        needs_you: impl Fn(&str, &str, u64) -> bool,
+    ) -> Vec<String> {
+        self.snoozed()
+            .filter(|c| {
+                let Some(p) = &c.parked else { return false };
+                p.wake_at.is_some_and(|t| t <= now)
+                    || (p.until_needed && c.members.iter().any(|m| needs_you(&c.id, m, p.at)))
+            })
+            .map(|c| c.id.clone())
+            .collect()
+    }
+
+    /// The rows in the Snoozed section.
+    pub fn snoozed(&self) -> impl Iterator<Item = &Container> {
+        self.sections
+            .iter()
+            .filter(|s| s.role == Some(SectionRole::Snoozed))
+            .flat_map(|s| s.members.iter())
+    }
+
+    /// Bring a new layout in line with this one, the model it
+    /// replaces: a row moved into a role section is parked there
+    /// (remembering where it was in `self`), one moved out is unparked,
+    /// and one that stayed keeps its parking. A client's layout carries
+    /// no roles or defaults, so with `from_client` sections keep this
+    /// model's; a `config.toml` edited elsewhere (the TUI) has its own.
+    /// Returns each row whose role changed, with its old and new role.
+    pub fn adopt(
+        &self,
+        new: &mut SidebarModel,
+        now: u64,
+        from_client: bool,
+    ) -> Vec<(String, Option<SectionRole>, Option<SectionRole>)> {
+        if from_client {
+            for s in &mut new.sections {
+                if let Some(old) = self.sections.iter().find(|o| o.id == s.id) {
+                    s.role = old.role;
+                    s.defaults = old.defaults.clone();
+                }
+            }
+        }
+        let mut changed = Vec::new();
+        let roles: Vec<Option<SectionRole>> = new.sections.iter().map(|s| s.role).collect();
+        let rows = new.ungrouped.iter_mut().map(|c| (None, c)).chain(
+            new.sections
+                .iter_mut()
+                .enumerate()
+                .flat_map(|(si, s)| s.members.iter_mut().map(move |c| (Some(si), c))),
+        );
+        for (si, c) in rows {
+            let role = si.and_then(|si| roles[si]);
+            let old_slot = self.container_slot(&c.id);
+            let old_role = old_slot.and_then(|(b, _)| b.and_then(|si| self.sections[si].role));
+            let old_parked = old_slot.and_then(|slot| self.container_at(slot).parked.clone());
+            c.parked = match role {
+                None => None,
+                Some(_) if old_role.is_some() => old_parked,
+                Some(_) => Some(Parked {
+                    at: now,
+                    from_section: old_slot
+                        .and_then(|(b, _)| b.map(|si| self.sections[si].id.clone())),
+                    from_index: old_slot.map_or(0, |(_, i)| i),
+                    until_needed: role == Some(SectionRole::Snoozed),
+                    ..Parked::default()
+                }),
+            };
+            if role != old_role && old_slot.is_some() {
+                changed.push((c.id.clone(), old_role, role));
+            }
+        }
+        new.drop_empty_role_sections();
+        // Role sections stay after the user's own, Snoozed first.
+        new.sections
+            .sort_by_key(|s| s.role.map_or(0, |r| 1 + r as u8));
+        changed
+    }
+
+    fn container_at(&self, (bucket, i): (Option<usize>, usize)) -> &Container {
+        match bucket {
+            None => &self.ungrouped[i],
+            Some(si) => &self.sections[si].members[i],
+        }
+    }
+
     /// Append a new empty section at the end of the sections list.
     /// Returns the new section's id.
     pub fn insert_section_at_end(&mut self, name: String) -> String {
@@ -976,6 +1217,9 @@ impl SidebarModel {
             return;
         }
         let mut sec = self.sections.remove(si);
+        for c in &mut sec.members {
+            c.parked = None;
+        }
         self.ungrouped.append(&mut sec.members);
     }
 }
@@ -996,6 +1240,7 @@ mod tests {
             collapsed: false,
             banner_font: None,
             defaults: None,
+            role: None,
         }
     }
 
@@ -1554,5 +1799,126 @@ members = ["bosun-gamma"]
             m.move_row_to_section_end("zz", &sid),
             Err(MoveError::UnknownSession("zz".into()))
         );
+    }
+    fn parking_model() -> SidebarModel {
+        let mut m = SidebarModel::default();
+        m.ungrouped.push(con("a"));
+        m.ungrouped.push(con("b"));
+        let sid = m.insert_section_at_end("work".into());
+        m.sections[0].members.push(con("c"));
+        m.sections[0].members.push(con("d"));
+        assert_eq!(m.sections[0].id, sid);
+        m
+    }
+
+    fn row_id(m: &SidebarModel, tab: &str) -> String {
+        let slot = m.slot_of_tab(tab).unwrap();
+        m.container_at(slot).id.clone()
+    }
+
+    #[test]
+    fn park_and_unpark_go_back_to_the_same_place() {
+        let mut m = parking_model();
+        let c = row_id(&m, "c");
+        assert_eq!(
+            m.park(&c, SectionRole::Docked, None, false, 7).unwrap(),
+            None
+        );
+        assert_eq!(m.role_of(&c), Some(SectionRole::Docked));
+        assert_eq!(m.sections.len(), 2);
+        assert_eq!(m.sections[1].name, "Docked");
+        assert!(m.sections[1].collapsed);
+        let p = m.find_container(&c).unwrap().parked.clone().unwrap();
+        assert_eq!(
+            (p.at, p.from_section.as_deref(), p.from_index),
+            (7, Some(m.sections[0].id.as_str()), 0)
+        );
+        // Snoozed sits before Docked; snoozing the docked row keeps its origin.
+        let a = row_id(&m, "a");
+        m.park(&a, SectionRole::Snoozed, Some(100), false, 8)
+            .unwrap();
+        assert_eq!(
+            m.sections
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["work", "Snoozed", "Docked"]
+        );
+        assert_eq!(
+            m.park(&c, SectionRole::Snoozed, None, true, 9).unwrap(),
+            Some(SectionRole::Docked)
+        );
+        assert_eq!(m.sections.len(), 2, "the empty Docked section goes");
+        let p = m.find_container(&c).unwrap().parked.clone().unwrap();
+        assert_eq!(
+            (p.at, p.from_index, p.until_needed, p.wake_at),
+            (7, 0, true, None)
+        );
+
+        assert_eq!(m.unpark(&c).unwrap(), Some(SectionRole::Snoozed));
+        assert_eq!(m.sections[0].members[0].members, vec!["c".to_string()]);
+        assert_eq!(m.find_container(&c).unwrap().parked, None);
+        assert_eq!(m.unpark(&a).unwrap(), Some(SectionRole::Snoozed));
+        assert_eq!(m.ungrouped[0].members, vec!["a".to_string()]);
+        assert_eq!(m.sections.len(), 1, "no role sections left");
+        // Not parked: nothing to do.
+        assert_eq!(m.unpark(&a).unwrap(), None);
+    }
+
+    #[test]
+    fn unpark_into_a_removed_section_goes_to_the_ungrouped_rows() {
+        let mut m = parking_model();
+        let d = row_id(&m, "d");
+        m.park(&d, SectionRole::Docked, None, false, 1).unwrap();
+        m.delete_section_at(0);
+        m.unpark(&d).unwrap();
+        assert!(m.ungrouped.iter().any(|r| r.id == d));
+    }
+
+    #[test]
+    fn due_to_wake_by_time_or_need() {
+        let mut m = parking_model();
+        let (a, b, c) = (row_id(&m, "a"), row_id(&m, "b"), row_id(&m, "c"));
+        m.park(&a, SectionRole::Snoozed, Some(1_000), false, 0)
+            .unwrap();
+        m.park(&b, SectionRole::Snoozed, None, true, 0).unwrap();
+        m.park(&c, SectionRole::Docked, Some(1), false, 0).unwrap();
+        assert!(m.due_to_wake(999, |_, _, _| false).is_empty());
+        assert_eq!(m.due_to_wake(1_000, |_, _, _| false), vec![a.clone()]);
+        assert_eq!(m.due_to_wake(5, |_, t, _| t == "b"), vec![b]);
+    }
+
+    #[test]
+    fn adopt_parks_rows_dragged_in_and_unparks_rows_dragged_out() {
+        let mut old = parking_model();
+        let (a, c) = (row_id(&old, "a"), row_id(&old, "c"));
+        old.park(&c, SectionRole::Docked, None, false, 3).unwrap();
+        old.sections[0].defaults = Some(SectionDefaults {
+            path: "/w".into(),
+            ..Default::default()
+        });
+        // What a client sends back: no roles, no parking, no defaults;
+        // it dragged a into Docked and c out to the top level.
+        let mut new = old.clone();
+        for s in &mut new.sections {
+            s.role = None;
+            s.defaults = None;
+            for r in &mut s.members {
+                r.parked = None;
+            }
+        }
+        let row_a = new.ungrouped.remove(0);
+        let row_c = new.sections[1].members.remove(0);
+        new.sections[1].members.push(row_a);
+        new.ungrouped.insert(0, row_c);
+        let changed = old.adopt(&mut new, 50, true);
+        assert_eq!(new.sections[1].role, Some(SectionRole::Docked));
+        assert_eq!(new.sections[0].defaults.as_ref().unwrap().path, "/w");
+        let pa = new.find_container(&a).unwrap().parked.clone().unwrap();
+        assert_eq!((pa.at, pa.from_section, pa.from_index), (50, None, 0));
+        assert_eq!(new.find_container(&c).unwrap().parked, None);
+        assert!(changed.contains(&(a.clone(), None, Some(SectionRole::Docked))));
+        assert!(changed.contains(&(c.clone(), Some(SectionRole::Docked), None)));
+        assert_eq!(changed.len(), 2);
     }
 }

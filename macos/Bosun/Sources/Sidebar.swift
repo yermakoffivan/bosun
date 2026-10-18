@@ -596,7 +596,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             let waiting = s.members.flatMap(\.tabs).contains { app.displayState($0.session) == .waiting }
             c.chevronRoom = filtered == nil ? 20 : 0
             c.configure(name: s.name, count: s.members.count, collapsed: s.collapsed && filtered == nil, waiting: waiting, theme: theme,
-                        onAdd: { [weak self] in self?.app.newSession(section: id) })
+                        onAdd: s.role != nil ? nil : { [weak self] in self?.app.newSession(section: id) })
         case .heading:
             guard let c = cell as? SectionCellView else { return }
             c.configure(name: "On screen", count: 0, collapsed: false, waiting: false, theme: theme)
@@ -612,6 +612,11 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             // The row on screen that a filter would hide, listed at the end, dimmed.
             let extra: Bool = { if case .heading = item.parent?.kind { return true }; return false }()
             var t = multi ? "\(con.tabs.count) tabs" : trailing(for: session)
+            switch st.sidebar.role(ofRow: id) {
+            case .docked: t = "docked"
+            case .snoozed: t = app.snoozeLeft(con).map { "\($0) left" } ?? "until needed"
+            case nil: break
+            }
             if extra { t = "on screen" }
             if elsewhere { t = t.isEmpty ? "⧉" : "⧉ " + t }
             c.configure(name: renaming?.item !== item ? name : nil, matches: filtered?.nameMatches[id],

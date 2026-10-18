@@ -1388,6 +1388,231 @@ fn serve_section_defaults() {
     );
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+fn section_named<'a>(sidebar: &'a Value, name: &str) -> Option<&'a Value> {
+    sidebar["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == name)
+}
+
+/// A fresh snapshot's sidebar once `cond` holds for it.
+fn sidebar_until(c: &mut Conn, what: &str, mut cond: impl FnMut(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        c.send(json!({"t": "resync"}));
+        let snap = c.until("snapshot", |v| v["t"] == "snapshot").pop().unwrap();
+        if cond(&snap["sidebar"]) {
+            return snap["sidebar"].clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}: {}",
+            snap["sidebar"]
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Docking kills a row's sessions and keeps the row in Docked; undocking
+/// puts it back where it was and resumes each tab in its place. A
+/// snoozed row wakes on time, or with `until_needed` when its agent
+/// finishes; dragging a row into Docked (a client's `sidebar_save`)
+/// docks it too.
+#[test]
+fn serve_dock_and_snooze() {
+    let mut fx = fixture();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    assert_eq!(c.recv().expect("snapshot")["t"], "snapshot");
+    let alpha = create_terminal(&mut c, 1, "alpha", "sleep 600");
+    let beta = create_terminal(&mut c, 2, "beta", "sleep 600");
+    let sidebar = sidebar_with(&mut c, &[&alpha, &beta]);
+    let a_row = row_of(&sidebar, &alpha).unwrap();
+    let b_row = row_of(&sidebar, &beta).unwrap();
+    let alive = |fx: &Fixture, s: &str| {
+        let ls = fx.tmux(&["list-sessions", "-F", "#{session_name}"]);
+        String::from_utf8_lossy(&ls.stdout).lines().any(|l| l == s)
+    };
+
+    // Dock alpha: into Docked, its session gone, the row kept.
+    let seen = command(
+        &mut c,
+        10,
+        json!({"op": "park_row", "container_id": a_row, "role": "docked"}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    wait_for("alpha killed", WAIT, || !alive(&fx, &alpha));
+    let sb = sidebar_until(&mut c, "alpha docked and exited", |sb| {
+        section_named(sb, "Docked").is_some_and(|s| s["members"][0]["tabs"][0]["alive"] == false)
+    });
+    let docked = section_named(&sb, "Docked").unwrap();
+    assert_eq!(docked["role"], "docked");
+    assert_eq!(docked["collapsed"], true);
+    assert_eq!(docked["members"][0]["id"], a_row.as_str());
+    assert_eq!(docked["members"][0]["parked"]["from_index"], 0, "{docked}");
+    assert_eq!(sb["ungrouped"].as_array().unwrap().len(), 1);
+    // New sessions can't be made in it.
+    let sec = docked["id"].as_str().unwrap().to_string();
+    let seen = command(
+        &mut c,
+        11,
+        json!({"op": "create", "section": sec, "spec": {"name": "x", "path": "/tmp", "agent": "terminal"}}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], false);
+
+    // Undock: back at the top, a live session in the dead tab's place,
+    // and no Docked section left.
+    let seen = command(
+        &mut c,
+        12,
+        json!({"op": "unpark_row", "container_id": a_row}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    let sb = sidebar_until(&mut c, "alpha resumed", |sb| {
+        sb["ungrouped"][0]["id"] == a_row.as_str() && sb["ungrouped"][0]["tabs"][0]["alive"] == true
+    });
+    assert!(section_named(&sb, "Docked").is_none(), "{sb}");
+    let row = &sb["ungrouped"][0];
+    assert_eq!(row_tabs(row).len(), 1, "{row}");
+    let resumed = row_tabs(row)[0].clone();
+    assert_ne!(resumed, alpha);
+    assert_eq!(row["tabs"][0]["display"], "alpha");
+    assert!(row.get("parked").is_none(), "{row}");
+    assert_eq!(container_option(&fx, &resumed), a_row);
+
+    // Snooze beta for a moment: it wakes by itself, still running.
+    let seen = command(
+        &mut c,
+        20,
+        json!({"op": "park_row", "container_id": b_row, "role": "snoozed", "wake_at": now_ms() + 1500}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    let sb = sidebar_until(&mut c, "beta snoozed", |sb| {
+        section_named(sb, "Snoozed").is_some()
+    });
+    assert_eq!(
+        section_named(&sb, "Snoozed").unwrap()["members"][0]["id"],
+        b_row.as_str()
+    );
+    assert!(alive(&fx, &beta));
+    sidebar_until(&mut c, "beta awake", |sb| {
+        section_named(sb, "Snoozed").is_none() && sb["ungrouped"][1]["id"] == b_row.as_str()
+    });
+    assert!(alive(&fx, &beta));
+
+    // Until it needs you: the agent's Stop hook wakes it.
+    let seen = command(
+        &mut c,
+        21,
+        json!({"op": "park_row", "container_id": b_row, "role": "snoozed", "until_needed": true}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    sidebar_until(&mut c, "beta snoozed until needed", |sb| {
+        section_named(sb, "Snoozed").is_some()
+    });
+    std::thread::sleep(Duration::from_millis(1500));
+    let sb = sidebar_until(&mut c, "beta still snoozed", |_| true);
+    assert!(
+        section_named(&sb, "Snoozed").is_some(),
+        "nothing needs you yet: {sb}"
+    );
+    run_claude_hook(
+        &fx,
+        &beta,
+        "Stop",
+        json!({"hook_event_name": "Stop", "stop_hook_active": false}),
+    );
+    sidebar_until(&mut c, "beta woken by its agent", |sb| {
+        section_named(sb, "Snoozed").is_none()
+    });
+
+    // Dragging beta into Docked (a sidebar_save) docks it: killed.
+    let seen = command(
+        &mut c,
+        30,
+        json!({"op": "park_row", "container_id": a_row, "role": "docked"}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true);
+    let mut sb = sidebar_until(&mut c, "alpha docked again", |sb| {
+        section_named(sb, "Docked").is_some()
+    });
+    let bi = sb["ungrouped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|r| r["id"] == b_row.as_str())
+        .unwrap();
+    let row = sb["ungrouped"].as_array_mut().unwrap().remove(bi);
+    let di = sb["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|s| s["name"] == "Docked")
+        .unwrap();
+    sb["sections"][di]["members"]
+        .as_array_mut()
+        .unwrap()
+        .push(row);
+    let seen = command(&mut c, 31, json!({"op": "sidebar_save", "sidebar": sb}));
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    wait_for("beta killed by the drag", WAIT, || !alive(&fx, &beta));
+    let sb = sidebar_until(&mut c, "beta parked by the drag", |sb| {
+        section_named(sb, "Docked").is_some_and(|s| s["members"].as_array().unwrap().len() == 2)
+    });
+    let docked = section_named(&sb, "Docked").unwrap();
+    assert_eq!(
+        docked["role"], "docked",
+        "the save didn't carry the role, the daemon kept it"
+    );
+    assert!(docked["members"][1]["parked"].is_object(), "{docked}");
+
+    // The TUI moving beta out of Docked in config.toml undocks it too:
+    // resumed in its tab's place.
+    let cfg = fx.config_path();
+    let mut doc: toml::Value = toml::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+    let sidebar = doc["sidebar"].as_table_mut().unwrap();
+    let sections = sidebar["sections"].as_array_mut().unwrap();
+    let docked = sections
+        .iter_mut()
+        .find(|s| s["name"].as_str() == Some("Docked"))
+        .unwrap();
+    let members = docked["members"].as_array_mut().unwrap();
+    let bi = members
+        .iter()
+        .position(|r| r["id"].as_str() == Some(b_row.as_str()))
+        .unwrap();
+    let row = members.remove(bi);
+    sidebar
+        .entry("ungrouped")
+        .or_insert_with(|| toml::Value::Array(vec![]))
+        .as_array_mut()
+        .unwrap()
+        .push(row);
+    write_config(&cfg, &toml::to_string(&doc).unwrap());
+    let sb = sidebar_until(&mut c, "beta undocked by the TUI's edit", |sb| {
+        sb["ungrouped"].as_array().unwrap().iter().any(|r| {
+            r["id"] == b_row.as_str() && r["tabs"][0]["alive"] == true && r.get("parked").is_none()
+        })
+    });
+    let row = sb["ungrouped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == b_row.as_str())
+        .unwrap();
+    assert_eq!(row["tabs"][0]["display"], "beta");
+    assert_ne!(row_tabs(row)[0], beta);
+}
+
 /// The TUI, running beside the daemon on the same tmux server and the
 /// same `config.toml`, shows a row the daemon merged as one row with two
 /// tabs, and doesn't write its old layout back. The TUI runs in a pane

@@ -677,7 +677,9 @@ impl AppState {
                 .sidebar
                 .sections
                 .iter()
-                .position(|s| s.name == section_name)
+                // Never back into Snoozed or Docked: parking is the
+                // daemon's to do, with the row's origin remembered.
+                .position(|s| s.name == section_name && s.role.is_none())
             {
                 Some(i) => i,
                 None => continue,
@@ -5368,6 +5370,7 @@ mod tests {
             collapsed: false,
             banner_font: None,
             defaults: None,
+            role: None,
         }
     }
 

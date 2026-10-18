@@ -19,7 +19,7 @@ use crate::events::{
     ClaudeOptions, ClaudeSessionMode, CodexOptions, KimiOptions, OpencodeOptions, QwenOptions,
     SessionSpec, SpecOptions, WorktreeSpec,
 };
-use crate::sidebar::{Container, Section, SectionDefaults, SidebarModel};
+use crate::sidebar::{Container, Parked, Section, SectionDefaults, SectionRole, SidebarModel};
 use crate::store::Recent;
 use crate::tmux::detector::Status;
 use crate::tmux::session::SessionView;
@@ -156,6 +156,22 @@ pub enum CmdOp {
     },
     InsertSection {
         name: String,
+    },
+    /// Park a row in the Snoozed or Docked section. Docking kills its
+    /// sessions; a snoozed row wakes at `wake_at` (Unix ms), or with
+    /// `until_needed` when one of its agents needs you.
+    ParkRow {
+        container_id: String,
+        role: SectionRole,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wake_at: Option<u64>,
+        #[serde(default)]
+        until_needed: bool,
+    },
+    /// Move a parked row back where it came from; an undocked row's
+    /// sessions are resumed.
+    UnparkRow {
+        container_id: String,
     },
     /// Set (or with `null`, clear) a section's starting values for a
     /// new session.
@@ -452,6 +468,10 @@ pub struct SectionWire {
     /// `set_section_defaults`; a `sidebar_save` leaves them as they are.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defaults: Option<SectionDefaults>,
+    /// `snoozed` or `docked` for the built-in sections parked rows go
+    /// to; absent for the user's own sections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<SectionRole>,
     #[serde(default)]
     pub members: Vec<ContainerWire>,
 }
@@ -468,6 +488,11 @@ pub struct ContainerWire {
     /// Session name of the active tab.
     pub active: String,
     pub tabs: Vec<TabWire>,
+    /// Set while the row is in the Snoozed or Docked section: where it
+    /// came from and when a snoozed row wakes. Ignored on
+    /// `sidebar_save`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked: Option<Parked>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -883,6 +908,7 @@ impl SidebarWire {
                     alive: alive(m),
                 })
                 .collect(),
+            parked: c.parked.clone(),
         };
         Self {
             ungrouped: model.ungrouped.iter().map(container).collect(),
@@ -895,6 +921,7 @@ impl SidebarWire {
                     collapsed: s.collapsed,
                     banner_font: s.banner_font.clone(),
                     defaults: s.defaults.clone(),
+                    role: s.role,
                     members: s.members.iter().map(container).collect(),
                 })
                 .collect(),
@@ -934,6 +961,7 @@ impl SidebarWire {
                 name: c.name.clone(),
                 members,
                 active: c.active.clone(),
+                parked: c.parked.clone(),
             })
         };
         let ungrouped = self
@@ -955,6 +983,7 @@ impl SidebarWire {
                 collapsed: s.collapsed,
                 banner_font: s.banner_font.clone(),
                 defaults: None,
+                role: s.role,
                 members: s
                     .members
                     .iter()
@@ -1222,6 +1251,15 @@ mod tests {
                 section: "sec-1".into(),
                 defaults: None,
             },
+            CmdOp::ParkRow {
+                container_id: "con-1".into(),
+                role: SectionRole::Snoozed,
+                wake_at: Some(1_760_000_000_000),
+                until_needed: true,
+            },
+            CmdOp::UnparkRow {
+                container_id: "con-1".into(),
+            },
             CmdOp::RenameSection {
                 section: "sec-1".into(),
                 name: "Play".into(),
@@ -1387,6 +1425,7 @@ mod tests {
                     display: "api".into(),
                     alive: true,
                 }],
+                parked: None,
             }],
             sections: vec![SectionWire {
                 id: "sec-1".into(),
@@ -1394,6 +1433,7 @@ mod tests {
                 collapsed: true,
                 banner_font: None,
                 defaults: None,
+                role: None,
                 members: vec![],
             }],
         };
@@ -1664,6 +1704,7 @@ mod tests {
             name: "x".into(),
             active: active.into(),
             tabs,
+            parked: None,
         };
         let dup_session = SidebarWire {
             ungrouped: vec![c("c1", vec![tab("s")], "s"), c("c2", vec![tab("s")], "s")],

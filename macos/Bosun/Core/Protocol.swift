@@ -153,12 +153,51 @@ public struct Container: Codable, Equatable, Sendable {
     public var name: String
     public var active: String
     public var tabs: [Tab]
+    /// Set while the row is in the Snoozed or Docked section.
+    public var parked: Parked?
 
-    public init(id: String, name: String, active: String, tabs: [Tab]) {
+    public init(id: String, name: String, active: String, tabs: [Tab], parked: Parked? = nil) {
         self.id = id
         self.name = name
         self.active = active
         self.tabs = tabs
+        self.parked = parked
+    }
+}
+
+/// The built-in sections rows are parked in: snoozed rows keep running and come back by themselves; docked
+/// rows' sessions are killed on the way in and resumed on the way out.
+public enum SectionRole: String, Codable, Sendable {
+    case snoozed, docked
+}
+
+/// Where a parked row came from, and when a snoozed one wakes.
+public struct Parked: Codable, Equatable, Sendable {
+    /// When it was parked, Unix ms.
+    public var at: UInt64
+    public var fromSection: String?
+    public var fromIndex: Int
+    /// Snoozed: when it wakes, Unix ms.
+    public var wakeAt: UInt64?
+    /// Snoozed: it wakes when one of its agents needs you.
+    public var untilNeeded: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case at
+        case fromSection = "from_section", fromIndex = "from_index", wakeAt = "wake_at", untilNeeded = "until_needed"
+    }
+
+    public init(at: UInt64 = 0, fromSection: String? = nil, fromIndex: Int = 0, wakeAt: UInt64? = nil, untilNeeded: Bool = false) {
+        self.at = at; self.fromSection = fromSection; self.fromIndex = fromIndex; self.wakeAt = wakeAt; self.untilNeeded = untilNeeded
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        at = try c.decodeIfPresent(UInt64.self, forKey: .at) ?? 0
+        fromSection = try c.decodeIfPresent(String.self, forKey: .fromSection)
+        fromIndex = try c.decodeIfPresent(Int.self, forKey: .fromIndex) ?? 0
+        wakeAt = try c.decodeIfPresent(UInt64.self, forKey: .wakeAt)
+        untilNeeded = try c.decodeIfPresent(Bool.self, forKey: .untilNeeded) ?? false
     }
 }
 
@@ -169,10 +208,12 @@ public struct Section: Codable, Equatable, Sendable {
     public var bannerFont: String?
     /// What a new session made in this section starts with (`set_section_defaults`).
     public var defaults: SectionDefaults?
+    /// The built-in Snoozed or Docked section; nil for the user's own.
+    public var role: SectionRole?
     public var members: [Container]
 
     enum CodingKeys: String, CodingKey {
-        case id, name, collapsed, members, defaults
+        case id, name, collapsed, members, defaults, role
         case bannerFont = "banner_font"
     }
 
@@ -193,6 +234,8 @@ public struct Section: Codable, Equatable, Sendable {
         collapsed = try c.decodeIfPresent(Bool.self, forKey: .collapsed) ?? false
         bannerFont = try c.decodeIfPresent(String.self, forKey: .bannerFont)
         defaults = try c.decodeIfPresent(SectionDefaults.self, forKey: .defaults)
+        // A role this build doesn't know shows as an ordinary section.
+        role = (try? c.decodeIfPresent(SectionRole.self, forKey: .role)) ?? nil
         members = try c.decodeIfPresent([Container].self, forKey: .members) ?? []
     }
 }
@@ -809,6 +852,11 @@ public enum Command: Equatable, Sendable {
     case renameSection(section: String, name: String)
     /// A section's starting values for new sessions; nil clears them.
     case setSectionDefaults(section: String, defaults: SectionDefaults?)
+    /// Park a row in Snoozed or Docked (docking kills its sessions). A snoozed row wakes at `wakeAt` (Unix ms)
+    /// or, with `untilNeeded`, when one of its agents needs you.
+    case parkRow(container: String, role: SectionRole, wakeAt: UInt64? = nil, untilNeeded: Bool = false)
+    /// A parked row goes back where it came from; an undocked row's sessions are resumed.
+    case unparkRow(container: String)
     case setTheme(name: String, persist: Bool)
     case applySetting(key: String, value: JSONValue)
     case clientFlags(tty: String, ignoreSize: Bool)
@@ -836,6 +884,8 @@ public enum Command: Equatable, Sendable {
         case .insertSection: "insert_section"
         case .renameSection: "rename_section"
         case .setSectionDefaults: "set_section_defaults"
+        case .parkRow: "park_row"
+        case .unparkRow: "unpark_row"
         case .setTheme: "set_theme"
         case .applySetting: "apply_setting"
         case .clientFlags: "client_flags"
@@ -924,6 +974,12 @@ public enum ClientMessage: Sendable {
                     try put("name", n)
                 case .renameSection(let s, let n):
                     try put("section", s); try put("name", n)
+                case .parkRow(let row, let role, let wakeAt, let untilNeeded):
+                    try put("container_id", row); try put("role", role)
+                    if let wakeAt { try put("wake_at", wakeAt) }
+                    if untilNeeded { try put("until_needed", true) }
+                case .unparkRow(let row):
+                    try put("container_id", row)
                 case .setSectionDefaults(let s, let d):
                     try put("section", s)
                     if let d { try put("defaults", d) } else { try c.encodeNil(forKey: AnyKey("defaults")) }

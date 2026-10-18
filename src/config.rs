@@ -46,6 +46,7 @@ fn migrate_legacy_sidebar(old: Vec<LegacySidebarEntry>) -> SidebarModel {
                     collapsed: false,
                     banner_font: None,
                     defaults: None,
+                    role: None,
                 });
             }
             LegacySidebarEntry::Session { internal } => {

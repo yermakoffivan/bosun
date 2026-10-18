@@ -118,6 +118,10 @@ final class Workspace {
     func headerSession(_ tile: TileID) -> String? { chrome[tile]?.headerSession }
     /// What a pane's header shows: its badge, the text beside the name and that text's colour (for the test modes).
     func headerStatus(_ tile: TileID) -> (state: AgentState?, text: String, color: NSColor?)? { chrome[tile]?.headerStatus }
+    /// The title of a placeholder on screen ("api has exited", "No sessions yet"), for the test modes.
+    var placeholderTitle: String? {
+        chrome.values.compactMap(\.placeholderView).first { !$0.isHiddenOrHasHiddenAncestor }?.title.stringValue
+    }
     func headerZoomNote(_ tile: TileID) -> String? { chrome[tile]?.headerZoomNote }
     func session(in tile: TileID) -> String? { tile.isEmpty ? nil : tile }
 
@@ -960,6 +964,8 @@ final class TileChromeView: NSView {
         header.update(name: session.map { app.displayName($0) }, group: session.flatMap { app.groupLabel($0) },
                       state: session.map { app.displayState($0) }, detail: session.flatMap { app.statusDetail($0) },
                       elapsed: session.flatMap { app.turnElapsed($0) },
+                      exitedText: session.flatMap { app.daemon.state.sidebar.container(holding: $0) }
+                          .map { app.daemon.state.sidebar.role(ofRow: $0.id) == .docked ? "docked" : "exited" } ?? "exited",
                       exited: session.map { !app.isAlive($0) } ?? false, active: active && showRing,
                       zoomNote: hasTerminal ? zoomNote : nil, theme: theme)
         CATransaction.begin()
@@ -1112,7 +1118,7 @@ final class TileHeaderView: NSView {
         CATransaction.commit()
     }
 
-    func update(name n: String?, group: String?, state: AgentState?, detail d: String?, elapsed: String? = nil, exited: Bool, active: Bool,
+    func update(name n: String?, group: String?, state: AgentState?, detail d: String?, elapsed: String? = nil, exitedText: String = "exited", exited: Bool, active: Bool,
                 zoomNote: String?, theme: AppTheme) {
         zoom.isHidden = zoomNote == nil
         zoom.stringValue = zoomNote ?? ""
@@ -1132,7 +1138,7 @@ final class TileHeaderView: NSView {
         var text = ""
         var color = theme.textMuted
         if exited {
-            text = "exited"
+            text = exitedText
         } else if let state {
             switch state {
             case .waiting:
@@ -1333,7 +1339,14 @@ final class PlaceholderView: NSView {
     func configure(session: String?, app: AppController, theme: AppTheme) {
         title.textColor = theme.text
         hint.textColor = theme.textMuted
-        if let session {
+        if let session, let c = app.daemon.state.sidebar.container(holding: session), app.daemon.state.sidebar.role(ofRow: c.id) == .docked {
+            title.stringValue = "\(app.displayName(c.active)) is docked"
+            hint.stringValue = "Docking ended its sessions. Undock it to put the row back where it was and resume each agent's conversation."
+            primary.title = "Undock and Resume"
+            primaryAction = { app.unpark(c.id) }
+            secondaryAction = nil
+            secondary.isHidden = true
+        } else if let session {
             title.stringValue = "\(app.displayName(session)) has exited"
             hint.stringValue = "The tmux session ended. Restart it from its saved spec, or resume the agent's last conversation."
             primary.title = "Restart"

@@ -686,6 +686,10 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     /// The user typed, pasted or dropped into `session`'s terminal: a hook-reported done turn is now read,
     /// and its notifications go.
     func terminalInput(_ session: String) {
+        // Typing into a snoozed row brings it back.
+        if let c = daemon.state.sidebar.container(holding: session), daemon.state.sidebar.role(ofRow: c.id) == .snoozed {
+            unpark(c.id)
+        }
         let before = displayState(session)
         seen.noteInput(session, at: UInt64(Date().timeIntervalSince1970 * 1000))
         scheduleInputsSave()
@@ -729,7 +733,9 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
 
     private func observeAttention(_ s: String) {
-        let enabled = Attention.Enabled(waiting: AppSettings.shared.notifyWhenWaiting, done: AppSettings.shared.notifyWhenDone)
+        // A row snoozed until a time stays quiet (one snoozed until it needs you wakes as this arrives).
+        let quiet = daemon.state.sidebar.container(holding: s).map(daemon.state.sidebar.isQuietlySnoozed) ?? false
+        let enabled = Attention.Enabled(waiting: AppSettings.shared.notifyWhenWaiting && !quiet, done: AppSettings.shared.notifyWhenDone && !quiet)
         act(attention.observe(s, status: daemon.state.statuses[s], done: displayState(s) == .done, visible: userCanSee(s), enabled: enabled))
     }
 
@@ -1026,12 +1032,19 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         return TurnElapsed.label(startedAt: t, now: now)
     }
 
+    /// How long a row snoozed until a time has left ("1h 20m"), nil for any other row.
+    func snoozeLeft(_ c: Container, now: UInt64 = TurnElapsed.nowMs()) -> String? {
+        guard let w = c.parked?.wakeAt, daemon.state.sidebar.role(ofRow: c.id) == .snoozed else { return nil }
+        return TurnElapsed.label(startedAt: now, now: w)
+    }
+
     /// Running sessions' timers change once a minute: redraw just the rows and headers whose label moved.
     private var turnTicker: Timer?
     private var turnLabels: [String: String] = [:]
 
     private func updateTurnTicker() {
         let running = daemon.state.statuses.contains { $0.value.startedAt != nil }
+            || daemon.state.sidebar.allRows.contains { $0.parked?.wakeAt != nil }
         if running, turnTicker == nil {
             turnTicker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.turnTick() }
@@ -1047,6 +1060,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         let now = TurnElapsed.nowMs()
         var labels: [String: String] = [:]
         for name in daemon.state.statuses.keys { if let l = turnElapsed(name, now: now) { labels[name] = l } }
+        for c in daemon.state.sidebar.allRows { if let l = snoozeLeft(c, now: now) { labels[c.active] = l } }
         let moved = Set(labels.keys.filter { turnLabels[$0] != labels[$0] })
         turnLabels = labels
         guard !moved.isEmpty else { return }
@@ -1378,6 +1392,52 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 self.daemon.command(.setSectionDefaults(section: section, defaults: model.sectionDefaults)) { [weak self] in self?.report($0) }
             }
         }
+    }
+
+    // MARK: Snoozed and docked rows
+
+    /// The snooze lengths a row's menu offers, in hours.
+    static let snoozeHours = [1, 2, 3, 6, 12, 24, 48]
+
+    /// Snooze a row for `hours`, or with nil until one of its agents needs you. Its sessions keep running.
+    func snooze(_ rowID: String, hours: Int?) {
+        let wakeAt = hours.map { TurnElapsed.nowMs() + UInt64($0) * 3_600_000 }
+        daemon.command(.parkRow(container: rowID, role: .snoozed, wakeAt: wakeAt, untilNeeded: hours == nil)) { [weak self] in self?.report($0) }
+    }
+
+    /// Dock a row: its sessions are killed and it waits in Docked until it's undocked and resumed. Its done
+    /// turns count as read.
+    func dock(_ rowID: String) {
+        if let c = daemon.state.sidebar.container(id: rowID) {
+            let done = c.tabs.map(\.session).filter { displayState($0) == .done }
+            if !done.isEmpty { markRead(done) }
+        }
+        daemon.command(.parkRow(container: rowID, role: .docked)) { [weak self] in self?.report($0) }
+    }
+
+    /// Wake a snoozed row, or undock a docked one (its sessions resume), back where it came from.
+    func unpark(_ rowID: String) {
+        daemon.command(.unparkRow(container: rowID)) { [weak self] in self?.report($0) }
+    }
+
+    private func addParkItems(to m: NSMenu, row c: Container) {
+        let role = daemon.state.sidebar.role(ofRow: c.id)
+        func item(_ title: String, _ action: @escaping () -> Void) { m.addItem(ClosureMenuItem(title: title, action: action)) }
+        if role == .docked {
+            item("Undock and Resume") { [weak self] in self?.unpark(c.id) }
+            return
+        }
+        if role == .snoozed { item("Wake Now") { [weak self] in self?.unpark(c.id) } }
+        let snooze = NSMenu()
+        for h in AppController.snoozeHours {
+            snooze.addItem(ClosureMenuItem(title: h == 1 ? "For 1 Hour" : "For \(h) Hours") { [weak self] in self?.snooze(c.id, hours: h) })
+        }
+        snooze.addItem(.separator())
+        snooze.addItem(ClosureMenuItem(title: "Until It Needs Me") { [weak self] in self?.snooze(c.id, hours: nil) })
+        let i = NSMenuItem(title: role == .snoozed ? "Snooze Again" : "Snooze", action: nil, keyEquivalent: "")
+        i.submenu = snooze
+        m.addItem(i)
+        item("Dock") { [weak self] in self?.dock(c.id) }
     }
 
     /// Section Defaults…: the sheet without a name, whose Save stores what a new session in the section starts with.
@@ -1747,7 +1807,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             _ = item("Restart") { [weak self] in self?.restart(s, resume: false) }
             _ = item("Resume") { [weak self] in self?.restart(s, resume: true) }
             _ = item("Modify…") { [weak self] in self?.modify(s) }
-        } else {
+        } else if container.map({ daemon.state.sidebar.role(ofRow: $0.id) }) != .docked {
             _ = item("Restart") { [weak self] in self?.restartExited(s, resume: false) }
             _ = item("Resume") { [weak self] in self?.restartExited(s, resume: true) }
         }
@@ -1757,6 +1817,11 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         let unread = (isRowItem ? container?.tabs.map(\.session) ?? [s] : [s]).filter { displayState($0) == .done }
         if !unread.isEmpty { _ = item("Mark as Read") { [weak self] in self?.markRead(unread) } }
         if let c = container {
+            if case .tab = rowItem?.kind {} else {
+                m.addItem(.separator())
+                addParkItems(to: m, row: c)
+                m.addItem(.separator())
+            }
             _ = item("New Tab in This Row…") { [weak self] in self?.newTab(in: c.id) }
             if case .tab = rowItem?.kind {
                 _ = item("Move to Own Row") { [weak self] in self?.moveTabToOwnRow(s) }
@@ -1839,6 +1904,11 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     func sectionMenu(for id: String) -> NSMenu {
         let m = NSMenu()
+        // Snoozed and Docked come and go with their rows: nothing to make, rename or remove.
+        if daemon.state.sidebar.sections.first(where: { $0.id == id })?.role != nil {
+            m.addItem(ClosureMenuItem(title: "New Section…") { [weak self] in self?.newSection() })
+            return m
+        }
         m.addItem(ClosureMenuItem(title: "New Session in Section…") { [weak self] in self?.newSession(section: id) })
         m.addItem(ClosureMenuItem(title: "Section Defaults…") { [weak self] in self?.editSectionDefaults(id) })
         if daemon.state.sidebar.sections.first(where: { $0.id == id })?.defaults != nil {
