@@ -4,7 +4,7 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.2.5] — 2026-10-17
+## [2.2.5] — 2026-10-18
 
 ### Added
 
