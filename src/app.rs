@@ -5367,6 +5367,7 @@ mod tests {
             members: members.iter().map(|s| con(s)).collect(),
             collapsed: false,
             banner_font: None,
+            defaults: None,
         }
     }
 

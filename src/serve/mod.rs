@@ -19,6 +19,7 @@
 
 pub mod frame;
 pub mod protocol;
+mod turns;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -289,6 +290,9 @@ struct Inflight {
     session: Option<String>,
     spec: Option<SpecWire>,
     pending_launch: Option<PendingLaunchWire>,
+    /// A create's target section: the new row moves there once the
+    /// session appears.
+    section: Option<String>,
 }
 
 struct ClientConn {
@@ -324,6 +328,7 @@ struct Daemon {
     /// edits made by someone else (the TUI, a text editor).
     config_mtime: Option<SystemTime>,
     file_config: Config,
+    turns: turns::TurnClock,
 }
 
 impl Daemon {
@@ -360,6 +365,7 @@ impl Daemon {
             embed_enabled: config.embed_enabled,
             agent_hooks: config.agent_hooks,
             file_config: config.clone(),
+            turns: turns::TurnClock::default(),
             config,
             store,
             client,
@@ -458,7 +464,11 @@ impl Daemon {
             .app
             .sessions
             .iter()
-            .map(|v| (v.name().to_string(), StatusInfo::from(v)))
+            .map(|v| {
+                let mut info = StatusInfo::from(v);
+                info.started_at = self.turns.started(v.name());
+                (v.name().to_string(), info)
+            })
             .collect();
         let live: std::collections::HashSet<&str> =
             self.app.sessions.iter().map(|v| v.name()).collect();
@@ -482,6 +492,20 @@ impl Daemon {
             themes: theme_entries(),
             keybindings: self.keybindings.clone(),
         }
+    }
+
+    fn track_turns(&mut self) {
+        let now = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        for v in &self.app.sessions {
+            let info = StatusInfo::from(v);
+            self.turns.observe(v.name(), info.state, info.source, now);
+        }
+        let live: std::collections::HashSet<&str> =
+            self.app.sessions.iter().map(|v| v.name()).collect();
+        self.turns.retain(|s| live.contains(s));
     }
 
     fn config_view(&self) -> ConfigWire {
@@ -602,6 +626,7 @@ impl Daemon {
     /// Diff the current state against what was last sent and broadcast
     /// one delta per changed part.
     fn publish(&mut self) {
+        self.track_turns();
         let cur = self.current();
         let Some(prev) = self.published.take() else {
             self.seq = 1;
@@ -641,6 +666,7 @@ impl Daemon {
                     source: info.source,
                     detail: info.detail.clone(),
                     done_at: info.done_at,
+                    started_at: info.started_at,
                 };
                 self.broadcast(&msg);
             }
@@ -823,21 +849,43 @@ impl Daemon {
             session: None,
             spec: None,
             pending_launch: None,
+            section: None,
         });
     }
 
     async fn handle_cmd(&mut self, client: u64, id: u64, op: CmdOp) {
         use protocol::check_text;
         match op {
-            CmdOp::Create { spec, defer_launch } => match spec.to_spec() {
-                Ok(spec) => self.forward(
-                    client,
-                    id,
-                    InflightKind::Create { defer_launch },
-                    vec![Command::CreateSession(spec)],
-                ),
-                Err(e) => self.ack_result(client, id, Err(e)),
-            },
+            CmdOp::Create {
+                spec,
+                defer_launch,
+                section,
+            } => {
+                let section = section.filter(|_| spec.container_id.is_none());
+                if let Some(sid) = &section {
+                    if !self.app.sidebar.sections.iter().any(|s| &s.id == sid) {
+                        return self.ack_result(
+                            client,
+                            id,
+                            Err(format!("no section with id {sid}")),
+                        );
+                    }
+                }
+                match spec.to_spec() {
+                    Ok(spec) => {
+                        self.forward(
+                            client,
+                            id,
+                            InflightKind::Create { defer_launch },
+                            vec![Command::CreateSession(spec)],
+                        );
+                        if let Some(f) = self.inflight.back_mut() {
+                            f.section = section;
+                        }
+                    }
+                    Err(e) => self.ack_result(client, id, Err(e)),
+                }
+            }
             CmdOp::Kill { session } => {
                 self.app.recently_killed.insert(session.clone());
                 self.forward(
@@ -973,6 +1021,26 @@ impl Daemon {
                     self.app.insert_section(name, &mut out);
                     self.run_local(out);
                 });
+                self.ack_result(client, id, r);
+            }
+            CmdOp::SetSectionDefaults { section, defaults } => {
+                let r = defaults
+                    .as_ref()
+                    .map_or(Ok(()), |d| d.check())
+                    .and_then(|()| {
+                        let s = self
+                            .app
+                            .sidebar
+                            .sections
+                            .iter_mut()
+                            .find(|s| s.id == section)
+                            .ok_or_else(|| format!("no section with id {section}"))?;
+                        s.defaults = defaults;
+                        Ok(())
+                    });
+                if r.is_ok() {
+                    self.save_sidebar_and_history();
+                }
                 self.ack_result(client, id, r);
             }
             CmdOp::RenameSection { section, name } => {
@@ -1267,6 +1335,16 @@ impl Daemon {
                 None => {}
             }
         }
+        // Section defaults change only through `set_section_defaults`.
+        for s in &mut model.sections {
+            s.defaults = self
+                .app
+                .sidebar
+                .sections
+                .iter()
+                .find(|old| old.id == s.id)
+                .and_then(|old| old.defaults.clone());
+        }
         self.app.sidebar = model;
         self.app.selected = 0;
         self.save_sidebar_and_history();
@@ -1373,6 +1451,7 @@ impl Daemon {
                 }
             }
             msg @ AppMsg::SessionsRefreshed { .. } => {
+                let mut place = None;
                 if let AppMsg::SessionsRefreshed {
                     select_after: Some(name),
                     ..
@@ -1381,11 +1460,20 @@ impl Daemon {
                     if let Some(f) = self.inflight.front_mut() {
                         if matches!(f.kind, InflightKind::Create { .. }) {
                             f.session = Some(name.clone());
+                            place = f.section.take().map(|s| (name.clone(), s));
                         }
                     }
                 }
                 let out = self.app.apply(msg);
                 self.run_local(out);
+                // After the refresh has given the new session its row.
+                if let Some((session, section)) = place {
+                    match self.app.sidebar.move_row_to_section_end(&session, &section) {
+                        Ok(Some(_)) => self.save_sidebar_and_history(),
+                        Ok(None) => {}
+                        Err(e) => tracing::warn!("placing {session}: {e}"),
+                    }
+                }
                 self.reload_recents();
             }
             msg @ AppMsg::StatusRefreshed { .. } => {

@@ -210,6 +210,91 @@ class TestKit {
         return o.convert(p, to: nil)
     }
 
+    /// The + on a section's header, in window coordinates.
+    func sectionAddPoint(_ id: String) -> NSPoint? {
+        let o = app.sidebar.outline
+        for row in 0..<o.numberOfRows {
+            if let it = o.item(atRow: row) as? SidebarItem, it.kind == .section(id),
+               let cell = o.view(atColumn: 0, row: row, makeIfNecessary: false) as? SectionCellView, !cell.addButton.isHidden {
+                let b = cell.addButton
+                return b.convert(NSPoint(x: b.bounds.midX, y: b.bounds.midY), to: nil)
+            }
+        }
+        return nil
+    }
+
+    func newSessionInSection() async {
+        let ws = app.workspace
+        guard let work = app.daemon.state.sidebar.sections.first(where: { $0.name == "Work" }) else {
+            r.check("the fixture has a Work section", false)
+            return
+        }
+        let before = work.members.map(\.id)
+        // Section defaults fill the sheet.
+        app.daemon.command(.setSectionDefaults(section: work.id, defaults: SectionDefaults(path: "/tmp", agent: "terminal", args: "echo from-defaults")))
+        await waitUntil(3) { app.daemon.state.sidebar.sections.first { $0.id == work.id }?.defaults != nil }
+        // The step before may have just removed a row: the outline reloads first.
+        await waitUntil(2) { self.sectionAddPoint(work.id) != nil }
+        let p = sectionAddPoint(work.id)
+        r.check("a section header has a + for a new session in it", p != nil)
+        shot("10b-section-plus")
+        if let p { await click(p) }
+        await waitUntil(2) { app.sheetOpen }
+        let model = app.formModel
+        r.check("…which opens the new-session sheet for that section", app.sheetOpen && model?.mode == .create && model?.title == "New Session in Work",
+                "title \(model?.title ?? "-")")
+        guard let model, let sheet = w.attachedSheet else { return }
+        r.check("…filled from the section's defaults", model.path == "/tmp" && model.agent == "terminal" && model.args == "echo from-defaults",
+                "\(model.path) \(model.agent) \(model.args)")
+        r.check("…and offering to save its values as the section's defaults", model.offersSaveAsDefaults)
+        model.name = "in-section"
+        model.args = ""
+        model.saveAsDefaults = true
+        await sleep(150)
+        shot("10c-new-session-in-section")
+        await key(36, "\r", window: sheet)
+        await waitUntil(5) { self.session("in-section") != nil && ws.activeSession == self.session("in-section") }
+        let s = session("in-section")
+        let members = app.daemon.state.sidebar.sections.first { $0.id == work.id }?.members ?? []
+        r.check("…and the new row is shown, at the end of the section", s != nil && members.map(\.id).dropLast() == before[...]
+                && members.last?.tabs.map(\.session) == [s ?? "-"], "members \(members.map(\.name))")
+        r.check("…and with the box ticked, the sheet's values become the section's defaults",
+                await waitUntil(3) { app.daemon.state.sidebar.sections.first { $0.id == work.id }?.defaults?.args == "" })
+
+        // Section Defaults…: the sheet without a name, whose Save stores them.
+        app.editSectionDefaults(work.id)
+        await waitUntil(2) { app.sheetOpen }
+        let dm = app.formModel
+        r.check("Section Defaults… opens the sheet for the section's defaults", dm?.isSectionDefaults == true && dm?.title == "Defaults for Work"
+                && dm?.path == "/tmp", "title \(dm?.title ?? "-"), path \(dm?.path ?? "-")")
+        if let dm, let sheet = w.attachedSheet {
+            dm.path = "~/work"
+            dm.agent = "codex"
+            dm.options.codex.yolo = true
+            await sleep(150)
+            shot("10d-section-defaults")
+            await key(36, "\r", window: sheet)
+        }
+        let saved = await waitUntil(3) { app.daemon.state.sidebar.sections.first { $0.id == work.id }?.defaults?.path == "~/work" }
+        let d = app.daemon.state.sidebar.sections.first { $0.id == work.id }?.defaults
+        r.check("…and Save stores them", saved && d?.agent == "codex" && d?.options.codex.yolo == true && !app.sheetOpen, "\(String(describing: d))")
+        let menu = app.sectionMenu(for: work.id)
+        let clear = menu.items.firstIndex { $0.title == "Clear Section Defaults" }
+        if let clear { menu.performActionForItem(at: clear) }
+        r.check("…and the section menu's Clear Section Defaults removes them",
+                await waitUntil(3) { app.daemon.state.sidebar.sections.first { $0.id == work.id }?.defaults == nil } && clear != nil)
+        r.check("…after which the menu no longer offers it", !app.sectionMenu(for: work.id).items.contains { $0.title == "Clear Section Defaults" })
+
+        guard let s else { return }
+        let row = rowID(s)
+        app.daemon.command(.kill(session: s))
+        await waitUntil(5) { !app.isAlive(s) }
+        if let row {
+            app.removeRow(row)
+            await waitUntil(3) { app.daemon.state.sidebar.container(id: row) == nil }
+        }
+    }
+
     func sectionPoint(_ id: String) -> NSPoint? {
         let o = app.sidebar.outline
         for row in 0..<o.numberOfRows {
@@ -369,7 +454,7 @@ final class FocusTest: TestKit {
         r.check("start: the active terminal is first responder", firstResponderIsActiveTerminal)
 
         // --only a,b runs just those sections (rows, panes, zoom, termcolours, newpanes, clientmoves, done, notify, appearance, links, filter, sheet,
-        // empty, tiledrag, sidebardrag, shortcuts, header, windows).
+        // empty, tiledrag, sidebardrag, shortcuts, header, windows, sectionnew).
         if let only = argValue("--only") {
             let parts = Set(only.split(separator: ",").map(String.init))
             if parts.contains("rows") { await rows(f) }
@@ -383,6 +468,7 @@ final class FocusTest: TestKit {
             if parts.contains("termcolours") { await terminalColoursFollowEveryTheme() }
             if parts.contains("links") { await links() }
             if parts.contains("filter") { await filter(f) }
+            if parts.contains("sectionnew") { await newSessionInSection() }
             await layoutSections(parts)
             if parts.contains("windows") { await windows(f) }
             if parts.contains("remove") { await removeFromSidebar() }
@@ -709,6 +795,9 @@ final class FocusTest: TestKit {
                     && app.daemon.state.sidebar.container(id: ws.currentRow!) != nil)
         }
 
+        // 15a. A section's +: the sheet for a new session in that section, and the new row lands at its end.
+        await newSessionInSection()
+
         // 16. Themes: a light and a dark one for the screenshots, then back.
         let original = app.daemon.state.theme.name
         await showRow(web)
@@ -869,6 +958,14 @@ final class FocusTest: TestKit {
         return sidebarBadge(item)
     }
 
+    func sidebarTrailing(_ session: String) -> String? {
+        let o = app.sidebar.outline
+        guard let item = app.sidebar.itemFor(session: session) else { return nil }
+        let row = o.row(forItem: item)
+        guard row >= 0 else { return nil }
+        return (o.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarCellView)?.trailingText
+    }
+
     func sidebarBadge(_ item: SidebarItem) -> AgentState? {
         let o = app.sidebar.outline
         let row = o.row(forItem: item)
@@ -919,9 +1016,17 @@ final class FocusTest: TestKit {
         // The next prompt (running), then the turn finishing again.
         _ = await claudeHook(s, "UserPromptSubmit", #"{"hook_event_name":"UserPromptSubmit","prompt":"again"}"#)
         r.check("done: the next prompt shows running", await waitUntil(3) { ws.headerStatus(s)?.state == .running && sidebarBadge(s) == .running })
+        let started = app.daemon.state.statuses[s]?.startedAt
+        let sinceStart = started.map { Int64(TurnElapsed.nowMs()) - Int64($0) } ?? -1
+        r.check("…with the turn's start from the daemon, just now", (0..<5_000).contains(sinceStart), "\(sinceStart) ms ago")
+        r.check("…and its timer in the header and on the sidebar row", ws.headerStatus(s)?.text == "running · <1m" && sidebarTrailing(s) == "<1m",
+                "header \(ws.headerStatus(s)?.text ?? "-"), row \(sidebarTrailing(s) ?? "-")")
+        shot("14b-running-timer")
         await sleep(20)
         _ = await claudeHook(s, "Stop", #"{"hook_event_name":"Stop","stop_hook_active":false}"#)
         r.check("…and the next Stop shows done again, after the earlier input", await waitUntil(3) { showsDone(s) })
+        r.check("…and the timer goes with the turn", app.daemon.state.statuses[s]?.startedAt == nil && sidebarTrailing(s) != "<1m",
+                "row \(sidebarTrailing(s) ?? "-")")
         await type("ok\n")
         r.check("…until the next keys", await waitUntil(2) { showsNotDone(s) })
 

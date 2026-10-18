@@ -959,6 +959,7 @@ final class TileChromeView: NSView {
         header.draggable = showRing
         header.update(name: session.map { app.displayName($0) }, group: session.flatMap { app.groupLabel($0) },
                       state: session.map { app.displayState($0) }, detail: session.flatMap { app.statusDetail($0) },
+                      elapsed: session.flatMap { app.turnElapsed($0) },
                       exited: session.map { !app.isAlive($0) } ?? false, active: active && showRing,
                       zoomNote: hasTerminal ? zoomNote : nil, theme: theme)
         CATransaction.begin()
@@ -1111,7 +1112,7 @@ final class TileHeaderView: NSView {
         CATransaction.commit()
     }
 
-    func update(name n: String?, group: String?, state: AgentState?, detail d: String?, exited: Bool, active: Bool,
+    func update(name n: String?, group: String?, state: AgentState?, detail d: String?, elapsed: String? = nil, exited: Bool, active: Bool,
                 zoomNote: String?, theme: AppTheme) {
         zoom.isHidden = zoomNote == nil
         zoom.stringValue = zoomNote ?? ""
@@ -1146,7 +1147,7 @@ final class TileHeaderView: NSView {
             case .seen:
                 text = "done · read"
             case .running:
-                text = d ?? ""
+                text = [d ?? (elapsed == nil ? nil : "running"), elapsed].compactMap { $0 }.joined(separator: " · ")
             default:
                 text = ""
             }

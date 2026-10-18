@@ -19,7 +19,7 @@ use crate::events::{
     ClaudeOptions, ClaudeSessionMode, CodexOptions, KimiOptions, OpencodeOptions, QwenOptions,
     SessionSpec, SpecOptions, WorktreeSpec,
 };
-use crate::sidebar::{Container, Section, SidebarModel};
+use crate::sidebar::{Container, Section, SectionDefaults, SidebarModel};
 use crate::store::Recent;
 use crate::tmux::detector::Status;
 use crate::tmux::session::SessionView;
@@ -65,6 +65,10 @@ pub enum CmdOp {
         spec: SpecWire,
         #[serde(default)]
         defer_launch: bool,
+        /// Put the new row at the end of this section (by id). Ignored
+        /// when `spec.container_id` adds the session to a row as a tab.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        section: Option<String>,
     },
     Kill {
         session: String,
@@ -153,6 +157,12 @@ pub enum CmdOp {
     InsertSection {
         name: String,
     },
+    /// Set (or with `null`, clear) a section's starting values for a
+    /// new session.
+    SetSectionDefaults {
+        section: String,
+        defaults: Option<SectionDefaults>,
+    },
     RenameSection {
         section: String,
         name: String,
@@ -212,6 +222,9 @@ pub enum ServerMsg {
         /// See [`StatusInfo::done_at`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         done_at: Option<u64>,
+        /// See [`StatusInfo::started_at`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<u64>,
     },
     Sidebar {
         seq: u64,
@@ -412,6 +425,11 @@ pub struct StatusInfo {
     /// state is `done`; `state` is `idle` then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_at: Option<u64>,
+    /// When the current turn started, Unix milliseconds: sent while the
+    /// state is `running` or `waiting`, for a working timer. A turn
+    /// carries on through permission waits until the agent is done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -430,6 +448,10 @@ pub struct SectionWire {
     pub collapsed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub banner_font: Option<String>,
+    /// Starting values for a new session in this section. Set with
+    /// `set_section_defaults`; a `sidebar_save` leaves them as they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defaults: Option<SectionDefaults>,
     #[serde(default)]
     pub members: Vec<ContainerWire>,
 }
@@ -636,6 +658,7 @@ impl From<&crate::tmux::session::SessionView> for StatusInfo {
             source: v.status_source.into(),
             detail: v.status_detail.clone(),
             done_at: v.done_at,
+            started_at: None,
         }
     }
 }
@@ -871,6 +894,7 @@ impl SidebarWire {
                     name: s.name.clone(),
                     collapsed: s.collapsed,
                     banner_font: s.banner_font.clone(),
+                    defaults: s.defaults.clone(),
                     members: s.members.iter().map(container).collect(),
                 })
                 .collect(),
@@ -930,6 +954,7 @@ impl SidebarWire {
                 name: s.name.clone(),
                 collapsed: s.collapsed,
                 banner_font: s.banner_font.clone(),
+                defaults: None,
                 members: s
                     .members
                     .iter()
@@ -1112,6 +1137,7 @@ mod tests {
             CmdOp::Create {
                 spec: spec(),
                 defer_launch: true,
+                section: Some("sec-1".into()),
             },
             CmdOp::Kill {
                 session: "bosun-a-1".into(),
@@ -1182,6 +1208,19 @@ mod tests {
             },
             CmdOp::InsertSection {
                 name: "Work".into(),
+            },
+            CmdOp::SetSectionDefaults {
+                section: "sec-1".into(),
+                defaults: Some(SectionDefaults {
+                    path: "~/work/api".into(),
+                    agent: Some("codex".into()),
+                    args: "--model o4".into(),
+                    options: OptionsWire::default(),
+                }),
+            },
+            CmdOp::SetSectionDefaults {
+                section: "sec-1".into(),
+                defaults: None,
             },
             CmdOp::RenameSection {
                 section: "sec-1".into(),
@@ -1325,6 +1364,7 @@ mod tests {
                 source: StatusSourceWire::Hook,
                 detail: Some("permission: Bash".into()),
                 done_at: None,
+                started_at: Some(1_760_000_100_000),
             },
         );
         statuses.insert(
@@ -1334,6 +1374,7 @@ mod tests {
                 source: StatusSourceWire::Hook,
                 detail: None,
                 done_at: Some(1_760_000_123_456),
+                started_at: None,
             },
         );
         let sidebar = SidebarWire {
@@ -1352,6 +1393,7 @@ mod tests {
                 name: "Work".into(),
                 collapsed: true,
                 banner_font: None,
+                defaults: None,
                 members: vec![],
             }],
         };
@@ -1408,6 +1450,7 @@ mod tests {
             source: StatusSourceWire::Detector,
             detail: None,
             done_at: None,
+            started_at: Some(1_760_000_100_000),
         });
         round_trip_server(ServerMsg::Status {
             seq: 3,
@@ -1416,6 +1459,7 @@ mod tests {
             source: StatusSourceWire::Hook,
             detail: None,
             done_at: Some(1_760_000_123_456),
+            started_at: None,
         });
         round_trip_server(ServerMsg::Sidebar { seq: 4, sidebar });
         round_trip_server(ServerMsg::Recents { seq: 5, recents });
@@ -1485,6 +1529,7 @@ mod tests {
             source: StatusSourceWire::Hook,
             detail: None,
             done_at: Some(1_760_000_123_456),
+            started_at: None,
         };
         assert_eq!(
             serde_json::to_value(&msg).unwrap(),

@@ -9,6 +9,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **Read and unread done turns in Bosun for Mac.** A done turn is unread (a filled dot in the done colour) until you've read it, then it shows as a hollow ring in the same colour, with "done · read" in the pane header, so you can tell a finished turn you've seen from one waiting for you, and from an idle session. Reading it means having its pane as the active pane of the front window for two seconds, or choosing **Mark as Read** from a row's or tab's right-click menu (a row marks all its done tabs). Read turns leave the header's done count and their notification, the next turn is unread again, and read marks survive a relaunch.
+- **A working timer in Bosun for Mac.** A running session shows how long its turn has been going on its sidebar row (`<1m`, `4m`, `1h 5m`) and in its pane header ("running · 4m"). The turn counts from the prompt and carries on through permission prompts until the agent is done.
+- **New session in a section.** In Bosun for Mac, each section header has a + beside its chevron, and its right-click menu has **New Session in Section…**. Both open the new-session sheet ("New Session in Work"), and the new row goes at the end of that section instead of at the top level.
+- **Section defaults.** A section can remember what a new session in it starts with: a folder, an agent with its options, and extra arguments. In Bosun for Mac, choose **Section Defaults…** from the section's right-click menu, or tick "Save as this section's defaults" in the sheet when creating a session in it. From then on the sheet for a new session in that section opens filled in with them. **Clear Section Defaults** removes them. They're stored with the section in `config.toml`.
+- **`started_at`, `create`'s `section` and `set_section_defaults` in `bosun serve`.** Status entries carry `started_at` (when the current turn started) while running or waiting, `create` takes an optional `section` id for the new row, and `set_section_defaults` stores a section's starting values for new sessions, sent in the section's `defaults`. See `docs/protocol.md`.
 
 ### Fixed
 

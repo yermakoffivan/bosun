@@ -890,6 +890,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 lastNotice = (n.raw, better)
             }
         }
+        updateTurnTicker()
         for bw in windows {
             if structure { bw.sidebar.reload() } else if !touched.isEmpty { bw.sidebar.refreshRows(touched) }
         }
@@ -1018,6 +1019,42 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
 
     func statusDetail(_ s: String) -> String? { daemon.state.statuses[s]?.detail }
+
+    /// How long a running session's turn has been going ("4m"), nil when it isn't running.
+    func turnElapsed(_ s: String, now: UInt64 = TurnElapsed.nowMs()) -> String? {
+        guard displayState(s) == .running, let t = daemon.state.statuses[s]?.startedAt else { return nil }
+        return TurnElapsed.label(startedAt: t, now: now)
+    }
+
+    /// Running sessions' timers change once a minute: redraw just the rows and headers whose label moved.
+    private var turnTicker: Timer?
+    private var turnLabels: [String: String] = [:]
+
+    private func updateTurnTicker() {
+        let running = daemon.state.statuses.contains { $0.value.startedAt != nil }
+        if running, turnTicker == nil {
+            turnTicker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.turnTick() }
+            }
+        } else if !running {
+            turnTicker?.invalidate()
+            turnTicker = nil
+            turnLabels = [:]
+        }
+    }
+
+    private func turnTick() {
+        let now = TurnElapsed.nowMs()
+        var labels: [String: String] = [:]
+        for name in daemon.state.statuses.keys { if let l = turnElapsed(name, now: now) { labels[name] = l } }
+        let moved = Set(labels.keys.filter { turnLabels[$0] != labels[$0] })
+        turnLabels = labels
+        guard !moved.isEmpty else { return }
+        for bw in windows {
+            bw.sidebar.refreshRows(moved)
+            if !moved.isDisjoint(with: bw.workspace.tiles) { bw.workspace.updateChromeState() }
+        }
+    }
 
     /// "tab 2 of 3" for a session in a multi-tab row.
     func groupLabel(_ s: String) -> String? {
@@ -1327,10 +1364,36 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     // MARK: Sheets
 
-    func newSession(name: String = "") {
+    /// New Session…: the sheet for a new row, at the end of `section` when given (a section's + or menu).
+    func newSession(name: String = "", section: String? = nil) {
         let st = daemon.state
         let model = NewSessionModel(mode: .create, recents: st.recents, defaultAgent: st.defaultAgent, worktreeLocation: st.worktreeLocation, name: name)
-        presentForm(model) { [weak self] spec in self?.create(spec) }
+        let sec = section.flatMap { id in st.sidebar.sections.first { $0.id == id } }
+        model.sectionName = sec?.name
+        if let d = sec?.defaults { model.apply(d) }
+        presentForm(model) { [weak self] spec in
+            guard let self else { return }
+            self.create(spec, section: section)
+            if let section, model.saveAsDefaults {
+                self.daemon.command(.setSectionDefaults(section: section, defaults: model.sectionDefaults)) { [weak self] in self?.report($0) }
+            }
+        }
+    }
+
+    /// Section Defaults…: the sheet without a name, whose Save stores what a new session in the section starts with.
+    func editSectionDefaults(_ id: String) {
+        let st = daemon.state
+        guard let sec = st.sidebar.sections.first(where: { $0.id == id }) else { return }
+        // No defaults yet: start from the section's first row's directory.
+        let path = sec.defaults.map(\.path).flatMap { $0.isEmpty ? nil : $0 } ?? sec.members.first.map(rowDirectory)
+        let model = NewSessionModel(mode: .sectionDefaults(section: id), recents: st.recents, defaultAgent: st.defaultAgent,
+                                    worktreeLocation: st.worktreeLocation, path: path)
+        model.sectionName = sec.name
+        if let d = sec.defaults { model.apply(d) }
+        presentForm(model) { [weak self] _ in
+            guard let self else { return }
+            self.daemon.command(.setSectionDefaults(section: id, defaults: model.sectionDefaults)) { [weak self] in self?.report($0) }
+        }
     }
 
     /// New Tab… (Cmd+T, or a row's menu): the new-session sheet for a tab of `containerID`, in the row's
@@ -1449,8 +1512,8 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
     }
 
     /// A new session (a new row).
-    private func create(_ spec: Spec) {
-        daemon.command(.create(spec: spec, deferLaunch: true)) { [weak self] ack in
+    private func create(_ spec: Spec, section: String? = nil) {
+        daemon.command(.create(spec: spec, deferLaunch: true, section: section)) { [weak self] ack in
             guard let self else { return }
             self.report(ack)
             guard ack.ok, let s = ack.session else { return }
@@ -1776,6 +1839,14 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     func sectionMenu(for id: String) -> NSMenu {
         let m = NSMenu()
+        m.addItem(ClosureMenuItem(title: "New Session in Section…") { [weak self] in self?.newSession(section: id) })
+        m.addItem(ClosureMenuItem(title: "Section Defaults…") { [weak self] in self?.editSectionDefaults(id) })
+        if daemon.state.sidebar.sections.first(where: { $0.id == id })?.defaults != nil {
+            m.addItem(ClosureMenuItem(title: "Clear Section Defaults") { [weak self] in
+                self?.daemon.command(.setSectionDefaults(section: id, defaults: nil)) { [weak self] in self?.report($0) }
+            })
+        }
+        m.addItem(.separator())
         m.addItem(ClosureMenuItem(title: "Rename Section…") { [weak self] in self?.renameSection(id) })
         m.addItem(ClosureMenuItem(title: "New Section…") { [weak self] in self?.newSection() })
         m.addItem(.separator())

@@ -185,6 +185,7 @@ fn sections_group_sessions() {
             ],
             collapsed: false,
             banner_font: None,
+            defaults: None,
         }],
     };
     let frame = render(&state, 80, 12);

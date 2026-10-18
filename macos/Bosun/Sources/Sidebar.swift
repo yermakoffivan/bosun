@@ -594,7 +594,9 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         case .section(let id):
             guard let c = cell as? SectionCellView, let s = st.sidebar.sections.first(where: { $0.id == id }) else { return }
             let waiting = s.members.flatMap(\.tabs).contains { app.displayState($0.session) == .waiting }
-            c.configure(name: s.name, count: s.members.count, collapsed: s.collapsed && filtered == nil, waiting: waiting, theme: theme)
+            c.chevronRoom = filtered == nil ? 20 : 0
+            c.configure(name: s.name, count: s.members.count, collapsed: s.collapsed && filtered == nil, waiting: waiting, theme: theme,
+                        onAdd: { [weak self] in self?.app.newSession(section: id) })
         case .heading:
             guard let c = cell as? SectionCellView else { return }
             c.configure(name: "On screen", count: 0, collapsed: false, waiting: false, theme: theme)
@@ -643,6 +645,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard let info = st.sessions[session] else { return "exited" }
         let state = app.displayState(session)
         if state == .waiting { return "waiting" }
+        if let e = app.turnElapsed(session) { return e }
         if let b = info.branch, !b.isEmpty { return "⎇ \(b)" }
         if let a = info.agent, a != "terminal" { return a }
         return ""
@@ -1144,6 +1147,11 @@ final class SectionCellView: NSTableCellView {
     private let label = NSTextField(labelWithString: "")
     private let count = NSTextField(labelWithString: "")
     private let dot = CALayer()
+    /// New Session in Section, beside the chevron. Hidden on the "On screen" heading.
+    let addButton = NSButton()
+    var onAdd: (() -> Void)?
+    /// Room the outline's chevron takes at the right edge (none while a filter keeps sections open).
+    var chevronRoom: CGFloat = 20
 
     init() {
         super.init(frame: .zero)
@@ -1156,7 +1164,17 @@ final class SectionCellView: NSTableCellView {
         addSubview(count)
         layer?.addSublayer(dot)
         dot.cornerRadius = 3
+        addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Session in Section")?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+        addButton.isBordered = false
+        addButton.imagePosition = .imageOnly
+        addButton.toolTip = "New Session in Section"
+        addButton.target = self
+        addButton.action = #selector(addClicked)
+        addSubview(addButton)
     }
+
+    @objc private func addClicked() { onAdd?() }
 
     required init?(coder: NSCoder) { fatalError() }
 
@@ -1171,9 +1189,14 @@ final class SectionCellView: NSTableCellView {
         CATransaction.setDisableActions(true)
         dot.frame = NSRect(x: count.frame.maxX + 6, y: y + (label.frame.height - 6) / 2, width: 6, height: 6)
         CATransaction.commit()
+        // Centred on the row, like the outline's chevron beside it.
+        addButton.frame = NSRect(x: bounds.width - chevronRoom - 18, y: (bounds.height - 16) / 2, width: 16, height: 16)
     }
 
-    func configure(name: String, count n: Int, collapsed: Bool, waiting: Bool, theme: AppTheme) {
+    func configure(name: String, count n: Int, collapsed: Bool, waiting: Bool, theme: AppTheme, onAdd: (() -> Void)? = nil) {
+        self.onAdd = onAdd
+        addButton.isHidden = onAdd == nil
+        addButton.contentTintColor = theme.textMuted
         label.stringValue = name.uppercased()
         label.textColor = theme.textMuted
         count.stringValue = collapsed ? "\(n)" : ""

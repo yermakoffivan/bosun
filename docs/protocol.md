@@ -93,6 +93,8 @@ Text fields that end up in tmux (display names, section names, paths, args) may 
 
 Creates a session from a spec (see [Spec](#spec)). The display name is made unique the same way the TUI does it ("api" becomes "api 2"). The `ack` carries the new internal name in `session`.
 
+An optional `section` (a section id) puts the new row at the end of that section instead of among the ungrouped rows. An unknown section is refused before anything is created. It's ignored when `spec.container_id` adds the session to an existing row as a tab.
+
 The agent command is typed into the new shell straight away, unless `defer_launch` is `true`. Then the session starts as a bare shell, the `ack` carries `pending_launch`, and the client sends `launch_agent` with those values once its terminal view is attached. Agents like Codex probe the terminal's background color at startup; deferring the launch until a terminal is there to answer is what lets them pick the right palette (Bosun issue #2). A GUI that shows the session right away should defer.
 
 ```json
@@ -188,7 +190,7 @@ Removes one row from the recents list, by its `id`.
   "sections":[{"id":"sec-1","name":"Work","collapsed":false,"members":[]}]}}
 ```
 
-Replaces the sidebar model after a drag and drop reorder, a move between sections, a collapse toggle or a tab reorder. Send back the [sidebar](#sidebar) from the last snapshot or delta, changed; a row's `name` and, on tabs, everything but `session` are ignored. Ids must be unique, every row needs at least one tab, `active` must be one of its tabs, and a session may appear only once. Sections and rows keep their ids. The change is written to `config.toml` (where the TUI reads it), and section membership is remembered by display name as it is in the TUI, so a session that is restarted or recreated lands back in its section. Sessions the model leaves out are added back as ungrouped rows on the next refresh.
+Replaces the sidebar model after a drag and drop reorder, a move between sections, a collapse toggle or a tab reorder. Send back the [sidebar](#sidebar) from the last snapshot or delta, changed; a row's `name` and, on tabs, everything but `session` are ignored. Ids must be unique, every row needs at least one tab, `active` must be one of its tabs, and a session may appear only once. Sections and rows keep their ids, and a section's `defaults` stay as they are whether or not they're sent. The change is written to `config.toml` (where the TUI reads it), and section membership is remembered by display name as it is in the TUI, so a session that is restarted or recreated lands back in its section. Sessions the model leaves out are added back as ungrouped rows on the next refresh.
 
 #### `move_tab`
 
@@ -221,6 +223,15 @@ Adds an empty section at the end.
 ```
 
 Renames a section by id. Remembered section membership follows the new name.
+
+#### `set_section_defaults`
+
+```json
+{"t":"cmd","id":14,"op":"set_section_defaults","section":"sec-1",
+ "defaults":{"path":"~/work/api","agent":"codex","args":"--model o4","options":{"codex":{"session_mode":"continue","yolo":true}}}}
+```
+
+Stores what a new session made in that section starts with: a folder, an agent with its `options` (as in a [Spec](#spec)), and extra arguments. Every field is optional; an empty `path` or `args`, or no `agent`, leaves that field to the client's usual default. `"defaults": null` clears them. They're saved in `config.toml` with the section and sent in its `defaults` in the sidebar. `sidebar_save` never changes them. Bosun for Mac fills its new-session sheet from them for a session made in the section; `create` itself doesn't apply them.
 
 #### `set_theme`
 
@@ -328,7 +339,7 @@ One entry per live tmux session that Bosun manages, in tmux's order:
  "bosun-docs-5e6f7a8b":{"state":"idle","source":"detector"}}
 ```
 
-The agent state per session. `state` is `running`, `waiting` (blocked on you: a permission or question prompt), `done` (finished a turn), `idle`, `error` or `unknown`. `source` is `hook` when the agent reported the state itself through the hooks Bosun installs at launch (see the README's "Agent status from hooks"), or `detector` when Bosun worked it out from the pane title and contents. `detail` comes only with hook states and says what the state is about, e.g. `permission: Bash`, `question` or `plan approval` while waiting. `done_at` comes only with hook states, when the agent's own report is that it finished its turn (Claude Code's `Stop` hook): it's when it said so, in Unix milliseconds. `state` is `idle` then, as below. A newer turn finishing gives a newer `done_at`, and any other hook report (the user sent a prompt, a permission prompt opened) drops it. A client that wants to show "finished, your turn" compares it with the last time the user typed into that session. A session that's removed from `sessions` is removed from here too.
+The agent state per session. `state` is `running`, `waiting` (blocked on you: a permission or question prompt), `done` (finished a turn), `idle`, `error` or `unknown`. `source` is `hook` when the agent reported the state itself through the hooks Bosun installs at launch (see the README's "Agent status from hooks"), or `detector` when Bosun worked it out from the pane title and contents. `detail` comes only with hook states and says what the state is about, e.g. `permission: Bash`, `question` or `plan approval` while waiting. `done_at` comes only with hook states, when the agent's own report is that it finished its turn (Claude Code's `Stop` hook): it's when it said so, in Unix milliseconds. `state` is `idle` then, as below. A newer turn finishing gives a newer `done_at`, and any other hook report (the user sent a prompt, a permission prompt opened) drops it. A client that wants to show "finished, your turn" compares it with the last time the user typed into that session. `started_at` comes while `state` is `running` or `waiting`: when the current turn started, in Unix milliseconds, for a working timer. A turn starts when the daemon first sees the session running and carries on through permission waits until the agent is done (a hook's done or idle ends it at once; a detector state that drops out of running for less than five seconds keeps the same turn). A daemon that starts while an agent is already working counts that turn from its own start. A session that's removed from `sessions` is removed from here too.
 
 This is the state Bosun detects for the session itself. The TUI also shows an idle row as done when it ran and changed since you last looked at it; that depends on what each viewer has seen, so the daemon leaves it to the client.
 
@@ -341,10 +352,11 @@ This is the state Bosun detects for the session itself. The TUI also shows an id
             {"session":"bosun-api-2-9f8e7d6c","display":"api 2","alive":false}]}],
  "sections":[
    {"id":"sec-1","name":"Work","collapsed":false,"banner_font":"metalix",
+    "defaults":{"path":"~/work","agent":"codex","options":{…}},
     "members":[…rows like the ones above…]}]}
 ```
 
-Ungrouped rows come first, then each section's header and rows, the same order as the TUI. Each row has one or more tabs; `active` is the session name of the shown tab. A row's `name` is its label as the TUI shows it: the display name of its active tab (for an exited tab, the name recovered from recents), so it changes when the active tab changes or is renamed. A tab with `alive: false` is a session that has ended; the TUI keeps such rows (as "exited") so they can be restarted, unless `remove_dead_sessions` is on. Its `display` is the best name Bosun can recover from the recents list. `banner_font` is left out when the section uses the global one.
+Ungrouped rows come first, then each section's header and rows, the same order as the TUI. Each row has one or more tabs; `active` is the session name of the shown tab. A row's `name` is its label as the TUI shows it: the display name of its active tab (for an exited tab, the name recovered from recents), so it changes when the active tab changes or is renamed. A tab with `alive: false` is a session that has ended; the TUI keeps such rows (as "exited") so they can be restarted, unless `remove_dead_sessions` is on. Its `display` is the best name Bosun can recover from the recents list. `banner_font` is left out when the section uses the global one, and `defaults` when the section has none (see `set_section_defaults`).
 
 #### Recents
 
@@ -433,7 +445,7 @@ Each delta replaces one part of the snapshot.
 ```
 
 - `sessions`: `upsert` holds full rows that are new or changed, `removed` the names of sessions that are gone (their statuses go with them). Either may be absent. Row order follows tmux's; a client that cares about order uses the sidebar.
-- `status`: one session's state, source, detail or `done_at` changed. The fields are the same as one entry in the snapshot's `statuses`. A state an agent reports through its hook goes out within about 250 ms: the daemon re-reads every session's hook state, pane title and command four times a second over its control-mode connection. States the detectors work out from the pane's contents follow the once-a-second refresh, as in the TUI. (If the control-mode connection is down, hook states fall back to the once-a-second refresh too.)
+- `status`: one session's state, source, detail, `done_at` or `started_at` changed. The fields are the same as one entry in the snapshot's `statuses`. A state an agent reports through its hook goes out within about 250 ms: the daemon re-reads every session's hook state, pane title and command four times a second over its control-mode connection. States the detectors work out from the pane's contents follow the once-a-second refresh, as in the TUI. (If the control-mode connection is down, hook states fall back to the once-a-second refresh too.)
 - `theme_pair`: the Light/Dark pair changed. It replaces both `theme_light` and `theme_dark`; a side that's absent (or `null`) is now unset.
 - The others replace that part of the snapshot whole. These are small and change rarely (on a command, a reconcile, or an edit to `config.toml`). `keybindings` is sent when an edit to `config.toml` changes what the shortcuts resolve to.
 

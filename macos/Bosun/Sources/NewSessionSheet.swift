@@ -10,6 +10,8 @@ final class NewSessionModel {
         case create
         case modify(session: String)
         case addTab(containerID: String)
+        /// A section's starting values for new sessions: no name or worktree, and Save stores them.
+        case sectionDefaults(section: String)
     }
 
     let mode: Mode
@@ -23,6 +25,10 @@ final class NewSessionModel {
     var args = ""
     var options = SpecOptions()
     var error: String?
+    /// The section a new session goes into (or whose defaults these are), for the title.
+    var sectionName: String?
+    /// Also store this sheet's folder, agent, options and arguments as the section's defaults.
+    var saveAsDefaults = false
 
     init(mode: Mode, recents: [Recent], defaultAgent: String, worktreeLocation: String, path: String? = nil, name: String = "") {
         self.mode = mode
@@ -43,12 +49,16 @@ final class NewSessionModel {
 
     var isModify: Bool { if case .modify = mode { return true }; return false }
     var isAddTab: Bool { if case .addTab = mode { return true }; return false }
+    var isSectionDefaults: Bool { if case .sectionDefaults = mode { return true }; return false }
+    /// A new row going into a section: the sheet offers to save its values as the section's defaults.
+    var offersSaveAsDefaults: Bool { mode == .create && sectionName != nil }
 
     var title: String {
         switch mode {
-        case .create: "New Session"
+        case .create: sectionName.map { "New Session in \($0)" } ?? "New Session"
         case .modify: "Modify Session"
         case .addTab: "New Tab"
+        case .sectionDefaults: "Defaults for \(sectionName ?? "Section")"
         }
     }
 
@@ -75,6 +85,20 @@ final class NewSessionModel {
         }
     }
 
+    /// Start from a section's defaults: each field it sets replaces the usual one.
+    func apply(_ d: SectionDefaults) {
+        if !d.path.isEmpty { path = d.path }
+        if let a = d.agent, agentNames.contains(a) { agent = a }
+        args = d.args
+        options = d.options
+    }
+
+    /// This sheet's values as a section's defaults.
+    var sectionDefaults: SectionDefaults {
+        SectionDefaults(path: path.trimmingCharacters(in: .whitespaces), agent: agent, args: args.trimmingCharacters(in: .whitespaces),
+                        options: options)
+    }
+
     func fill(from r: Recent) {
         name = r.name
         if !isAddTab { path = r.path }
@@ -85,6 +109,12 @@ final class NewSessionModel {
 
     /// Same checks as the TUI's `build_spec`.
     func buildSpec() -> Spec? {
+        if isSectionDefaults {
+            // Every field is optional here; Save hands the values back as a spec.
+            error = nil
+            let d = sectionDefaults
+            return Spec(name: "", path: d.path, agent: agent, args: d.args, options: options)
+        }
         var n = name.trimmingCharacters(in: .whitespaces)
         if n.hasPrefix("bosun-") { n = String(n.dropFirst(6)) }
         guard !n.isEmpty else { error = "Name is required."; return nil }
@@ -137,6 +167,7 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let submitButton = NSButton(title: "Create", target: nil, action: nil)
+    private let saveDefaultsBox = NSButton(checkboxWithTitle: "Save as this section's defaults (folder, agent and arguments)", target: nil, action: nil)
     private let grid = NSGridView()
     private var rows: [String: NSGridRow] = [:]
     private var lastHidden: [String: Bool] = [:]
@@ -265,6 +296,10 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
         add("kimi-yolo", nil, kimiYolo)
         add("opencode-auto", nil, ocAuto)
         add("qwen-yolo", nil, qwenYolo)
+        saveDefaultsBox.target = self
+        saveDefaultsBox.action = #selector(saveDefaultsToggled)
+        add("save-defaults", nil, saveDefaultsBox)
+        rows["save-defaults"]?.topPadding = 6
         argsLabel.alignment = .right
         argsLabel.setContentHuggingPriority(.required, for: .horizontal)
         grid.column(at: 0).xPlacement = .trailing
@@ -288,7 +323,7 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
         cancelButton.action = #selector(cancel)
         submitButton.bezelStyle = .push
         submitButton.keyEquivalent = "\r"
-        submitButton.title = model.isModify ? "Save" : "Create"
+        submitButton.title = model.isModify || model.isSectionDefaults ? "Save" : "Create"
         submitButton.target = self
         submitButton.action = #selector(submit)
         addSubview(cancelButton)
@@ -320,7 +355,7 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
     /// Re-render whenever the model changes (from the controls, "From Recent", or a test).
     private func observe() {
         withObservationTracking {
-            _ = (model.name, model.path, model.worktree, model.branch, model.agent, model.args, model.options, model.error)
+            _ = (model.name, model.path, model.worktree, model.branch, model.agent, model.args, model.options, model.error, model.saveAsDefaults)
         } onChange: { [weak self] in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.refresh(); self?.observe() } }
         }
@@ -363,10 +398,12 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
         errorLabel.stringValue = model.error ?? ""
         errorLabel.isHidden = model.error == nil
 
-        let canWorktree = !model.isModify && !model.isAddTab
+        saveDefaultsBox.state = model.saveAsDefaults ? .on : .off
+        let canWorktree = !model.isModify && !model.isAddTab && !model.isSectionDefaults
         var hidden: [String: Bool] = [
+            "name": model.isSectionDefaults,
             "worktree": !canWorktree, "branch": !(canWorktree && model.worktree), "preview": !(canWorktree && model.worktree),
-            "mode": terminal,
+            "mode": terminal, "save-defaults": !model.offersSaveAsDefaults,
         ]
         for key in ["claude-skip", "claude-rc", "codex-yolo", "kimi-yolo", "opencode-auto", "qwen-yolo"] {
             hidden[key] = !key.hasPrefix(model.agent + "-")
@@ -440,6 +477,8 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
     }
 
     @objc private func worktreeToggled() { model.worktree = worktreeBox.state == .on }
+
+    @objc private func saveDefaultsToggled() { model.saveAsDefaults = saveDefaultsBox.state == .on }
 
     @objc private func agentChanged() {
         let i = agentControl.selectedSegment

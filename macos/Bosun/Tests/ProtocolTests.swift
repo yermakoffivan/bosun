@@ -20,7 +20,8 @@ final class ProtocolTests: XCTestCase {
         {"id":"con-1","name":"api","active":"bosun-api-1a2b3c4d",
          "tabs":[{"session":"bosun-api-1a2b3c4d","display":"api","alive":true},
                  {"session":"bosun-api-2-9f8e7d6c","display":"api 2","alive":false}]}],
-       "sections":[{"id":"sec-1","name":"Work","collapsed":false,"banner_font":"metalix","members":[]}]},
+       "sections":[{"id":"sec-1","name":"Work","collapsed":false,"banner_font":"metalix","members":[],
+                     "defaults":{"path":"~/work","agent":"codex","options":{"codex":{"session_mode":"continue","yolo":true}}}}]},
      "recents":[{"id":42,"name":"api","path":"/w/api","agent":"claude","args":"","options":{"claude":{"session_mode":"continue","skip_permissions":false,"remote_control":false}},"last_used_at":1792130862123,"use_count":7}],
      "config":{"settings":[
         {"key":"theme","value":"opencode","choices":["opencode","tokyonight"],"read_only":false},
@@ -50,6 +51,12 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(s.sidebar.ungrouped.first?.tabs.count, 2)
         XCTAssertEqual(s.sidebar.ungrouped.first?.tabs[1].alive, false)
         XCTAssertEqual(s.sidebar.sections.first?.bannerFont, "metalix")
+        let d = s.sidebar.sections.first?.defaults
+        XCTAssertEqual(d?.path, "~/work")
+        XCTAssertEqual(d?.agent, "codex")
+        XCTAssertEqual(d?.args, "")
+        XCTAssertEqual(d?.options.codex.yolo, true)
+        XCTAssertEqual(d?.options.codex.sessionMode, .continue)
         XCTAssertEqual(s.recents.first?.options.claude.sessionMode, .continue)
         XCTAssertEqual(s.recents.first?.options.codex.sessionMode, .new)
         XCTAssertEqual(s.config.settings[1].pinnedBy, "BOSUN_DEFAULT_AGENT")
@@ -82,6 +89,8 @@ final class ProtocolTests: XCTestCase {
         } else { XCTFail() }
         XCTAssertEqual(try decode(#"{"t":"status","seq":7,"session":"s","state":"idle","source":"hook","done_at":1760000123456}"#),
                        .status(seq: 7, session: "s", info: StatusInfo(state: .idle, source: "hook", doneAt: 1_760_000_123_456)))
+        XCTAssertEqual(try decode(#"{"t":"status","seq":8,"session":"s","state":"running","source":"hook","started_at":1760000100000}"#),
+                       .status(seq: 8, session: "s", info: StatusInfo(state: .running, source: "hook", startedAt: 1_760_000_100_000)))
         // A future state word decodes as unknown rather than failing.
         if case .status(_, _, let info) = try decode(#"{"t":"status","seq":6,"session":"s","state":"thinking","source":"hook"}"#) {
             XCTAssertEqual(info.state, .unknown)
@@ -141,6 +150,14 @@ final class ProtocolTests: XCTestCase {
         spec.options.claude.sessionMode = .continue
         let create = try json(.cmd(id: 1, .create(spec: spec, deferLaunch: true)))
         XCTAssertEqual(create["defer_launch"] as? Bool, true)
+        XCTAssertNil(create["section"])
+        let inSection = try json(.cmd(id: 2, .create(spec: spec, deferLaunch: true, section: "sec-1")))
+        XCTAssertEqual(inSection["section"] as? String, "sec-1")
+        let clear = try json(.cmd(id: 3, .setSectionDefaults(section: "sec-1", defaults: nil)))
+        XCTAssertEqual(clear["op"] as? String, "set_section_defaults")
+        XCTAssertTrue(clear["defaults"] is NSNull)
+        let set = try json(.cmd(id: 4, .setSectionDefaults(section: "sec-1", defaults: SectionDefaults(path: "~/w", agent: "claude"))))
+        XCTAssertEqual((set["defaults"] as? [String: Any])?["path"] as? String, "~/w")
         let s = create["spec"] as! [String: Any]
         XCTAssertEqual(s["agent"] as? String, "claude")
         XCTAssertEqual(((s["options"] as! [String: Any])["claude"] as! [String: Any])["session_mode"] as? String, "continue")

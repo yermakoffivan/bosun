@@ -43,6 +43,42 @@ pub struct Section {
     /// (the global default). Toggled by `f` on the header.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub banner_font: Option<String>,
+    /// What a new session made in this section starts with in Bosun
+    /// for Mac's new-session sheet. `None`: the usual defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defaults: Option<SectionDefaults>,
+}
+
+/// A section's starting values for a new session: its folder, agent
+/// and the agent's options, and extra arguments. Empty strings and
+/// `None` leave that field to the sheet's usual default.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SectionDefaults {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub args: String,
+    #[serde(default)]
+    pub options: crate::serve::protocol::OptionsWire,
+}
+
+impl SectionDefaults {
+    /// The same checks a session spec gets.
+    pub fn check(&self) -> Result<(), String> {
+        crate::serve::protocol::check_text("defaults.path", &self.path, true)?;
+        crate::serve::protocol::check_text("defaults.args", &self.args, true)?;
+        if let Some(a) = &self.agent {
+            if !crate::config::AGENTS.contains(&a.as_str()) {
+                return Err(format!(
+                    "defaults.agent must be one of {}",
+                    crate::config::AGENTS.join(", ")
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn is_false(b: &bool) -> bool {
@@ -57,6 +93,7 @@ impl Section {
             members: Vec::new(),
             collapsed: false,
             banner_font: None,
+            defaults: None,
         }
     }
 }
@@ -853,6 +890,32 @@ impl SidebarModel {
         Ok(Some(id))
     }
 
+    /// Move the row holding the tab `internal` to the end of section
+    /// `section`, as a new session created into a section is placed.
+    /// Returns the row's id, or `None` when it's already in that
+    /// section.
+    pub fn move_row_to_section_end(
+        &mut self,
+        internal: &str,
+        section: &str,
+    ) -> Result<Option<String>, MoveError> {
+        let (bucket, i) = self
+            .slot_of_tab(internal)
+            .ok_or_else(|| MoveError::UnknownSession(internal.to_string()))?;
+        let si = self
+            .sections
+            .iter()
+            .position(|s| s.id == section)
+            .ok_or_else(|| MoveError::UnknownSection(section.to_string()))?;
+        if bucket == Some(si) {
+            return Ok(None);
+        }
+        let row = self.bucket_mut(bucket).remove(i);
+        let id = row.id.clone();
+        self.sections[si].members.push(row);
+        Ok(Some(id))
+    }
+
     /// Move every tab of row `from` into row `into`, in order, at
     /// `index` among its tabs (clamped; after its existing tabs when
     /// `None`), and remove `from`. `into`'s active tab stays as it
@@ -932,6 +995,7 @@ mod tests {
             members: members.iter().map(|s| con(s)).collect(),
             collapsed: false,
             banner_font: None,
+            defaults: None,
         }
     }
 
@@ -1452,5 +1516,43 @@ members = ["bosun-gamma"]
         assert_eq!(model.section_of("bosun-beta-cccc"), Some("proj"));
         assert_eq!(model.section_of("bosun-loose-aaaa"), None);
         assert_eq!(model.section_of("bosun-missing-zzzz"), None);
+    }
+    #[test]
+    fn move_row_to_section_end_moves_the_whole_row() {
+        let mut m = SidebarModel::default();
+        m.ungrouped.push(Container::single("a".into(), "a".into()));
+        let mut row = Container::single("b".into(), "b".into());
+        row.add_tab("c".into());
+        m.ungrouped.push(row);
+        let sid = m.insert_section_at_end("work".into());
+        m.sections[0]
+            .members
+            .push(Container::single("d".into(), "d".into()));
+
+        let moved = m.move_row_to_section_end("c", &sid).unwrap();
+        assert!(moved.is_some());
+        assert_eq!(m.ungrouped.len(), 1);
+        let names: Vec<_> = m.sections[0]
+            .members
+            .iter()
+            .map(|c| c.members.clone())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                vec!["d".to_string()],
+                vec!["b".to_string(), "c".to_string()]
+            ]
+        );
+        // Already there: nothing to do.
+        assert_eq!(m.move_row_to_section_end("b", &sid).unwrap(), None);
+        assert_eq!(
+            m.move_row_to_section_end("a", "sec-nope"),
+            Err(MoveError::UnknownSection("sec-nope".into()))
+        );
+        assert_eq!(
+            m.move_row_to_section_end("zz", &sid),
+            Err(MoveError::UnknownSession("zz".into()))
+        );
     }
 }

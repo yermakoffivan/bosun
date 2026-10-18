@@ -967,4 +967,16 @@ final class LinkTargetTests: XCTestCase {
         XCTAssertEqual(LinkTarget.stripLineSuffix("a:b"), "a:b")
         XCTAssertEqual(LinkTarget.stripLineSuffix(":12"), ":12")
     }
+
+    func testTurnElapsedLabel() {
+        let t: UInt64 = 1_760_000_000_000
+        XCTAssertEqual(TurnElapsed.label(startedAt: t, now: t), "<1m")
+        XCTAssertEqual(TurnElapsed.label(startedAt: t, now: t + 59_999), "<1m")
+        XCTAssertEqual(TurnElapsed.label(startedAt: t, now: t + 60_000), "1m")
+        XCTAssertEqual(TurnElapsed.label(startedAt: t, now: t + 59 * 60_000 + 59_000), "59m")
+        XCTAssertEqual(TurnElapsed.label(startedAt: t, now: t + 60 * 60_000), "1h")
+        XCTAssertEqual(TurnElapsed.label(startedAt: t, now: t + 65 * 60_000), "1h 5m")
+        // A daemon clock a touch ahead of ours.
+        XCTAssertEqual(TurnElapsed.label(startedAt: t + 500, now: t), "<1m")
+    }
 }

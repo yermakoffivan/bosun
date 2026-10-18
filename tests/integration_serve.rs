@@ -1229,6 +1229,165 @@ fn serve_merge_rows_and_move_tab() {
     assert_eq!(container_option(&fx, &beta), a_row);
 }
 
+/// `create` with a `section` puts the new row at the end of that
+/// section; an unknown section is refused before anything is created.
+#[test]
+fn serve_create_into_section() {
+    let mut fx = fixture();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    assert_eq!(c.recv().expect("snapshot")["t"], "snapshot");
+    let seen = command(&mut c, 1, json!({"op": "insert_section", "name": "work"}));
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    let alpha = create_terminal(&mut c, 2, "alpha", "");
+    let sidebar = sidebar_with(&mut c, &[&alpha]);
+    let section = sidebar["sections"][0]["id"].as_str().unwrap().to_string();
+
+    let seen = command(
+        &mut c,
+        3,
+        json!({"op": "create", "section": section,
+               "spec": {"name": "beta", "path": "/tmp", "agent": "terminal"}}),
+    );
+    let ack = seen.last().unwrap();
+    assert_eq!(ack["ok"], true, "{ack}");
+    let beta = ack["session"].as_str().unwrap().to_string();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let sidebar = sidebar_with(&mut c, &[&alpha, &beta]);
+        let members = sidebar["sections"][0]["members"]
+            .as_array()
+            .unwrap()
+            .clone();
+        if members.len() == 1 {
+            assert_eq!(row_tabs(&members[0]), vec![beta.clone()]);
+            let ungrouped = sidebar["ungrouped"].as_array().unwrap();
+            assert_eq!(ungrouped.len(), 1, "{sidebar}");
+            assert_eq!(row_tabs(&ungrouped[0]), vec![alpha.clone()]);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "beta never moved into the section: {sidebar}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let seen = command(
+        &mut c,
+        4,
+        json!({"op": "create", "section": "sec-nope",
+               "spec": {"name": "gamma", "path": "/tmp", "agent": "terminal"}}),
+    );
+    let ack = seen.last().unwrap();
+    assert_eq!(ack["ok"], false, "{ack}");
+    assert!(ack["error"].as_str().unwrap().contains("sec-nope"), "{ack}");
+    let ls = fx.tmux(&["list-sessions", "-F", "#{session_name}"]);
+    let ls = String::from_utf8_lossy(&ls.stdout).into_owned();
+    assert!(!ls.contains("gamma"), "{ls}");
+}
+
+/// `set_section_defaults` stores a section's starting values for new
+/// sessions: they go out with the sidebar, survive a client's
+/// `sidebar_save` (which doesn't carry them) and a restart, and `null`
+/// clears them.
+#[test]
+fn serve_section_defaults() {
+    let mut fx = fixture();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    assert_eq!(c.recv().expect("snapshot")["t"], "snapshot");
+    let seen = command(&mut c, 1, json!({"op": "insert_section", "name": "work"}));
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    c.send(json!({"t": "resync"}));
+    let snap = c.until("snapshot", |v| v["t"] == "snapshot").pop().unwrap();
+    let section = snap["sidebar"]["sections"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let defaults = json!({"path": "/tmp/api", "agent": "codex", "args": "--model o4",
+                          "options": {"codex": {"session_mode": "continue", "yolo": true}}});
+    let seen = command(
+        &mut c,
+        2,
+        json!({"op": "set_section_defaults", "section": section, "defaults": defaults}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    let delta = seen
+        .iter()
+        .rev()
+        .find(|v| v["t"] == "sidebar")
+        .unwrap_or_else(|| panic!("no sidebar delta: {seen:#?}"));
+    let got = &delta["sidebar"]["sections"][0]["defaults"];
+    assert_eq!(got["path"], "/tmp/api", "{got}");
+    assert_eq!(got["agent"], "codex");
+    assert_eq!(got["args"], "--model o4");
+    assert_eq!(got["options"]["codex"]["yolo"], true);
+    assert_eq!(got["options"]["codex"]["session_mode"], "continue");
+
+    // A client's sidebar_save without defaults leaves them alone.
+    let mut sidebar = delta["sidebar"].clone();
+    sidebar["sections"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("defaults");
+    sidebar["sections"][0]["collapsed"] = json!(true);
+    let seen = command(&mut c, 3, json!({"op": "sidebar_save", "sidebar": sidebar}));
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    c.send(json!({"t": "resync"}));
+    let snap = c.until("snapshot", |v| v["t"] == "snapshot").pop().unwrap();
+    assert_eq!(snap["sidebar"]["sections"][0]["collapsed"], true);
+    assert_eq!(snap["sidebar"]["sections"][0]["defaults"]["agent"], "codex");
+
+    // Unknown agent or section: refused.
+    let seen = command(
+        &mut c,
+        4,
+        json!({"op": "set_section_defaults", "section": section, "defaults": {"agent": "nope"}}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], false);
+    let seen = command(
+        &mut c,
+        5,
+        json!({"op": "set_section_defaults", "section": "sec-nope", "defaults": null}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], false);
+
+    // They're in config.toml: a restart keeps them.
+    drop(c);
+    let mut child = fx.child.take().unwrap();
+    // SAFETY: signalling a child we spawned and haven't reaped.
+    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    child.wait().unwrap();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    let snap = c.recv().expect("snapshot");
+    assert_eq!(
+        snap["sidebar"]["sections"][0]["defaults"]["path"], "/tmp/api",
+        "{}",
+        snap["sidebar"]
+    );
+
+    // null clears them.
+    let seen = command(
+        &mut c,
+        6,
+        json!({"op": "set_section_defaults", "section": section, "defaults": null}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    c.send(json!({"t": "resync"}));
+    let snap = c.until("snapshot", |v| v["t"] == "snapshot").pop().unwrap();
+    assert!(
+        snap["sidebar"]["sections"][0].get("defaults").is_none(),
+        "{}",
+        snap["sidebar"]
+    );
+}
+
 /// The TUI, running beside the daemon on the same tmux server and the
 /// same `config.toml`, shows a row the daemon merged as one row with two
 /// tabs, and doesn't write its old layout back. The TUI runs in a pane

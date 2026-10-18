@@ -109,17 +109,21 @@ public struct StatusInfo: Codable, Equatable, Sendable {
     public var detail: String?
     /// When the agent's hook reported that it finished its turn, Unix ms (hook states only; `state` is idle then).
     public var doneAt: UInt64?
+    /// When the current turn started, Unix ms: sent while running or waiting (through permission waits).
+    public var startedAt: UInt64?
 
     enum CodingKeys: String, CodingKey {
         case state, source, detail
         case doneAt = "done_at"
+        case startedAt = "started_at"
     }
 
-    public init(state: AgentState, source: String = "detector", detail: String? = nil, doneAt: UInt64? = nil) {
+    public init(state: AgentState, source: String = "detector", detail: String? = nil, doneAt: UInt64? = nil, startedAt: UInt64? = nil) {
         self.state = state
         self.source = source
         self.detail = detail
         self.doneAt = doneAt
+        self.startedAt = startedAt
     }
 
     public var isHook: Bool { source == "hook" }
@@ -163,18 +167,22 @@ public struct Section: Codable, Equatable, Sendable {
     public var name: String
     public var collapsed: Bool
     public var bannerFont: String?
+    /// What a new session made in this section starts with (`set_section_defaults`).
+    public var defaults: SectionDefaults?
     public var members: [Container]
 
     enum CodingKeys: String, CodingKey {
-        case id, name, collapsed, members
+        case id, name, collapsed, members, defaults
         case bannerFont = "banner_font"
     }
 
-    public init(id: String, name: String, collapsed: Bool = false, bannerFont: String? = nil, members: [Container] = []) {
+    public init(id: String, name: String, collapsed: Bool = false, bannerFont: String? = nil, defaults: SectionDefaults? = nil,
+                members: [Container] = []) {
         self.id = id
         self.name = name
         self.collapsed = collapsed
         self.bannerFont = bannerFont
+        self.defaults = defaults
         self.members = members
     }
 
@@ -184,7 +192,29 @@ public struct Section: Codable, Equatable, Sendable {
         name = try c.decode(String.self, forKey: .name)
         collapsed = try c.decodeIfPresent(Bool.self, forKey: .collapsed) ?? false
         bannerFont = try c.decodeIfPresent(String.self, forKey: .bannerFont)
+        defaults = try c.decodeIfPresent(SectionDefaults.self, forKey: .defaults)
         members = try c.decodeIfPresent([Container].self, forKey: .members) ?? []
+    }
+}
+
+/// A section's starting values for a new session. An empty path or args, or no agent, leaves that field to
+/// the sheet's usual default.
+public struct SectionDefaults: Codable, Equatable, Sendable {
+    public var path: String
+    public var agent: String?
+    public var args: String
+    public var options: SpecOptions
+
+    public init(path: String = "", agent: String? = nil, args: String = "", options: SpecOptions = SpecOptions()) {
+        self.path = path; self.agent = agent; self.args = args; self.options = options
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decodeIfPresent(String.self, forKey: .path) ?? ""
+        agent = try c.decodeIfPresent(String.self, forKey: .agent)
+        args = try c.decodeIfPresent(String.self, forKey: .args) ?? ""
+        options = try c.decodeIfPresent(SpecOptions.self, forKey: .options) ?? SpecOptions()
     }
 }
 
@@ -654,10 +684,12 @@ public enum ServerMessage: Equatable, Sendable {
         let source: String?
         let detail: String?
         let doneAt: UInt64?
+        let startedAt: UInt64?
 
         enum CodingKeys: String, CodingKey {
             case seq, session, state, source, detail
             case doneAt = "done_at"
+            case startedAt = "started_at"
         }
     }
     private struct Body<T: Decodable>: Decodable {
@@ -709,7 +741,7 @@ public enum ServerMessage: Equatable, Sendable {
         case "status":
             let b = try plain.decode(StatusBody.self, from: data)
             return .status(seq: b.seq, session: b.session, info: StatusInfo(state: b.state, source: b.source ?? "detector", detail: b.detail,
-                                                                                      doneAt: b.doneAt))
+                                                                                      doneAt: b.doneAt, startedAt: b.startedAt))
         case "sidebar":
             let (q, v) = try field(Sidebar.self, "sidebar")
             return .sidebar(seq: q, v)
@@ -759,7 +791,8 @@ struct AnyKey: CodingKey {
 // MARK: - Client → daemon
 
 public enum Command: Equatable, Sendable {
-    case create(spec: Spec, deferLaunch: Bool)
+    /// A new session. `section` puts its new row at the end of that section (ignored for a tab of a row).
+    case create(spec: Spec, deferLaunch: Bool, section: String? = nil)
     case kill(session: String)
     case killContainer(sessions: [String])
     case killRemoveWorktree(session: String, worktreePath: String, branch: String, merge: Bool)
@@ -774,6 +807,8 @@ public enum Command: Equatable, Sendable {
     case sidebarSave(Sidebar)
     case insertSection(name: String)
     case renameSection(section: String, name: String)
+    /// A section's starting values for new sessions; nil clears them.
+    case setSectionDefaults(section: String, defaults: SectionDefaults?)
     case setTheme(name: String, persist: Bool)
     case applySetting(key: String, value: JSONValue)
     case clientFlags(tty: String, ignoreSize: Bool)
@@ -800,6 +835,7 @@ public enum Command: Equatable, Sendable {
         case .sidebarSave: "sidebar_save"
         case .insertSection: "insert_section"
         case .renameSection: "rename_section"
+        case .setSectionDefaults: "set_section_defaults"
         case .setTheme: "set_theme"
         case .applySetting: "apply_setting"
         case .clientFlags: "client_flags"
@@ -857,9 +893,10 @@ public enum ClientMessage: Sendable {
                 try put("id", id)
                 try put("op", cmd.op)
                 switch cmd {
-                case .create(let spec, let deferLaunch):
+                case .create(let spec, let deferLaunch, let section):
                     try put("spec", spec)
                     try put("defer_launch", deferLaunch)
+                    if let section { try put("section", section) }
                 case .kill(let s):
                     try put("session", s)
                 case .killContainer(let s):
@@ -887,6 +924,9 @@ public enum ClientMessage: Sendable {
                     try put("name", n)
                 case .renameSection(let s, let n):
                     try put("section", s); try put("name", n)
+                case .setSectionDefaults(let s, let d):
+                    try put("section", s)
+                    if let d { try put("defaults", d) } else { try c.encodeNil(forKey: AnyKey("defaults")) }
                 case .setTheme(let n, let p):
                     try put("name", n); try put("persist", p)
                 case .applySetting(let k, let v):
