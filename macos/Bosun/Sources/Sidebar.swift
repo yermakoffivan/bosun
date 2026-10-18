@@ -60,6 +60,13 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     /// The row on screen when `filtered` was worked out (it decides the "On screen" extra).
     private var filteredRow: String?
 
+    /// The space above the first of Snoozed and Docked, which keeps them at the bottom of the sidebar: whatever
+    /// the other rows leave, and never less than `minBottomGap`.
+    private var bottomGap: CGFloat = SidebarController.minBottomGap
+    private static let minBottomGap: CGFloat = 28
+    /// The room above Snoozed or Docked when it isn't the first of them (or a filter is applied): its faint line.
+    private static let roleLead: CGFloat = 14
+
     init(app: AppController) {
         self.app = app
         super.init()
@@ -116,6 +123,10 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         view.filterBar.onClear = { [weak self] in self?.clearFilter() }
         view.emptyFilter.onClear = { [weak self] in self?.clearFilter() }
+        scroll.contentView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: scroll.contentView, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateBottomGap() }
+        }
     }
 
     // MARK: Model
@@ -176,8 +187,52 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         outline.reloadData()
         for r in roots { expandAsModel(r, sidebar: sb) }
         reloading = false
+        updateBottomGap()
         syncSelection()
         updateFilterChrome()
+    }
+
+    /// Snoozed or Docked, for a section header.
+    private func role(of item: SidebarItem) -> SectionRole? {
+        guard case .section(let id) = item.kind else { return nil }
+        return app.daemon.state.sidebar.sections.first { $0.id == id }?.role
+    }
+
+    /// The empty room above a section header's own line: the gap that keeps Snoozed and Docked at the bottom,
+    /// above the first of them, and room for the faint line above each. None on every other row.
+    func lead(of item: SidebarItem) -> CGFloat {
+        guard role(of: item) != nil else { return 0 }
+        return filtered == nil && item === roots.first(where: { role(of: $0) != nil }) ? bottomGap : Self.roleLead
+    }
+
+    /// Whether `p` (in the outline) is in the empty room above a header, which clicks and drops pass over.
+    func inLead(row: Int, at p: NSPoint) -> Bool {
+        guard row >= 0, let item = outline.item(atRow: row) as? SidebarItem else { return false }
+        let lead = lead(of: item)
+        return lead > 0 && p.y < outline.rect(ofRow: row).minY + lead
+    }
+
+    /// Size the gap above Snoozed and Docked so they sit at the bottom of the sidebar, below everything else,
+    /// and scroll with the rest once the rows outgrow it.
+    private func updateBottomGap() {
+        guard filtered == nil, let first = roots.first(where: { role(of: $0) != nil }) else { return }
+        let clip = scroll.contentView.bounds.height - scroll.contentInsets.top - scroll.contentInsets.bottom
+        var used: CGFloat = 0
+        for r in 0..<outline.numberOfRows {
+            guard let it = outline.item(atRow: r) as? SidebarItem else { continue }
+            used += baseHeight(it) + outline.intercellSpacing.height + (it === first ? 0 : lead(of: it))
+        }
+        let gap = max(Self.minBottomGap, floor(clip - used))
+        guard gap != bottomGap else { return }
+        bottomGap = gap
+        let row = outline.row(forItem: first)
+        guard row >= 0 else { return }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0
+            outline.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
+        }
+        if let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: false) { configure(cell, first) }
+        outline.rowView(atRow: row, makeIfNecessary: false)?.needsDisplay = true
     }
 
     private func expandAsModel(_ item: SidebarItem, sidebar sb: Sidebar) {
@@ -559,6 +614,10 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
 
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
         guard let it = item as? SidebarItem else { return 26 }
+        return baseHeight(it) + lead(of: it)
+    }
+
+    private func baseHeight(_ it: SidebarItem) -> CGFloat {
         switch it.kind {
         case .section: return 30
         case .heading: return 28
@@ -595,10 +654,12 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             guard let c = cell as? SectionCellView, let s = st.sidebar.sections.first(where: { $0.id == id }) else { return }
             let waiting = s.members.flatMap(\.tabs).contains { app.displayState($0.session) == .waiting }
             c.chevronRoom = filtered == nil ? 20 : 0
+            c.lead = lead(of: item)
             c.configure(name: s.name, count: s.members.count, collapsed: s.collapsed && filtered == nil, waiting: waiting, theme: theme,
                         onAdd: s.role != nil ? nil : { [weak self] in self?.app.newSession(section: id) })
         case .heading:
             guard let c = cell as? SectionCellView else { return }
+            c.lead = 0
             c.configure(name: "On screen", count: 0, collapsed: false, waiting: false, theme: theme)
         case .row(let id):
             guard let c = cell as? SidebarCellView, let con = st.sidebar.container(id: id) else { return }
@@ -676,12 +737,14 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     }
 
     func outlineViewItemDidExpand(_ notification: Notification) {
+        if !reloading { updateBottomGap() }
         guard !reloading, let it = notification.userInfo?["NSObject"] as? SidebarItem, case .section(let id) = it.kind else { return }
         app.setSectionCollapsed(id, false)
         for c in it.children where !c.children.isEmpty { outline.expandItem(c) }
     }
 
     func outlineViewItemDidCollapse(_ notification: Notification) {
+        if !reloading { updateBottomGap() }
         guard !reloading, let it = notification.userInfo?["NSObject"] as? SidebarItem, case .section(let id) = it.kind else { return }
         app.setSectionCollapsed(id, true)
     }
@@ -738,7 +801,8 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     }
 
     private func validate(_ outlineView: NSOutlineView, _ info: NSDraggingInfo, _ item: Any?, _ index: Int) -> NSDragOperation {
-        let target = item as? SidebarItem
+        var target = item as? SidebarItem
+        var index = index
         guard let dragged = draggedItem(info) else {
             // Files: only onto a session row. Anywhere else is refused, so the cursor says so before the drop.
             guard DropReader.canRead(info.draggingPasteboard) else { return [] }
@@ -750,6 +814,13 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         let ungroupedCount = app.daemon.state.sidebar.ungrouped.count
         let pointerY = outlineView.convert(info.draggingLocation, from: nil).y
+        // In the empty room above Snoozed or Docked: a drop between that header and what's above it, never into it.
+        let pointerRow = outlineView.row(at: outlineView.convert(info.draggingLocation, from: nil))
+        if inLead(row: pointerRow, at: outlineView.convert(info.draggingLocation, from: nil)),
+           let header = outlineView.item(atRow: pointerRow) as? SidebarItem, let i = roots.firstIndex(where: { $0 === header }) {
+            (target, index) = (nil, i)
+            outlineView.setDropItem(nil, dropChildIndex: i)
+        }
         // With a filter, the outline shows only some rows, so positions in it aren't positions in the
         // sidebar: only merges (onto a row) and a tab out into its own row are taken.
         let limited = filtered != nil
@@ -950,6 +1021,8 @@ final class SidebarOutlineView: NSOutlineView {
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         let row = self.row(at: p)
+        // The empty room above Snoozed and Docked is background: no toggle, no drag.
+        if controller?.inLead(row: row, at: p) == true { return }
         let clicked = row >= 0 ? item(atRow: row) as? SidebarItem : nil
         var onName = false
         if row >= 0, let cell = view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarCellView {
@@ -976,8 +1049,9 @@ final class SidebarOutlineView: NSOutlineView {
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        let row = self.row(at: convert(event.locationInWindow, from: nil))
-        return controller?.menu(forRow: row)
+        let p = convert(event.locationInWindow, from: nil)
+        let row = self.row(at: p)
+        return controller?.menu(forRow: controller?.inLead(row: row, at: p) == true ? -1 : row)
     }
 
     override func updateTrackingAreas() {
@@ -999,7 +1073,9 @@ final class SidebarOutlineView: NSOutlineView {
         // With a filter, sections stay open, so they have no chevron either.
         guard let item = item(atRow: row) as? SidebarItem, case .section = item.kind, controller?.filtered == nil else { return .zero }
         let f = super.frameOfOutlineCell(atRow: row)
-        return NSRect(x: bounds.width - f.width - 10, y: f.minY, width: f.width, height: f.height)
+        // Centred on the header's own line, below any room above it.
+        let lead = controller?.lead(of: item) ?? 0
+        return NSRect(x: bounds.width - f.width - 10, y: f.minY + lead / 2, width: f.width, height: f.height)
     }
 
     override func frameOfCell(atColumn column: Int, row: Int) -> NSRect {
@@ -1032,6 +1108,13 @@ final class SidebarRowView: NSTableRowView {
 
     override func drawBackground(in dirtyRect: NSRect) {
         guard let theme, let item, let controller, !isSelected else { return }
+        // Snoozed and Docked each have a faint line above them.
+        let lead = controller.lead(of: item)
+        if lead > 0 {
+            theme.textMuted.withAlphaComponent(0.22).setFill()
+            NSRect(x: 14, y: isFlipped ? lead - 7 : bounds.height - lead + 6, width: max(0, bounds.width - 28), height: 1).fill()
+            return
+        }
         let r = bounds.insetBy(dx: 6.5, dy: 0.5)
         // The shown row's tabs each have a pane on screen; the active pane's tab is marked (a fill and
         // an accent bar), so the row says which pane has the keyboard.
@@ -1052,7 +1135,12 @@ final class SidebarRowView: NSTableRowView {
     /// A row being dropped onto (a merge): an accent outline in the theme's colours.
     override func drawDraggingDestinationFeedback(in dirtyRect: NSRect) {
         guard let theme else { return super.drawDraggingDestinationFeedback(in: dirtyRect) }
-        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 7, dy: 1), xRadius: 6, yRadius: 6)
+        var r = bounds
+        if let item, let lead = controller?.lead(of: item), lead > 0 {
+            r.size.height -= lead
+            if isFlipped { r.origin.y += lead }
+        }
+        let path = NSBezierPath(roundedRect: r.insetBy(dx: 7, dy: 1), xRadius: 6, yRadius: 6)
         theme.accent.withAlphaComponent(0.18).setFill()
         path.fill()
         theme.accent.setStroke()
@@ -1157,6 +1245,8 @@ final class SectionCellView: NSTableCellView {
     var onAdd: (() -> Void)?
     /// Room the outline's chevron takes at the right edge (none while a filter keeps sections open).
     var chevronRoom: CGFloat = 20
+    /// Empty room above the header's own line (Snoozed and Docked): the content sits below it.
+    var lead: CGFloat = 0 { didSet { if lead != oldValue { needsLayout = true } } }
 
     init() {
         super.init(frame: .zero)
@@ -1187,7 +1277,8 @@ final class SectionCellView: NSTableCellView {
         super.layout()
         label.sizeToFit()
         count.sizeToFit()
-        let y = bounds.height - label.frame.height - 5
+        let h = bounds.height - lead
+        let y = h - label.frame.height - 5
         label.frame = NSRect(x: 8, y: y, width: max(0, min(label.frame.width, bounds.width - 70)), height: label.frame.height)
         count.frame = NSRect(x: label.frame.maxX + 6, y: y, width: count.frame.width, height: count.frame.height)
         CATransaction.begin()
@@ -1195,7 +1286,7 @@ final class SectionCellView: NSTableCellView {
         dot.frame = NSRect(x: count.frame.maxX + 6, y: y + (label.frame.height - 6) / 2, width: 6, height: 6)
         CATransaction.commit()
         // Centred on the row, like the outline's chevron beside it.
-        addButton.frame = NSRect(x: bounds.width - chevronRoom - 18, y: (bounds.height - 16) / 2, width: 16, height: 16)
+        addButton.frame = NSRect(x: bounds.width - chevronRoom - 18, y: (h - 16) / 2, width: 16, height: 16)
     }
 
     func configure(name: String, count n: Int, collapsed: Bool, waiting: Bool, theme: AppTheme, onAdd: (() -> Void)? = nil) {

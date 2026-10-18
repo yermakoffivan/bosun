@@ -991,6 +991,17 @@ final class FocusTest: TestKit {
         return (o.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarCellView)?.trailingText
     }
 
+    /// How far the sidebar's last row ends above the bottom of the room it has, and the room above the first
+    /// Snoozed or Docked header; nil without one.
+    func parkedAtBottom() -> (slack: CGFloat, lead: CGFloat)? {
+        let o = app.sidebar.outline
+        guard let sv = o.enclosingScrollView, o.numberOfRows > 0,
+              let first = (0..<o.numberOfRows).compactMap({ o.item(atRow: $0) as? SidebarItem }).first(where: { app.sidebar.lead(of: $0) > 0 })
+        else { return nil }
+        let room = sv.contentView.bounds.height - sv.contentInsets.top - sv.contentInsets.bottom
+        return (room - o.rect(ofRow: o.numberOfRows - 1).maxY, app.sidebar.lead(of: first))
+    }
+
     func sidebarBadge(_ item: SidebarItem) -> AgentState? {
         let o = app.sidebar.outline
         let row = o.row(forItem: item)
@@ -1036,6 +1047,8 @@ final class FocusTest: TestKit {
         await waitUntil(2) { self.sidebarTrailing(f.docs) != nil }
         r.check("…and the row says how long is left", ["1h left", "59m left"].contains(sidebarTrailing(f.docs) ?? ""), sidebarTrailing(f.docs) ?? "-")
         shot("16a-snoozed-row")
+        let pinned = { (p: (slack: CGFloat, lead: CGFloat)?) in p.map { abs($0.slack) <= 3 && $0.lead > 28 } == true }
+        r.check("…Snoozed sits at the bottom of the sidebar, with room above it", pinned(parkedAtBottom()), "\(String(describing: parkedAtBottom()))")
         r.check("…its menu offers Wake Now and Snooze Again", rowMenu(row).map { m in
             m.items.contains { $0.title == "Wake Now" } && m.items.contains { $0.title == "Snooze Again" } } == true)
 
@@ -1068,6 +1081,23 @@ final class FocusTest: TestKit {
         await waitUntil(2) { ws.currentRow == row }
         r.check("…showing it offers Undock and Resume", ws.placeholderTitle?.hasSuffix("is docked") == true, ws.placeholderTitle ?? "-")
         shot("16b-docked-row")
+        r.check("…Docked sits at the bottom of the sidebar too", pinned(parkedAtBottom()), "\(String(describing: parkedAtBottom()))")
+        // Both at once: Snoozed above Docked, each with its line, the pair at the bottom.
+        if let other = rowID(f.api), let m = rowMenu(other) {
+            choose(m, ["Snooze", "For 1 Hour"])
+            await waitUntil(3) { st().role(ofRow: other) == .snoozed }
+            if let sec = st().section(holdingRow: other) { app.setSectionCollapsed(sec.id, false) }
+            await waitUntil(2) { self.sidebarTrailing(f.api) != nil }
+            let o = app.sidebar.outline
+            let leads = (0..<o.numberOfRows).compactMap { o.item(atRow: $0) as? SidebarItem }.map { app.sidebar.lead(of: $0) }.filter { $0 > 0 }
+            r.check("…with both, Snoozed and Docked each have room for a line above, and sit at the bottom",
+                    leads.count == 2 && pinned(parkedAtBottom()), "\(leads) \(String(describing: parkedAtBottom()))")
+            shot("16c-snoozed-and-docked")
+            if let m = rowMenu(other) { choose(m, ["Wake Now"]) }
+            r.check("…and Wake Now puts the other row back", await waitUntil(3) { st().container(id: other)?.parked == nil })
+            app.sidebarActivated(row: row)
+            await waitUntil(2) { ws.currentRow == row }
+        }
         r.check("…and its menu offers Undock and Resume, not Restart", rowMenu(row).map { m in
             m.items.contains { $0.title == "Undock and Resume" } && !m.items.contains { $0.title == "Restart" } } == true)
         if let m = rowMenu(row) { choose(m, ["Undock and Resume"]) }
@@ -1098,9 +1128,14 @@ final class FocusTest: TestKit {
         r.check("…and it stays done while the pane is on screen", showsDone(s))
         shot("14-done-header-and-row")
         let doneCount = app.headerStatus
-        // Read in place: the active pane of the front window for two seconds.
+        // In front isn't enough while nobody's at the Mac: no keys, clicks or pointer since it finished.
+        await sleep((AppController.readAfter + 1) * 1000)
+        r.check("done: as the front pane with nobody using the Mac since it finished, it stays unread", showsDone(s),
+                "header \(String(describing: ws.headerStatus(s))), row \(String(describing: sidebarBadge(s)))")
+        // Read in place: the pointer moves over the window, then two more seconds as the active pane.
+        await move(NSPoint(x: w.frame.width - 40, y: 200))
         let read = await waitUntil(AppController.readAfter + 1.5) { ws.headerStatus(s)?.state == .seen }
-        r.check("done: after two seconds as the front pane it's read: \"done · read\" in the header, a hollow ring in the done colour",
+        r.check("done: once you're back, two seconds as the front pane reads it: \"done · read\" in the header, a hollow ring in the done colour",
                 read && ws.headerStatus(s)?.text == "done · read" && sidebarBadge(s) == .seen && app.sidebar.itemFor(session: s) != nil,
                 "header \(String(describing: ws.headerStatus(s))), row \(String(describing: sidebarBadge(s)))")
         r.check("…and the header's done count drops it", app.headerStatus != doneCount, "\(doneCount) → \(app.headerStatus)")

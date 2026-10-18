@@ -448,6 +448,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             // nil from route means the key was used; it must not fall through to the terminal.
             MainActor.assumeIsolated {
                 guard let self else { return }
+                self.notePresence(event)
                 out = self.route(event)
             }
             return out
@@ -459,6 +460,7 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
                 // The test modes drive the pointer themselves; the real one (someone using the Mac
                 // while a test runs) would move focus between panes behind the test's back.
                 if testMode && !realInput && !TestKit.posted(event) { out = nil; return }
+                self?.notePresence(event)
                 guard let self, let bw = self.controller(for: event.window) else { return }
                 bw.workspace.pointerMoved(event)
                 // A posted mouse-moved never passes through the window server's tracking areas, so
@@ -468,7 +470,14 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
             return out
         } as Any)
         monitors.append(NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] e in
-            MainActor.assumeIsolated { self?.clickedSomewhere(e) }
+            MainActor.assumeIsolated {
+                self?.notePresence(e)
+                self?.clickedSomewhere(e)
+            }
+            return e
+        } as Any)
+        monitors.append(NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] e in
+            MainActor.assumeIsolated { self?.notePresence(e) }
             return e
         } as Any)
     }
@@ -641,6 +650,12 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
 
     private var readTimer: Timer?
     private var readCandidate: String?
+    /// The last time the keyboard, mouse or trackpad was used in this app, Unix ms. A done pane on screen
+    /// only counts as read once you've used one of them since its turn finished: being in front while
+    /// you're away from the Mac isn't reading it.
+    private var lastPresence: UInt64 = 0
+    /// The front pane whose done turn is waiting for that.
+    private var readAwaiting: String?
     /// How long a done pane has to be the active pane of the front window to count as read.
     static let readAfter: TimeInterval = 2
 
@@ -657,17 +672,35 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         let target = frontPane.flatMap { displayState($0) == .done ? $0 : nil }
         guard target != readCandidate else { return }
         readCandidate = target
+        readAwaiting = nil
         readTimer?.invalidate()
         readTimer = nil
         guard let target else { return }
         readTimer = Timer.scheduledTimer(withTimeInterval: Self.readAfter, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                self.readCandidate = nil
                 self.readTimer = nil
-                if self.frontPane == target, self.displayState(target) == .done { self.markRead([target]) }
+                guard self.frontPane == target, self.displayState(target) == .done else { self.readCandidate = nil; return }
+                if self.lastPresence > self.daemon.state.statuses[target]?.doneAt ?? 0 {
+                    self.readCandidate = nil
+                    self.markRead([target])
+                } else {
+                    self.readAwaiting = target
+                }
             }
         }
+    }
+
+    /// The keyboard, mouse or trackpad was used in this app. A done front pane waiting for you is read
+    /// `readAfter` later.
+    private func notePresence(_ e: NSEvent) {
+        // In the test modes only the tests' own events count (the real pointer is someone else at the Mac).
+        if testMode && !realInput && e.type != .keyDown && !TestKit.posted(e) { return }
+        lastPresence = UInt64(Date().timeIntervalSince1970 * 1000)
+        guard readAwaiting != nil else { return }
+        readAwaiting = nil
+        readCandidate = nil
+        checkReading()
     }
 
     /// Mark done turns read (focused for a moment, or Mark as Read): drawn as seen until the next turn.
