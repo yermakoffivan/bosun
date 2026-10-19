@@ -172,8 +172,8 @@ class TestKit {
     private static func micros(_ t: TimeInterval) -> Int64 { Int64((t * 1_000_000).rounded()) }
     static func posted(_ e: NSEvent) -> Bool { postedTimes.contains(micros(e.timestamp)) }
 
-    func mouse(_ type: NSEvent.EventType, _ p: NSPoint, clicks: Int = 1, mods: NSEvent.ModifierFlags = []) -> NSEvent? {
-        let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: mods, timestamp: now, windowNumber: w.windowNumber,
+    func mouse(_ type: NSEvent.EventType, _ p: NSPoint, clicks: Int = 1, mods: NSEvent.ModifierFlags = [], window: NSWindow? = nil) -> NSEvent? {
+        let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: mods, timestamp: now, windowNumber: (window ?? w).windowNumber,
                                    context: nil, eventNumber: 0, clickCount: clicks,
                                    pressure: type == .leftMouseDown || type == .rightMouseDown ? 1 : 0)
         if let e { TestKit.postedTimes.insert(TestKit.micros(e.timestamp)) }
@@ -181,8 +181,8 @@ class TestKit {
     }
 
     /// A click at a point in window coordinates.
-    func click(_ p: NSPoint, right: Bool = false) async {
-        if let d = mouse(right ? .rightMouseDown : .leftMouseDown, p), let u = mouse(right ? .rightMouseUp : .leftMouseUp, p) {
+    func click(_ p: NSPoint, right: Bool = false, window: NSWindow? = nil) async {
+        if let d = mouse(right ? .rightMouseDown : .leftMouseDown, p, window: window), let u = mouse(right ? .rightMouseUp : .leftMouseUp, p, window: window) {
             NSApp.postEvent(d, atStart: false)
             NSApp.postEvent(u, atStart: false)
         }
@@ -486,7 +486,7 @@ final class FocusTest: TestKit {
         r.check("start: the active terminal is first responder", firstResponderIsActiveTerminal)
 
         // --only a,b runs just those sections (rows, panes, zoom, termcolours, newpanes, clientmoves, done, notify, appearance, links, filter, sheet,
-        // empty, tiledrag, sidebardrag, shortcuts, header, windows, sectionnew, parking).
+        // empty, tiledrag, sidebardrag, shortcuts, header, windows, sectionnew, parking, fonts, settings, sheetkeys).
         if let only = argValue("--only") {
             let parts = Set(only.split(separator: ",").map(String.init))
             if parts.contains("rows") { await rows(f) }
@@ -504,6 +504,7 @@ final class FocusTest: TestKit {
             if parts.contains("parking") { await parking(f) }
             if parts.contains("fonts") { await fonts(f) }
             if parts.contains("settings") { await settingsTabs() }
+            if parts.contains("sheetkeys") { await sheetKeys() }
             await layoutSections(parts)
             if parts.contains("windows") { await windows(f) }
             if parts.contains("remove") { await removeFromSidebar() }
@@ -893,6 +894,8 @@ final class FocusTest: TestKit {
         // 22b. The terminal and interface fonts.
         await fonts(f)
         await settingsTabs()
+        // 22c. The new-session sheet's Tab order and its Path field's list of folders.
+        await sheetKeys()
         // 23. Snoozing and docking a row, and getting it back. Last: undocking gives docs a new session.
         await parking(f)
         await finish()
@@ -1308,6 +1311,120 @@ final class FocusTest: TestKit {
         r.check("…never taller than the screen", heights.values.allSatisfy { $0 <= screen }, "\(heights.mapValues { Int($0) }) on \(Int(screen))")
         sw.close()
         ws.focusActiveTerminal()
+    }
+
+    // MARK: New-session sheet keys
+
+    /// Tab walks the sheet's fields in the TUI form's order, Left and Right change the agent and session mode,
+    /// Space ticks a box, and the Path field lists the folders it could go on to.
+    func sheetKeys() async {
+        let dir = "/tmp/bosun-sheet-paths-\(ProcessInfo.processInfo.processIdentifier)"
+        let fm = FileManager.default
+        for d in ["alpha/inner", "alpine", "beta"] { try? fm.createDirectory(atPath: "\(dir)/\(d)", withIntermediateDirectories: true) }
+        defer { try? fm.removeItem(atPath: dir) }
+
+        app.newSession()
+        await waitUntil(2) { app.sheetOpen }
+        guard let model = app.formModel, let sheet = w.attachedSheet, let form = sheet.contentView as? NewSessionFormView else {
+            r.check("sheet keys: the new-session sheet opens", false)
+            return
+        }
+        model.agent = "claude"
+        model.options.claude.sessionMode = .new
+        model.options.claude.skipPermissions = false
+        model.worktree = false
+        await sleep(150)
+        let tab = { await self.key(48, "\t", window: sheet) }
+        let backTab = { await self.key(48, "\u{19}", .shift, window: sheet) }
+        r.check("sheet keys: the sheet opens on Name", form.focusedField == "name", form.focusedField ?? "-")
+        var seen: [String] = []
+        for _ in 0..<8 {
+            await tab()
+            seen.append(form.focusedField ?? "-")
+        }
+        r.check("…and Tab walks Path, the worktree box, Agent, Arguments, Session and Claude's two boxes, then back to Name",
+                seen == ["path", "worktree", "agent", "args", "mode:new", "claude-skip", "claude-rc", "name"], "\(seen)")
+        await backTab()
+        r.check("…and Shift+Tab goes back round", form.focusedField == "claude-rc", form.focusedField ?? "-")
+        await backTab()
+        await key(49, " ", window: sheet)
+        r.check("…Space ticks the box with the keyboard", model.options.claude.skipPermissions)
+        await key(49, " ", window: sheet)
+        await backTab()
+        await arrow(124, [])
+        r.check("…Right on Session picks the next mode, keeping the keyboard there",
+                model.options.claude.sessionMode == .continue && form.focusedField == "mode:continue", "\(model.options.claude.sessionMode) \(form.focusedField ?? "-")")
+        await arrow(123, [])
+        await arrow(123, [])
+        r.check("…and Left goes back, wrapping round", model.options.claude.sessionMode == .resume, "\(model.options.claude.sessionMode)")
+        await backTab()
+        await backTab()
+        let next = agentNames[(agentNames.firstIndex(of: "claude")! + 1) % agentNames.count]
+        await arrow(124, [])
+        r.check("…Right on Agent picks the next agent", form.focusedField == "agent" && model.agent == next, "\(form.focusedField ?? "-") \(model.agent)")
+        await arrow(123, [])
+        r.check("…and Left the one before", model.agent == "claude", model.agent)
+        await backTab()
+        await key(49, " ", window: sheet)
+        await sleep(100)
+        await tab()
+        r.check("…ticking the worktree box puts Branch next in the order", model.worktree && form.focusedField == "branch", form.focusedField ?? "-")
+        model.worktree = false
+        await sleep(100)
+
+        // The Path field's list of folders.
+        sheet.makeFirstResponder(form.pathField)
+        form.pathField.stringValue = "\(dir)/a"
+        form.pathField.currentEditor()?.selectedRange = NSRange(location: (form.pathField.stringValue as NSString).length, length: 0)
+        await type("l", window: sheet)
+        let list = form.suggestions
+        r.check("path: typing lists the folders that match", !list.isHidden && list.entries.map(\.name) == ["alpha", "alpine"], "\(list.entries.map(\.name))")
+        if let shots {
+            sheet.displayIfNeeded()
+            let ok = WindowSnapshot.write(sheet, to: URL(fileURLWithPath: "\(shots)/26-new-session-paths.png"))
+            r.say("      screenshot 26-new-session-paths.png \(ok ? "" : "FAILED")")
+        }
+        await arrow(124, [])
+        r.check("…Right completes as far as they agree", model.path == "\(dir)/alp" && list.entries.count == 2, model.path)
+        await arrow(125, [])
+        await arrow(125, [])
+        await arrow(126, [])
+        r.check("…Down and Up walk the list", list.highlighted == 0, "\(String(describing: list.highlighted))")
+        if let shots {
+            sheet.displayIfNeeded()
+            let ok = WindowSnapshot.write(sheet, to: URL(fileURLWithPath: "\(shots)/26b-new-session-paths-highlighted.png"))
+            r.say("      screenshot 26b-new-session-paths-highlighted.png \(ok ? "" : "FAILED")")
+        }
+        await key(36, "\r", window: sheet)
+        r.check("…and Return takes the highlighted folder, listing what's in it, with the sheet still open",
+                app.sheetOpen && model.path == "\(dir)/alpha/" && list.entries.map(\.name) == ["inner"], "\(model.path) \(list.entries.map(\.name))")
+        await key(53, "\u{1b}", window: sheet)
+        r.check("…Esc closes the list and leaves the sheet open", list.isHidden && app.sheetOpen)
+        await arrow(125, [])
+        r.check("…Down opens it again, on its first folder", !list.isHidden && list.highlighted == 0)
+        await arrow(124, [])
+        r.check("…and Right takes that folder", model.path == "\(dir)/alpha/inner/", model.path)
+        form.pathField.stringValue = "\(dir)/"
+        form.pathField.currentEditor()?.selectedRange = NSRange(location: (form.pathField.stringValue as NSString).length, length: 0)
+        await type("b", window: sheet)
+        await sleep(100)
+        sheet.contentView?.layoutSubtreeIfNeeded()
+        if !list.isHidden {
+            let rowCentre = list.convert(NSPoint(x: list.bounds.midX, y: PathSuggestionList.inset + PathSuggestionList.rowHeight / 2), to: nil)
+            await click(rowCentre, window: sheet)
+        }
+        r.check("…a click on a folder takes it", model.path == "\(dir)/beta/", model.path)
+        await type("zz", window: sheet)
+        r.check("…and the list closes when nothing matches", list.isHidden)
+        form.pathField.stringValue = "\(dir)/a"
+        form.pathField.currentEditor()?.selectedRange = NSRange(location: (form.pathField.stringValue as NSString).length, length: 0)
+        await type("l", window: sheet)
+        await tab()
+        r.check("…Tab closes it and goes on to the next field", list.isHidden && form.focusedField == "worktree", form.focusedField ?? "-")
+        await key(53, "\u{1b}", window: sheet)
+        await waitUntil(2) { !app.sheetOpen }
+        r.check("…and Esc outside the list cancels the sheet", !app.sheetOpen)
+        await waitUntil(1) { self.firstResponderIsActiveTerminal }
     }
 
     // MARK: Pane navigation

@@ -4,6 +4,16 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.6] — 2026-10-18
+
+### Added
+
+- **Folder suggestions in Bosun for Mac's new-session sheet.** Typing in Path lists the folders the path could go on to under the field, as Finder's Go to Folder does, with hidden ones once you type a dot. Down and Up walk the list, Return or a click takes a folder and lists what's in it, Right at the end of the text completes as far as the matches agree (as in the TUI), and Esc closes the list. Return with nothing highlighted still creates the session.
+
+### Fixed
+
+- **Tab goes through every field of Bosun for Mac's new-session sheet**, in the same order as the TUI's form: Name, Path, the worktree box, Branch, Agent, Arguments, Session and the agent's options, wrapping round. Before, it only stopped at the text fields unless keyboard navigation was on in System Settings. On the agent picker and the Session row, Left and Right change the choice, and Space ticks a box.
+
 ## [2.2.5] — 2026-10-18
 
 ### Added

@@ -154,21 +154,22 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
     private let titleLabel = NSTextField(labelWithString: "")
     private let recentButton = NSPopUpButton(frame: .zero, pullsDown: true)
     let nameField = NSTextField()
-    private let pathField = NSTextField()
+    let pathField = NSTextField()
     private let chooseButton = NSButton(title: "Choose…", target: nil, action: nil)
-    private let worktreeBox = NSButton(checkboxWithTitle: "Create in git worktree", target: nil, action: nil)
+    private let worktreeBox = FormButton(checkboxWithTitle: "Create in git worktree", target: nil, action: nil)
     private let branchField = NSTextField()
     private let worktreePreview = NSTextField(labelWithString: "")
-    private let agentControl = NSSegmentedControl()
+    private let agentControl = FormSegments()
     private let argsLabel = NSTextField(labelWithString: "Arguments")
     private let argsField = NSTextField()
-    private var modeRadios: [SessionMode: NSButton] = [:]
+    private var modeRadios: [SessionMode: FormButton] = [:]
     private var checkboxes: [(agent: String, button: NSButton, key: WritableKeyPath<SpecOptions, Bool>)] = []
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let submitButton = NSButton(title: "Create", target: nil, action: nil)
-    private let saveDefaultsBox = NSButton(checkboxWithTitle: "Save as this section's defaults (folder, agent and arguments)", target: nil, action: nil)
+    private let saveDefaultsBox = FormButton(checkboxWithTitle: "Save as this section's defaults (folder, agent and arguments)", target: nil, action: nil)
     private let grid = NSGridView()
+    let suggestions = PathSuggestionList()
     private var rows: [String: NSGridRow] = [:]
     private var lastHidden: [String: Bool] = [:]
 
@@ -207,7 +208,7 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
     }
 
     private func checkbox(_ title: String, agent: String, _ key: WritableKeyPath<SpecOptions, Bool>) -> NSButton {
-        let b = NSButton(checkboxWithTitle: title, target: self, action: #selector(optionToggled(_:)))
+        let b = FormButton(checkboxWithTitle: title, target: self, action: #selector(optionToggled(_:)))
         b.lineBreakMode = .byTruncatingTail
         b.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         checkboxes.append((agent, b, key))
@@ -260,7 +261,8 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
 
         var radios: [NSView] = []
         for m in SessionMode.allCases {
-            let b = NSButton(radioButtonWithTitle: m.label, target: self, action: #selector(modeChanged(_:)))
+            let b = FormButton(radioButtonWithTitle: m.label, target: self, action: #selector(modeChanged(_:)))
+            b.onArrow = { [weak self] d in self?.stepMode(d) }
             modeRadios[m] = b
             radios.append(b)
         }
@@ -328,6 +330,9 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
         submitButton.action = #selector(submit)
         addSubview(cancelButton)
         addSubview(submitButton)
+        // Over the rows below the Path field while it's open.
+        suggestions.onChoose = { [weak self] e in self?.setPath(e.path) }
+        addSubview(suggestions)
 
         let m = NewSessionFormView.margin
         NSLayoutConstraint.activate([
@@ -409,11 +414,45 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
             hidden[key] = !key.hasPrefix(model.agent + "-")
         }
         for (k, h) in hidden { rows[k]?.isHidden = h }
+        updateKeyViewLoop()
         if hidden != lastHidden {
             lastHidden = hidden
             needsLayout = true
             onHeightChange?()
         }
+    }
+
+    /// Tab's order, as in the TUI's form: the fields shown, top to bottom, wrapping round; the Session row is its
+    /// chosen mode's button, and Left and Right change it.
+    private func updateKeyViewLoop() {
+        var order: [NSView] = []
+        func add(_ key: String, _ v: NSView?) {
+            if rows[key]?.isHidden == false, let v { order.append(v) }
+        }
+        add("name", nameField)
+        if !model.isAddTab { add("path", pathField) }
+        add("worktree", worktreeBox)
+        add("branch", branchField)
+        add("agent", agentControl)
+        add("args", argsField)
+        add("mode", modeRadios[sessionMode])
+        for key in ["claude-skip", "claude-rc", "codex-yolo", "kimi-yolo", "opencode-auto", "qwen-yolo"] {
+            add(key, rows[key]?.cell(at: 1).contentView)
+        }
+        add("save-defaults", saveDefaultsBox)
+        for (i, v) in order.enumerated() { v.nextKeyView = order[(i + 1) % order.count] }
+    }
+
+    /// The field or control with the keyboard, by its row ("mode" rows add the mode), for the focus test.
+    var focusedField: String? {
+        var r = window?.firstResponder
+        if let t = r as? NSTextView, t.isFieldEditor { r = t.delegate as? NSResponder }
+        guard let v = r as? NSView else { return nil }
+        if let m = modeRadios.first(where: { $0.value === v })?.key { return "mode:\(m.rawValue)" }
+        let named: [(String, NSView)] = [("name", nameField), ("path", pathField), ("worktree", worktreeBox), ("branch", branchField),
+                                         ("agent", agentControl), ("args", argsField), ("save-defaults", saveDefaultsBox)]
+        if let n = named.first(where: { $0.1 === v })?.0 { return n }
+        return rows.first { $0.value.isHidden == false && $0.value.cell(at: 1).contentView === v }?.key
     }
 
     // MARK: Layout
@@ -450,6 +489,31 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
         submitButton.frame = NSRect(x: bounds.width - m - bw, y: by, width: bw, height: 28)
         let cw = max(cancelButton.frame.width, 80)
         cancelButton.frame = NSRect(x: submitButton.frame.minX - 12 - cw, y: by, width: cw, height: 28)
+        if !suggestions.isHidden {
+            // Under the Path field, as wide as it and its Choose… button, with as many rows as fit above the sheet's foot.
+            let f = pathField.convert(pathField.bounds, to: self)
+            let right = chooseButton.convert(chooseButton.bounds, to: self).maxX
+            let top = f.maxY + 4
+            let fit = Int((bounds.height - top - 8 - 2 * PathSuggestionList.inset) / PathSuggestionList.rowHeight)
+            let n = max(1, min(suggestions.entries.count, PathSuggestionList.maxRows, fit))
+            suggestions.frame = NSRect(x: f.minX, y: top, width: right - f.minX, height: PathSuggestionList.height(rows: n))
+        }
+    }
+
+    // MARK: Path suggestions
+
+    /// List the folders the typed path could go on to; with none, the list closes.
+    private func updateSuggestions() {
+        suggestions.show(PathCompletion.folders(matching: pathField.stringValue, home: NSHomeDirectory()))
+        needsLayout = true
+    }
+
+    /// Put `p` in the Path field with the cursor at its end, and list the folders in it.
+    private func setPath(_ p: String) {
+        pathField.stringValue = p
+        model.path = p
+        pathField.currentEditor()?.selectedRange = NSRange(location: (p as NSString).length, length: 0)
+        updateSuggestions()
     }
 
     // MARK: Actions
@@ -458,7 +522,9 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
         guard let f = obj.object as? NSTextField else { return }
         switch f {
         case nameField: model.name = f.stringValue
-        case pathField: model.path = f.stringValue
+        case pathField:
+            model.path = f.stringValue
+            updateSuggestions()
         case branchField: model.branch = f.stringValue
         case argsField: model.args = f.stringValue
         default: break
@@ -468,10 +534,52 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
     /// Esc in a field comes up the responder chain as cancelOperation; Return as insertNewline.
     override func cancelOperation(_ sender: Any?) { onCancel?() }
 
+    func controlTextDidEndEditing(_ obj: Notification) {
+        if obj.object as? NSTextField === pathField { suggestions.hide() }
+    }
+
+    /// In the Path field, as in the TUI's: Down opens the list of folders and walks it, Up walks back, Return or Right
+    /// takes the highlighted folder (Right at the end of the text, with none highlighted, completes as far as the
+    /// matches agree) and Esc closes the list. Tab always goes on to the next field.
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+        let listOpen = control === pathField && !suggestions.isHidden
         switch sel {
-        case #selector(NSResponder.insertNewline(_:)): submit(); return true
-        case #selector(NSResponder.cancelOperation(_:)): onCancel?(); return true
+        case #selector(NSResponder.moveDown(_:)) where control === pathField:
+            if suggestions.isHidden { updateSuggestions() }
+            suggestions.move(1)
+            return true
+        case #selector(NSResponder.moveUp(_:)) where listOpen:
+            suggestions.move(-1)
+            return true
+        case #selector(NSResponder.moveRight(_:)) where control === pathField:
+            let r = textView.selectedRange()
+            guard r.length == 0, r.location == (textView.string as NSString).length else { return false }
+            if listOpen, let i = suggestions.highlighted {
+                setPath(suggestions.entries[i].path)
+                return true
+            }
+            let typed = pathField.stringValue
+            guard let c = PathCompletion.completion(of: typed, entries: PathCompletion.folders(matching: typed, home: NSHomeDirectory(), limit: .max))
+            else { return false }
+            setPath(c)
+            return true
+        case #selector(NSResponder.insertNewline(_:)):
+            if listOpen, let i = suggestions.highlighted {
+                setPath(suggestions.entries[i].path)
+                return true
+            }
+            submit()
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            if listOpen {
+                suggestions.hide()
+                return true
+            }
+            onCancel?()
+            return true
+        case #selector(NSResponder.insertTab(_:)), #selector(NSResponder.insertBacktab(_:)):
+            suggestions.hide()
+            return false
         default: return false
         }
     }
@@ -487,6 +595,20 @@ final class NewSessionFormView: NSView, NSTextFieldDelegate {
 
     @objc private func modeChanged(_ sender: NSButton) {
         guard let mode = modeRadios.first(where: { $0.value === sender })?.key else { return }
+        setMode(mode)
+    }
+
+    /// Left and Right on the Session row: the mode before or after, wrapping, keeping the keyboard on the row.
+    private func stepMode(_ d: Int) {
+        let modes = SessionMode.allCases.filter { modeRadios[$0]?.isHidden == false }
+        guard let i = modes.firstIndex(of: sessionMode) else { return }
+        let m = modes[((i + d) % modes.count + modes.count) % modes.count]
+        setMode(m)
+        refresh()
+        window?.makeFirstResponder(modeRadios[m])
+    }
+
+    private func setMode(_ mode: SessionMode) {
         switch model.agent {
         case "claude": model.options.claude.sessionMode = mode
         case "codex": model.options.codex.sessionMode = mode
