@@ -4953,6 +4953,7 @@ mod tests {
             status: Status::Done,
             at_ms,
             detail: None,
+            background: 0,
         });
         v
     }

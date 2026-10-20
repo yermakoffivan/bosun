@@ -846,6 +846,121 @@ fn serve_hook_done_carries_done_at_until_the_next_prompt() {
     c.until("kill ack", |v| is_ack(v, 2));
 }
 
+#[test]
+fn serve_background_agents_keep_the_turn_going_until_they_report_back() {
+    let mut fx = fixture();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    assert_eq!(c.recv().expect("snapshot")["t"], "snapshot");
+
+    // A non-shell foreground process, as in the tests above.
+    c.send(json!({
+        "t": "cmd", "id": 1, "op": "create", "defer_launch": true,
+        "spec": {"name": "bg", "path": "/tmp", "agent": "terminal"}
+    }));
+    let seen = c.until("create ack", |v| is_ack(v, 1));
+    let ack = seen.last().unwrap();
+    assert_eq!(ack["ok"], true, "{ack}");
+    let name = ack["session"].as_str().unwrap().to_string();
+    fx.tmux(&["send-keys", "-t", &name, "exec sleep 600", "Enter"]);
+    let running_sleep = |v: &Value| {
+        v["t"] == "sessions"
+            && v["upsert"].as_array().is_some_and(|u| {
+                u.iter()
+                    .any(|s| s["name"] == name.as_str() && s["pane_command"] == "sleep")
+            })
+    };
+    if !seen.iter().any(running_sleep) {
+        c.until("sleep in the pane", running_sleep);
+    }
+    let status = |v: &Value| v["t"] == "status" && v["session"] == name.as_str();
+
+    run_claude_hook(
+        &fx,
+        &name,
+        "UserPromptSubmit",
+        json!({"prompt": "build it"}),
+    );
+    let seen = c.until("running with a start", |v| {
+        status(v) && v["state"] == "running" && v["started_at"].is_u64()
+    });
+    let started = seen.last().unwrap()["started_at"].as_u64().unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+
+    // The turn ends with an agent still out (as Claude Code 2.1.303 sends
+    // it): still running, the same start, and a note saying why.
+    run_claude_hook(
+        &fx,
+        &name,
+        "Stop",
+        json!({"stop_hook_active": false, "background_tasks": [
+            {"id": "a1", "type": "subagent", "status": "running", "agent_type": "general-purpose"},
+            {"id": "s1", "type": "shell", "status": "running", "command": "npm run dev"}
+        ], "session_crons": []}),
+    );
+    let seen = c.until("the background note", |v| {
+        status(v) && v["detail"] == "background agent"
+    });
+    let bg = seen.last().unwrap();
+    assert_eq!(bg["state"], "running", "{bg}");
+    assert_eq!(bg["started_at"].as_u64(), Some(started), "{bg}");
+    assert!(bg.get("done_at").is_none(), "{bg}");
+    assert_eq!(
+        String::from_utf8(
+            fx.tmux(&["show-options", "-pqv", "-t", &name, "@bosun_background"])
+                .stdout
+        )
+        .unwrap()
+        .trim(),
+        "1"
+    );
+
+    // The agent's own tool calls and its report back don't start a new
+    // turn.
+    run_claude_hook(
+        &fx,
+        &name,
+        "PostToolUse",
+        json!({"agent_id": "a1", "agent_type": "general-purpose", "tool_name": "Bash"}),
+    );
+    run_claude_hook(
+        &fx,
+        &name,
+        "UserPromptSubmit",
+        json!({"prompt": "<task-notification>"}),
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    let mut c2 = Conn::connect(&path);
+    c2.send(json!({"t": "hello", "protocol": 1}));
+    let snap = c2.recv().expect("snapshot");
+    let info = &snap["statuses"][&name];
+    assert_eq!(info["state"], "running", "{info}");
+    assert_eq!(info["started_at"].as_u64(), Some(started), "{info}");
+    assert_eq!(info["detail"], "background agent", "{info}");
+    drop(c2);
+
+    // The turn that follows the report ends with nothing out: done, and
+    // the count is gone.
+    run_claude_hook(
+        &fx,
+        &name,
+        "Stop",
+        json!({"stop_hook_active": false, "background_tasks": [], "session_crons": []}),
+    );
+    let seen = c.until("done", |v| status(v) && v["done_at"].is_u64());
+    let done = seen.last().unwrap();
+    assert_eq!(done["state"], "idle", "{done}");
+    assert!(done.get("started_at").is_none(), "{done}");
+    assert!(fx
+        .tmux(&["show-options", "-pqv", "-t", &name, "@bosun_background"])
+        .stdout
+        .is_empty());
+
+    c.send(json!({"t": "cmd", "id": 2, "op": "kill", "session": name}));
+    c.until("kill ack", |v| is_ack(v, 2));
+}
+
 /// Create a `terminal` session through the daemon and return its tmux
 /// name. `args` is the command typed into its shell (empty: none).
 fn create_terminal(c: &mut Conn, id: u64, name: &str, args: &str) -> String {

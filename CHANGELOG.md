@@ -4,6 +4,12 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.7] — 2026-10-19
+
+### Fixed
+
+- **A Claude turn that starts a background agent keeps running until the agent reports back.** Before, Bosun marked the session done as soon as Claude ended its turn, then the agent's own tool calls flipped it back to running and restarted the working timer, so a session busy for seven minutes could show 2m. Now the turn carries on, with "background agent" in Bosun for Mac's pane header and the timer counting from your prompt, until the agent's report has been dealt with and Claude finishes with nothing left at work. Background shells such as a dev server don't hold the turn open. The count is kept on the pane as `@bosun_background`.
+
 ## [2.2.6] — 2026-10-19
 
 ### Added

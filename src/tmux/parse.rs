@@ -38,12 +38,13 @@ use crate::tmux::session::TmuxSession;
 ///   itself to its version (`2_1_220`), so this separates a live agent
 ///   from a bare `zsh`.
 ///
-/// The last three are pane user options an agent's hooks write through
-/// `bosun hook` (see `agent_hooks`): the state it reported, when, and an
-/// optional detail. tmux resolves them against the session's active
+/// The last four are pane user options an agent's hooks write through
+/// `bosun hook` (see `agent_hooks`): the state it reported, when, an
+/// optional detail, and how many background agents its turn is waiting
+/// on. tmux resolves them against the session's active
 /// pane, the same pane `pane_title` describes. Empty when no hook has
 /// run.
-pub const LIST_SESSIONS_FORMAT: &str = "#{session_name}|||#{session_windows}|||#{session_attached}|||#{session_created}|||#{session_activity}|||#{session_path}|||#{@bosun_display}|||#{@bosun_agent}|||#{@bosun_path}|||#{@bosun_container_id}|||#{@bosun_worktree_path}|||#{@bosun_branch}|||#{pane_width}|||#{pane_title}|||#{pane_current_command}|||#{@bosun_state}|||#{@bosun_state_at}|||#{@bosun_state_detail}";
+pub const LIST_SESSIONS_FORMAT: &str = "#{session_name}|||#{session_windows}|||#{session_attached}|||#{session_created}|||#{session_activity}|||#{session_path}|||#{@bosun_display}|||#{@bosun_agent}|||#{@bosun_path}|||#{@bosun_container_id}|||#{@bosun_worktree_path}|||#{@bosun_branch}|||#{pane_width}|||#{pane_title}|||#{pane_current_command}|||#{@bosun_state}|||#{@bosun_state_at}|||#{@bosun_state_detail}|||#{@bosun_background}";
 
 const FIELD_SEP: &str = "|||";
 
@@ -54,7 +55,7 @@ const FIELD_SEP: &str = "|||";
 /// [`LIST_SESSIONS_FORMAT`] costs it about 40 % more than this one
 /// (`list-panes -a` with the same fields costs more again: it walks
 /// every pane, the monitor session's included).
-pub const STATUS_POLL_FORMAT: &str = "#{session_name}|||#{session_activity}|||#{@bosun_agent}|||#{pane_title}|||#{pane_current_command}|||#{@bosun_state}|||#{@bosun_state_at}|||#{@bosun_state_detail}";
+pub const STATUS_POLL_FORMAT: &str = "#{session_name}|||#{session_activity}|||#{@bosun_agent}|||#{pane_title}|||#{pane_current_command}|||#{@bosun_state}|||#{@bosun_state_at}|||#{@bosun_state_detail}|||#{@bosun_background}";
 
 /// Parse `tmux list-sessions -F <STATUS_POLL_FORMAT>` output. Only the
 /// fields that format reads are filled in (name, activity, agent, pane
@@ -68,9 +69,9 @@ pub fn parse_status_rows(input: &str) -> Result<Vec<TmuxSession>> {
             continue;
         }
         let f: Vec<&str> = line.split(FIELD_SEP).collect();
-        let [name, activity, agent, title, command, state, at, detail] = f[..] else {
+        let [name, activity, agent, title, command, state, at, detail, background] = f[..] else {
             return Err(BosunError::Parse(format!(
-                "status row {}: expected 8 fields, got {} — raw: {:?}",
+                "status row {}: expected 9 fields, got {} — raw: {:?}",
                 idx + 1,
                 f.len(),
                 line
@@ -93,7 +94,7 @@ pub fn parse_status_rows(input: &str) -> Result<Vec<TmuxSession>> {
             pane_width: 0,
             pane_title: some(title),
             pane_command: some(command),
-            hook: crate::agent_hooks::HookState::parse(state, at, detail),
+            hook: crate::agent_hooks::HookState::parse(state, at, detail, background),
         });
     }
     Ok(out)
@@ -168,6 +169,7 @@ fn parse_session_line(line: &str) -> std::result::Result<TmuxSession, String> {
     let hook_state_raw = parts.next().unwrap_or("");
     let hook_at_raw = parts.next().unwrap_or("");
     let hook_detail_raw = parts.next().unwrap_or("");
+    let hook_background_raw = parts.next().unwrap_or("");
 
     if parts.next().is_some() {
         return Err("unexpected extra field".into());
@@ -204,7 +206,12 @@ fn parse_session_line(line: &str) -> std::result::Result<TmuxSession, String> {
         pane_width,
         pane_title: pane_title_raw.filter(|s| !s.is_empty()),
         pane_command: pane_command_raw.filter(|s| !s.is_empty()),
-        hook: crate::agent_hooks::HookState::parse(hook_state_raw, hook_at_raw, hook_detail_raw),
+        hook: crate::agent_hooks::HookState::parse(
+            hook_state_raw,
+            hook_at_raw,
+            hook_detail_raw,
+            hook_background_raw,
+        ),
     })
 }
 
@@ -228,11 +235,12 @@ mod tests {
     #[test]
     fn status_rows_carry_the_status_inputs() {
         let rows = parse_status_rows(
-            "bosun-a-1|||1792130862|||claude|||⠙ Fix it|||2_1_301|||waiting|||1792130862123|||permission: Bash\n\
-             bosun-b-2|||1792130800|||||||||zsh|||||||||\n",
+            "bosun-a-1|||1792130862|||claude|||⠙ Fix it|||2_1_301|||waiting|||1792130862123|||permission: Bash|||\n\
+             bosun-b-2|||1792130800|||||||||zsh||||||||||||\n\
+             bosun-c-3|||1792130800|||claude|||✳ Build|||2_1_303|||running|||1792130862123||||||2\n",
         )
         .unwrap();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         let a = &rows[0];
         assert_eq!(a.name, "bosun-a-1");
         assert_eq!(
@@ -250,8 +258,10 @@ mod tests {
         assert_eq!((b.agent.as_ref(), b.pane_title.as_ref()), (None, None));
         assert_eq!(b.pane_command.as_deref(), Some("zsh"));
         assert!(b.hook.is_none());
+        let c = rows[2].hook.as_ref().unwrap();
+        assert_eq!((c.detail.as_deref(), c.background), (None, 2));
         // The format and the parser agree on the field count.
-        assert_eq!(STATUS_POLL_FORMAT.split(FIELD_SEP).count(), 8);
+        assert_eq!(STATUS_POLL_FORMAT.split(FIELD_SEP).count(), 9);
         assert!(parse_status_rows("bosun-a|||1").is_err());
     }
 
@@ -313,7 +323,14 @@ mod tests {
         assert_eq!(hook.status, crate::tmux::detector::Status::Waiting);
         assert_eq!(hook.at_ms, 1_700_000_100_123);
         assert_eq!(hook.detail.as_deref(), Some("permission: Bash"));
+        assert_eq!(hook.background, 0, "no background count from older output");
         assert_eq!(s.pane_command.as_deref(), Some("2_1_301"));
+        let line = "bosun-a|||1|||0|||1700000000|||1700000100|||/tmp|||a|||claude|||/tmp|||c1|||||||||80|||✳ task|||2_1_303|||running|||1700000100123||||||1";
+        let hook = parse_list_sessions(line).unwrap()[0].hook.clone().unwrap();
+        assert_eq!(
+            (hook.status, hook.background),
+            (crate::tmux::detector::Status::Running, 1)
+        );
     }
 
     #[test]

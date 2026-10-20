@@ -2146,7 +2146,11 @@ fn hook_status(
         status
     };
     let done_at = (hook.status == Status::Done).then_some(hook.at_ms);
-    Some((publish, hook.detail.clone(), done_at))
+    let detail = match publish {
+        Status::Running => hook.detail.clone().or_else(|| hook.background_detail()),
+        _ => hook.detail.clone(),
+    };
+    Some((publish, detail, done_at))
 }
 
 /// One pass of the status poll (`Command::FastStatusPoll`): a single
@@ -2609,6 +2613,7 @@ mod build_cmd_tests {
                 .unwrap()
                 .as_millis() as u64,
             detail: detail.map(str::to_string),
+            background: 0,
         }
     }
 

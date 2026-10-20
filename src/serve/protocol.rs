@@ -1612,6 +1612,7 @@ mod tests {
             status: Status::Done,
             at_ms: 1_760_000_123_456,
             detail: None,
+            background: 0,
         });
         view.done_at = Some(1_760_000_123_456);
         assert_eq!(

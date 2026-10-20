@@ -9,8 +9,10 @@
 //!   * `@bosun_state`        — `running` / `waiting` / `done` / `idle`
 //!   * `@bosun_state_at`     — when it was written, epoch milliseconds
 //!   * `@bosun_state_detail` — optional short note, e.g. `permission: Bash`
+//!   * `@bosun_background`   — how many background agents the last turn
+//!     left at work; set only while that turn is still going
 //!
-//! The actor's poll reads the three options in the same `list-sessions`
+//! The actor's poll reads the four options in the same `list-sessions`
 //! call it already makes (see `tmux::parse::LIST_SESSIONS_FORMAT`), and
 //! [`resolve`] decides when they win over the detectors.
 //!
@@ -35,6 +37,9 @@ pub const STATE_OPTION: &str = "@bosun_state";
 pub const AT_OPTION: &str = "@bosun_state_at";
 /// Pane option holding an optional short detail string.
 pub const DETAIL_OPTION: &str = "@bosun_state_detail";
+/// Pane option holding how many background agents the agent's last
+/// turn left at work (see [`HookAction::Stop`]).
+pub const BACKGROUND_OPTION: &str = "@bosun_background";
 
 /// Agents Bosun installs hooks for. Every other agent keeps using its
 /// detector alone; see the README's "Agent status from hooks" section
@@ -65,13 +70,16 @@ pub struct HookState {
     /// When the hook wrote it, epoch milliseconds.
     pub at_ms: u64,
     pub detail: Option<String>,
+    /// Background agents the turn left at work, which report back to
+    /// the conversation when they finish. Non-zero only with `running`.
+    pub background: u32,
 }
 
 impl HookState {
-    /// Parse the three option values as `list-sessions` prints them.
+    /// Parse the four option values as `list-sessions` prints them.
     /// Unset options come through as empty strings. `None` when no
     /// state is set or the values are garbage.
-    pub fn parse(state: &str, at: &str, detail: &str) -> Option<Self> {
+    pub fn parse(state: &str, at: &str, detail: &str, background: &str) -> Option<Self> {
         let status = status_from_word(state.trim())?;
         let at_ms = at.trim().parse::<u64>().ok()?;
         let detail = detail.trim();
@@ -79,7 +87,18 @@ impl HookState {
             status,
             at_ms,
             detail: (!detail.is_empty()).then(|| detail.to_string()),
+            background: background.trim().parse().unwrap_or(0),
         })
+    }
+
+    /// The note to show for a running turn that is waiting on background
+    /// agents, when the hook wrote no detail of its own.
+    pub fn background_detail(&self) -> Option<String> {
+        match self.background {
+            0 => None,
+            1 => Some("background agent".to_string()),
+            n => Some(format!("{n} background agents")),
+        }
     }
 }
 
@@ -121,6 +140,11 @@ pub enum HookAction {
     /// write clears it, so one that is already set belongs to this wait.
     /// `detail` is written only when none is set.
     WaitingKeepDetail { detail: String },
+    /// The agent finished its turn. With `background` agents still at
+    /// work the turn isn't over (they report back to the conversation
+    /// when they finish), so write `running` and the count; otherwise
+    /// write `done` and drop any count an earlier turn left.
+    Stop { background: u32 },
     /// Remove the state options: the agent session ended.
     Clear,
     /// The agent says it's sitting idle at its prompt. Demote a
@@ -200,8 +224,11 @@ fn run_inner(args: &[String]) {
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .unwrap_or_default();
             if matches!(current.as_str(), "running" | "waiting") {
-                let set = HookAction::set(Status::Idle);
-                run_tmux(&socket, &tmux_args(&set, &pane, now));
+                // Claude only sends this with no background agent at
+                // work, so a count left over is stale too.
+                let mut argv = tmux_args(&HookAction::set(Status::Idle), &pane, now);
+                argv.extend(unset_background_args(&pane));
+                run_tmux(&socket, &argv);
             }
         }
         action => run_tmux(&socket, &tmux_args(&action, &pane, now)),
@@ -220,8 +247,8 @@ pub fn tmux_target(tmux: Option<&str>, pane: Option<&str>) -> Option<(String, St
 }
 
 /// The tmux argv (after `-S <socket>`) that applies `action` to `pane`.
-/// One invocation, with `;` separating the commands, so the three
-/// options change together. Empty for [`HookAction::Ignore`] and
+/// One invocation, with `;` separating the commands, so the options
+/// change together. Empty for [`HookAction::Ignore`] and
 /// [`HookAction::SettleIdle`], which need a read first.
 /// [`HookAction::WaitingKeepDetail`] needs no read: `set-option -o`
 /// writes the detail only if the pane has none, and fails ("already
@@ -258,6 +285,25 @@ pub fn tmux_args(action: &HookAction, pane: &str, now_ms: u64) -> Vec<String> {
             }
             argv
         }
+        HookAction::Stop { background } => {
+            let status = if *background > 0 {
+                Status::Running
+            } else {
+                Status::Done
+            };
+            let mut argv = tmux_args(&HookAction::set(status), pane, now_ms);
+            if *background > 0 {
+                argv.extend(
+                    [";", "set-option", "-p", "-t", pane, BACKGROUND_OPTION]
+                        .iter()
+                        .map(|v| s(v)),
+                );
+                argv.push(background.to_string());
+            } else {
+                argv.extend(unset_background_args(pane));
+            }
+            argv
+        }
         HookAction::Clear => clear_args(pane),
         HookAction::SettleIdle | HookAction::Ignore => Vec::new(),
     }
@@ -280,10 +326,22 @@ fn state_args(status: Status, pane: &str, now_ms: u64) -> Option<Vec<String>> {
     Some(argv)
 }
 
-/// tmux argv that unsets all three state options on `target`.
+/// `; set-option -p -u -t <pane> @bosun_background`, to append to a
+/// write.
+fn unset_background_args(pane: &str) -> Vec<String> {
+    [";", "set-option", "-p", "-u", "-t", pane, BACKGROUND_OPTION]
+        .iter()
+        .map(|v| v.to_string())
+        .collect()
+}
+
+/// tmux argv that unsets all four state options on `target`.
 pub fn clear_args(target: &str) -> Vec<String> {
     let mut argv = Vec::new();
-    for (i, opt) in [STATE_OPTION, AT_OPTION, DETAIL_OPTION].iter().enumerate() {
+    for (i, opt) in [STATE_OPTION, AT_OPTION, DETAIL_OPTION, BACKGROUND_OPTION]
+        .iter()
+        .enumerate()
+    {
         if i > 0 {
             argv.push(";".to_string());
         }
@@ -416,6 +474,11 @@ pub struct ResolveInput<'a> {
 ///     prompt-submit hook to say it started again.
 ///   * A `running` pane that has been quiet for a minute is stale for
 ///     the same kind of reason (an API error or crash with no hook).
+///     Not while background agents are at work: the conversation sits
+///     still at its prompt while they run, and an interrupt line on
+///     screen is about the conversation, not them. Their report back
+///     ends the turn, and Claude's idle notice settles one that never
+///     reports.
 ///   * Parallel tool calls can fire `PreToolUse` for one tool while
 ///     another's permission prompt is on screen; when Claude's detector
 ///     positively sees a prompt, it wins over `running`. (Only Claude's:
@@ -439,10 +502,11 @@ pub fn resolve(hook: Option<&HookState>, input: &ResolveInput<'_>) -> Option<Sta
             if claude && input.prompt_on_screen {
                 return None;
             }
-            if input.quiet_ms >= RUNNING_QUIET_STALE_MS {
+            let background = hook.background > 0;
+            if input.quiet_ms >= RUNNING_QUIET_STALE_MS && !background {
                 return None;
             }
-            if claude && input.interrupted_on_screen && !working {
+            if claude && input.interrupted_on_screen && !working && !background {
                 return None;
             }
             Some(Status::Running)
@@ -642,7 +706,46 @@ mod tests {
         let argv = tmux_args(&HookAction::Clear, "%3", 42);
         assert_eq!(
             argv.join(" "),
-            "set-option -p -u -t %3 @bosun_state ; set-option -p -u -t %3 @bosun_state_at ; set-option -p -u -t %3 @bosun_state_detail"
+            "set-option -p -u -t %3 @bosun_state ; set-option -p -u -t %3 @bosun_state_at ; set-option -p -u -t %3 @bosun_state_detail ; set-option -p -u -t %3 @bosun_background"
+        );
+    }
+
+    #[test]
+    fn stop_with_agents_out_stays_running_and_counts_them() {
+        let argv = tmux_args(&HookAction::Stop { background: 2 }, "%3", 42);
+        assert_eq!(
+            argv.join(" "),
+            "set-option -p -t %3 @bosun_state running ; set-option -p -t %3 @bosun_state_at 42 ; set-option -p -t %3 -u @bosun_state_detail ; set-option -p -t %3 @bosun_background 2"
+        );
+        let argv = tmux_args(&HookAction::Stop { background: 0 }, "%3", 42);
+        assert_eq!(
+            argv.join(" "),
+            "set-option -p -t %3 @bosun_state done ; set-option -p -t %3 @bosun_state_at 42 ; set-option -p -t %3 -u @bosun_state_detail ; set-option -p -u -t %3 @bosun_background"
+        );
+    }
+
+    #[test]
+    fn background_detail_names_the_count() {
+        let mut h = hook(Status::Running, 1);
+        assert_eq!(h.background_detail(), None);
+        h.background = 1;
+        assert_eq!(h.background_detail().as_deref(), Some("background agent"));
+        h.background = 3;
+        assert_eq!(
+            h.background_detail().as_deref(),
+            Some("3 background agents")
+        );
+        assert_eq!(
+            HookState::parse("running", "5", "", "2")
+                .unwrap()
+                .background,
+            2
+        );
+        assert_eq!(
+            HookState::parse("running", "5", "", "x")
+                .unwrap()
+                .background,
+            0
         );
     }
 
@@ -662,18 +765,19 @@ mod tests {
     #[test]
     fn hook_state_parses_list_sessions_fields() {
         assert_eq!(
-            HookState::parse("waiting", "1700000000000", "permission: Bash"),
+            HookState::parse("waiting", "1700000000000", "permission: Bash", ""),
             Some(HookState {
                 status: Status::Waiting,
                 at_ms: 1_700_000_000_000,
                 detail: Some("permission: Bash".into()),
+                background: 0,
             })
         );
-        assert_eq!(HookState::parse("", "", ""), None);
-        assert_eq!(HookState::parse("running", "", ""), None);
-        assert_eq!(HookState::parse("bogus", "1", ""), None);
+        assert_eq!(HookState::parse("", "", "", ""), None);
+        assert_eq!(HookState::parse("running", "", "", ""), None);
+        assert_eq!(HookState::parse("bogus", "1", "", ""), None);
         assert_eq!(
-            HookState::parse("done", "5", "").unwrap().detail,
+            HookState::parse("done", "5", "", "").unwrap().detail,
             None,
             "an empty detail is no detail"
         );
@@ -684,6 +788,7 @@ mod tests {
             status,
             at_ms,
             detail: None,
+            background: 0,
         }
     }
 
@@ -804,6 +909,26 @@ mod tests {
         let h = hook(Status::Running, 90_000);
         let mut i = input(None, Some("2_1_301"), Status::Idle);
         i.quiet_ms = RUNNING_QUIET_STALE_MS;
+        assert_eq!(resolve(Some(&h), &i), None);
+    }
+
+    #[test]
+    fn background_agents_keep_a_quiet_or_interrupted_turn_running() {
+        // The conversation sits at its prompt while its background agent
+        // works: a quiet pane, maybe an old interrupt line, and no
+        // spinner. The turn goes on until the agent reports back.
+        let mut h = hook(Status::Running, 10_000);
+        h.background = 1;
+        let mut i = input(Some("✳ grav"), Some("2.1.303"), Status::Idle);
+        i.quiet_ms = 10 * RUNNING_QUIET_STALE_MS;
+        assert_eq!(resolve(Some(&h), &i), Some(Status::Running));
+        i.interrupted_on_screen = true;
+        assert_eq!(resolve(Some(&h), &i), Some(Status::Running));
+        // A permission prompt on screen still wins, and so does a shell.
+        i.prompt_on_screen = true;
+        assert_eq!(resolve(Some(&h), &i), None);
+        i.prompt_on_screen = false;
+        i.pane_command = Some("zsh");
         assert_eq!(resolve(Some(&h), &i), None);
     }
 

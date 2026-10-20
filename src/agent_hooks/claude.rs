@@ -23,6 +23,7 @@
 //! | `Notification` `elicitation_dialog` …   | waiting, "input requested"   |
 //! | `Notification` `idle_prompt`            | running/waiting → idle only  |
 //! | `Stop`                                  | done                         |
+//! | `Stop` with agents still out            | running, background count    |
 //! | `SessionEnd`                            | cleared                      |
 //!
 //! A permission request or notification for `AskUserQuestion` or
@@ -31,6 +32,15 @@
 //! `PermissionRequest` without a tool name) writes plain `permission`
 //! only when the pane has no detail yet, so it can't replace a more
 //! specific one written moments before for the same wait.
+//!
+//! A turn that ends with a background subagent or workflow still at
+//! work isn't over: Claude reports back to the conversation when it
+//! finishes (a `UserPromptSubmit` for the report) and only then really
+//! ends with a `Stop` that lists none. The `Stop` before that keeps the
+//! pane running and records how many agents are out, so the working
+//! timer carries on from the prompt that started them. Background
+//! shells, monitors and the like don't count: a dev server can run for
+//! the whole session.
 //!
 //! Only long-established events are registered: an older Claude that
 //! doesn't know an event name could reject the whole settings file.
@@ -69,6 +79,21 @@ struct Input {
     notification_type: Option<String>,
     #[serde(default)]
     message: Option<String>,
+    /// `Stop` only: the work still in flight when the turn ended.
+    #[serde(default)]
+    background_tasks: Vec<BackgroundTask>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BackgroundTask {
+    #[serde(default, rename = "type")]
+    kind: String,
+}
+
+/// Background work that reports back to the conversation when it
+/// finishes, so the turn that started it is still going.
+fn reports_back(task: &BackgroundTask) -> bool {
+    matches!(task.kind.as_str(), "subagent" | "workflow")
 }
 
 fn parse(input: &[u8]) -> Input {
@@ -107,7 +132,13 @@ pub fn map(event: &str, input: &[u8]) -> HookAction {
                 _ => HookAction::Ignore,
             }
         }
-        "Stop" => HookAction::set(Status::Done),
+        "Stop" => HookAction::Stop {
+            background: parse(input)
+                .background_tasks
+                .iter()
+                .filter(|t| reports_back(t))
+                .count() as u32,
+        },
         "SessionEnd" => HookAction::Clear,
         _ => HookAction::Ignore,
     }
@@ -271,7 +302,7 @@ mod tests {
                 HookAction::set_with(Status::Waiting, "input requested"),
             ),
             ("Notification", NOTIFY_AUTH, HookAction::Ignore),
-            ("Stop", STOP, set(Status::Done)),
+            ("Stop", STOP, HookAction::Stop { background: 0 }),
             ("SessionEnd", SESSION_END, HookAction::Clear),
         ];
         for (event, json, want) in cases {
@@ -281,11 +312,33 @@ mod tests {
 
     #[test]
     fn empty_or_invalid_stdin_still_maps() {
-        assert_eq!(map("Stop", b""), set(Status::Done));
+        assert_eq!(map("Stop", b""), HookAction::Stop { background: 0 });
         assert_eq!(map("PreToolUse", b"not json"), set(Status::Running));
         assert_eq!(map("PermissionRequest", b""), keep("permission"));
         assert_eq!(map("Notification", b"{"), HookAction::Ignore);
         assert_eq!(map("UnknownEvent", b"{}"), HookAction::Ignore);
+    }
+
+    #[test]
+    fn a_stop_counts_only_the_agents_still_out() {
+        // Recorded from Claude Code 2.1.303: the Stop that ends the turn
+        // which started a background agent, then the one after it
+        // reported back, with only the agent's own shell left running.
+        let agent_out = r#"{"session_id":"abc123","hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[{"id":"ae10d7d7489a0d94a","type":"subagent","status":"running","description":"Background sleep and echo probe","agent_type":"general-purpose"}],"session_crons":[]}"#;
+        let shell_left = r#"{"session_id":"abc123","hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[{"id":"b9yninxdf","type":"shell","status":"running","description":"Sleep 25 seconds in background","command":"sleep 25"}],"session_crons":[]}"#;
+        let two = r#"{"hook_event_name":"Stop","background_tasks":[{"type":"subagent"},{"type":"monitor"},{"type":"workflow"}]}"#;
+        assert_eq!(
+            map("Stop", agent_out.as_bytes()),
+            HookAction::Stop { background: 1 }
+        );
+        assert_eq!(
+            map("Stop", shell_left.as_bytes()),
+            HookAction::Stop { background: 0 }
+        );
+        assert_eq!(
+            map("Stop", two.as_bytes()),
+            HookAction::Stop { background: 2 }
+        );
     }
 
     #[test]
