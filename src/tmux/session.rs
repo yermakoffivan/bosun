@@ -75,6 +75,11 @@ pub struct TmuxSession {
     /// hooks or hasn't fired one. Raw: whether it beats the detectors is
     /// decided by `agent_hooks::resolve`.
     pub hook: Option<crate::agent_hooks::HookState>,
+    /// When the session's current turn started, Unix ms, as `bosun
+    /// serve` last wrote it (`@bosun_turn_at`), so a daemon that starts
+    /// while an agent is working picks the turn up where the last one
+    /// left it. `None` when unset.
+    pub turn_at: Option<u64>,
 }
 
 impl TmuxSession {

@@ -705,6 +705,14 @@ pub fn spawn(
                         }
                     }
                 }
+                Command::SetTurnStarts(writes) => {
+                    // A session that ended meanwhile fails harmlessly.
+                    for (internal, at) in &writes {
+                        if let Err(e) = client.set_turn_start(internal, *at).await {
+                            tracing::debug!("turn start: {}", e);
+                        }
+                    }
+                }
                 Command::SetContainerIds(pairs) => {
                     // Only live sessions whose option differs: a row
                     // can hold exited tabs, and the caller's session
@@ -2597,6 +2605,7 @@ mod build_cmd_tests {
             pane_title: Some(title.into()),
             pane_command: Some(cmd.into()),
             hook,
+            turn_at: None,
         }
     }
 

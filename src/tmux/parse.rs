@@ -43,8 +43,9 @@ use crate::tmux::session::TmuxSession;
 /// optional detail, and how many background agents its turn is waiting
 /// on. tmux resolves them against the session's active
 /// pane, the same pane `pane_title` describes. Empty when no hook has
-/// run.
-pub const LIST_SESSIONS_FORMAT: &str = "#{session_name}|||#{session_windows}|||#{session_attached}|||#{session_created}|||#{session_activity}|||#{session_path}|||#{@bosun_display}|||#{@bosun_agent}|||#{@bosun_path}|||#{@bosun_container_id}|||#{@bosun_worktree_path}|||#{@bosun_branch}|||#{pane_width}|||#{pane_title}|||#{pane_current_command}|||#{@bosun_state}|||#{@bosun_state_at}|||#{@bosun_state_detail}|||#{@bosun_background}";
+/// run. Last comes `@bosun_turn_at`, which `bosun serve` writes: when
+/// the current turn started.
+pub const LIST_SESSIONS_FORMAT: &str = "#{session_name}|||#{session_windows}|||#{session_attached}|||#{session_created}|||#{session_activity}|||#{session_path}|||#{@bosun_display}|||#{@bosun_agent}|||#{@bosun_path}|||#{@bosun_container_id}|||#{@bosun_worktree_path}|||#{@bosun_branch}|||#{pane_width}|||#{pane_title}|||#{pane_current_command}|||#{@bosun_state}|||#{@bosun_state_at}|||#{@bosun_state_detail}|||#{@bosun_background}|||#{@bosun_turn_at}";
 
 const FIELD_SEP: &str = "|||";
 
@@ -55,7 +56,7 @@ const FIELD_SEP: &str = "|||";
 /// [`LIST_SESSIONS_FORMAT`] costs it about 40 % more than this one
 /// (`list-panes -a` with the same fields costs more again: it walks
 /// every pane, the monitor session's included).
-pub const STATUS_POLL_FORMAT: &str = "#{session_name}|||#{session_activity}|||#{@bosun_agent}|||#{pane_title}|||#{pane_current_command}|||#{@bosun_state}|||#{@bosun_state_at}|||#{@bosun_state_detail}|||#{@bosun_background}";
+pub const STATUS_POLL_FORMAT: &str = "#{session_name}|||#{session_activity}|||#{@bosun_agent}|||#{pane_title}|||#{pane_current_command}|||#{@bosun_state}|||#{@bosun_state_at}|||#{@bosun_state_detail}|||#{@bosun_background}|||#{@bosun_turn_at}";
 
 /// Parse `tmux list-sessions -F <STATUS_POLL_FORMAT>` output. Only the
 /// fields that format reads are filled in (name, activity, agent, pane
@@ -69,9 +70,10 @@ pub fn parse_status_rows(input: &str) -> Result<Vec<TmuxSession>> {
             continue;
         }
         let f: Vec<&str> = line.split(FIELD_SEP).collect();
-        let [name, activity, agent, title, command, state, at, detail, background] = f[..] else {
+        let [name, activity, agent, title, command, state, at, detail, background, turn_at] = f[..]
+        else {
             return Err(BosunError::Parse(format!(
-                "status row {}: expected 9 fields, got {} — raw: {:?}",
+                "status row {}: expected 10 fields, got {} — raw: {:?}",
                 idx + 1,
                 f.len(),
                 line
@@ -95,6 +97,7 @@ pub fn parse_status_rows(input: &str) -> Result<Vec<TmuxSession>> {
             pane_title: some(title),
             pane_command: some(command),
             hook: crate::agent_hooks::HookState::parse(state, at, detail, background),
+            turn_at: turn_at.trim().parse().ok(),
         });
     }
     Ok(out)
@@ -170,6 +173,8 @@ fn parse_session_line(line: &str) -> std::result::Result<TmuxSession, String> {
     let hook_at_raw = parts.next().unwrap_or("");
     let hook_detail_raw = parts.next().unwrap_or("");
     let hook_background_raw = parts.next().unwrap_or("");
+    // When `bosun serve` saw the current turn start.
+    let turn_at_raw = parts.next().unwrap_or("");
 
     if parts.next().is_some() {
         return Err("unexpected extra field".into());
@@ -212,6 +217,7 @@ fn parse_session_line(line: &str) -> std::result::Result<TmuxSession, String> {
             hook_detail_raw,
             hook_background_raw,
         ),
+        turn_at: turn_at_raw.trim().parse().ok(),
     })
 }
 
@@ -235,9 +241,9 @@ mod tests {
     #[test]
     fn status_rows_carry_the_status_inputs() {
         let rows = parse_status_rows(
-            "bosun-a-1|||1792130862|||claude|||⠙ Fix it|||2_1_301|||waiting|||1792130862123|||permission: Bash|||\n\
-             bosun-b-2|||1792130800|||||||||zsh||||||||||||\n\
-             bosun-c-3|||1792130800|||claude|||✳ Build|||2_1_303|||running|||1792130862123||||||2\n",
+            "bosun-a-1|||1792130862|||claude|||⠙ Fix it|||2_1_301|||waiting|||1792130862123|||permission: Bash||||||\n\
+             bosun-b-2|||1792130800|||||||||zsh|||||||||||||||\n\
+             bosun-c-3|||1792130800|||claude|||✳ Build|||2_1_303|||running|||1792130862123||||||2|||1792130800456\n",
         )
         .unwrap();
         assert_eq!(rows.len(), 3);
@@ -260,8 +266,10 @@ mod tests {
         assert!(b.hook.is_none());
         let c = rows[2].hook.as_ref().unwrap();
         assert_eq!((c.detail.as_deref(), c.background), (None, 2));
+        assert_eq!(rows[2].turn_at, Some(1792130800456));
+        assert_eq!((a.turn_at, b.turn_at), (None, None));
         // The format and the parser agree on the field count.
-        assert_eq!(STATUS_POLL_FORMAT.split(FIELD_SEP).count(), 9);
+        assert_eq!(STATUS_POLL_FORMAT.split(FIELD_SEP).count(), 10);
         assert!(parse_status_rows("bosun-a|||1").is_err());
     }
 

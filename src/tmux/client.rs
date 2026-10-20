@@ -117,6 +117,11 @@ pub trait TmuxClient: Send + Sync {
     /// names.
     async fn set_container_id(&self, session: &str, container_id: &str) -> Result<()>;
 
+    /// Set `session`'s `@bosun_turn_at` to `at` (Unix ms), or unset it.
+    async fn set_turn_start(&self, _session: &str, _at: Option<u64>) -> Result<()> {
+        Ok(())
+    }
+
     /// Read bosun's persisted `@bosun_*` metadata off a session, or
     /// `Ok(None)` if the session has no agent set (pre-dates the
     /// feature or wasn't created by bosun). Used by restart to
@@ -743,6 +748,23 @@ impl TmuxClient for TokioTmuxClient {
         }
         Err(BosunError::Tmux(format!(
             "set @bosun_container_id on {}: {}",
+            session,
+            output.stderr.trim()
+        )))
+    }
+
+    async fn set_turn_start(&self, session: &str, at: Option<u64>) -> Result<()> {
+        let at = at.map(|t| t.to_string());
+        let args: Vec<&str> = match &at {
+            Some(t) => vec!["set-option", "-t", session, "@bosun_turn_at", t],
+            None => vec!["set-option", "-u", "-t", session, "@bosun_turn_at"],
+        };
+        let output = self.run(&args, Retry::Safe).await?;
+        if output.success {
+            return Ok(());
+        }
+        Err(BosunError::Tmux(format!(
+            "set @bosun_turn_at on {}: {}",
             session,
             output.stderr.trim()
         )))

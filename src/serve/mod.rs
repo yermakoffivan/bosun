@@ -332,6 +332,9 @@ struct Daemon {
     config_mtime: Option<SystemTime>,
     file_config: Config,
     turns: turns::TurnClock,
+    /// The `@bosun_turn_at` last sent for each session, so a write
+    /// isn't repeated while tmux catches up.
+    turn_writes: HashMap<String, Option<u64>>,
     /// Tabs of undocked rows waiting to be resumed, as (dead tab, row
     /// id), one at a time: each takes its dead tab's place through the
     /// TUI's restart swap, which holds one at a time.
@@ -377,6 +380,7 @@ impl Daemon {
             agent_hooks: config.agent_hooks,
             file_config: config.clone(),
             turns: turns::TurnClock::default(),
+            turn_writes: HashMap::new(),
             resumes: VecDeque::new(),
             resuming: false,
             snooze_baseline: HashMap::new(),
@@ -664,11 +668,27 @@ impl Daemon {
         let now = now_ms();
         for v in &self.app.sessions {
             let info = StatusInfo::from(v);
-            self.turns.observe(v.name(), info.state, info.source, now);
+            self.turns
+                .observe(v.name(), info.state, info.source, now, v.session.turn_at);
         }
         let live: std::collections::HashSet<&str> =
             self.app.sessions.iter().map(|v| v.name()).collect();
         self.turns.retain(|s| live.contains(s));
+        self.turn_writes.retain(|s, _| live.contains(s.as_str()));
+        // Keep each turn's start on its session for the next daemon.
+        let mut writes = Vec::new();
+        for v in &self.app.sessions {
+            let want = self.turns.stored(v.name(), now);
+            if want == v.session.turn_at {
+                self.turn_writes.remove(v.name());
+            } else if self.turn_writes.get(v.name()) != Some(&want) {
+                self.turn_writes.insert(v.name().to_string(), want);
+                writes.push((v.name().to_string(), want));
+            }
+        }
+        if !writes.is_empty() {
+            let _ = self.cmd_tx.send(Command::SetTurnStarts(writes));
+        }
     }
 
     fn config_view(&self) -> ConfigWire {

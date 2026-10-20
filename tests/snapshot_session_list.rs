@@ -71,6 +71,7 @@ fn ses_with_status(name: &str, attached: bool, status: Status) -> SessionView {
             pane_title: None,
             pane_command: None,
             hook: None,
+            turn_at: None,
         },
         status,
         None,

@@ -216,6 +216,10 @@ pub enum Command {
     /// between rows. The sidebar model is the daemon's to change; this
     /// only keeps the tmux option in step so reconcile agrees with it.
     SetContainerIds(Vec<(String, String)>),
+    /// Set (or, with `None`, unset) each session's `@bosun_turn_at`,
+    /// `(internal, Unix ms)`: when `bosun serve` saw its current turn
+    /// start, for the next daemon to carry on from.
+    SetTurnStarts(Vec<(String, Option<u64>)>),
     /// Kill and recreate a session using the metadata we persisted
     /// as `@bosun_*` tmux user options when it was first created.
     /// The new session gets a fresh internal name (new hex suffix)

@@ -961,6 +961,74 @@ fn serve_background_agents_keep_the_turn_going_until_they_report_back() {
     c.until("kill ack", |v| is_ack(v, 2));
 }
 
+#[test]
+fn serve_turn_timers_survive_a_daemon_restart() {
+    let mut fx = fixture();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    assert_eq!(c.recv().expect("snapshot")["t"], "snapshot");
+
+    // A non-shell foreground process, as in the hook tests above.
+    c.send(json!({
+        "t": "cmd", "id": 1, "op": "create", "defer_launch": true,
+        "spec": {"name": "long", "path": "/tmp", "agent": "terminal"}
+    }));
+    let seen = c.until("create ack", |v| is_ack(v, 1));
+    let name = seen.last().unwrap()["session"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fx.tmux(&["send-keys", "-t", &name, "exec sleep 600", "Enter"]);
+    wait_for("sleep in the pane", WAIT, || {
+        let out = fx.tmux(&["display", "-p", "-t", &name, "#{pane_current_command}"]);
+        String::from_utf8_lossy(&out.stdout).trim() == "sleep"
+    });
+    let turn_at = |fx: &Fixture| {
+        let out = fx.tmux(&["show-options", "-qv", "-t", &name, "@bosun_turn_at"]);
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse::<u64>()
+            .ok()
+    };
+
+    run_claude_hook(&fx, &name, "UserPromptSubmit", json!({"prompt": "go"}));
+    let seen = c.until("running with a start", |v| {
+        v["t"] == "status" && v["session"] == name.as_str() && v["started_at"].is_u64()
+    });
+    let started = seen.last().unwrap()["started_at"].as_u64().unwrap();
+    wait_for("the start kept on the session", WAIT, || {
+        turn_at(&fx) == Some(started)
+    });
+    drop(c);
+
+    // A new daemon, a second later: the same turn, the same start.
+    std::thread::sleep(Duration::from_millis(1100));
+    if let Some(mut child) = fx.child.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    let snap = c.recv().expect("snapshot");
+    let mut info = snap["statuses"][&name].clone();
+    if !info["started_at"].is_u64() {
+        let seen = c.until("the turn's start", |v| {
+            v["t"] == "status" && v["session"] == name.as_str() && v["started_at"].is_u64()
+        });
+        info = seen.last().unwrap().clone();
+    }
+    assert_eq!(info["started_at"].as_u64(), Some(started), "{info}");
+
+    // The turn ends: the stored start goes.
+    run_claude_hook(&fx, &name, "Stop", json!({"stop_hook_active": false}));
+    wait_for("the stored start cleared", WAIT, || turn_at(&fx).is_none());
+
+    c.send(json!({"t": "cmd", "id": 2, "op": "kill", "session": name}));
+    c.until("kill ack", |v| is_ack(v, 2));
+}
+
 /// Create a `terminal` session through the daemon and return its tmux
 /// name. `args` is the command typed into its shell (empty: none).
 fn create_terminal(c: &mut Conn, id: u64, name: &str, args: &str) -> String {

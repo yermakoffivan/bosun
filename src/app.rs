@@ -4378,6 +4378,7 @@ mod tests {
                 pane_title: None,
                 pane_command: None,
                 hook: None,
+                turn_at: None,
             },
             status,
             None,
