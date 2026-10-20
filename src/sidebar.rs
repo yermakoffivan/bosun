@@ -18,6 +18,7 @@
 //! the table shape, so first save after upgrade migrates the file
 //! in place.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -263,6 +264,13 @@ pub struct SidebarModel {
     pub ungrouped: Vec<Container>,
     #[serde(default)]
     pub sections: Vec<Section>,
+    /// Display names of tabs whose tmux session has ended, by session
+    /// name: written when a row is docked (the name lived on the
+    /// session) and when a docked tab is renamed. Without one, an
+    /// ended tab's name comes from recents, which keep the name its
+    /// session was created with.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ended_names: BTreeMap<String, String>,
 }
 
 /// Why [`SidebarModel::move_tab`] or [`SidebarModel::merge_rows`]
@@ -728,6 +736,7 @@ impl SidebarModel {
         if old == new {
             return false;
         }
+        self.ended_names.remove(old);
         if self.contains(new) {
             return false;
         }
@@ -752,6 +761,25 @@ impl SidebarModel {
             }
         }
         false
+    }
+
+    /// Drop the names of ended tabs that are no longer in any row.
+    pub fn prune_ended_names(&mut self) {
+        let names = std::mem::take(&mut self.ended_names);
+        self.ended_names = names
+            .into_iter()
+            .filter(|(tab, _)| self.contains(tab))
+            .collect();
+    }
+
+    /// Name an ended tab (see [`SidebarModel::ended_names`]). False when
+    /// no row has it or the name is unchanged.
+    pub fn set_ended_name(&mut self, tab: &str, name: &str) -> bool {
+        if !self.contains(tab) || self.ended_names.get(tab).is_some_and(|n| n == name) {
+            return false;
+        }
+        self.ended_names.insert(tab.to_string(), name.to_string());
+        true
     }
 
     fn contains(&self, internal: &str) -> bool {
@@ -1176,6 +1204,13 @@ impl SidebarModel {
                 changed.push((c.id.clone(), old_role, role));
             }
         }
+        // Ended tabs' names aren't in a client's layout (or in an older
+        // copy of the file): keep ours, for the tabs that are still
+        // there.
+        for (tab, name) in &self.ended_names {
+            new.ended_names.insert(tab.clone(), name.clone());
+        }
+        new.prune_ended_names();
         new.drop_empty_role_sections();
         // Role sections stay after the user's own, Snoozed first.
         new.sections
@@ -1248,6 +1283,7 @@ mod tests {
         SidebarModel {
             ungrouped: ungrouped.iter().map(|s| con(s)).collect(),
             sections,
+            ended_names: Default::default(),
         }
     }
 
@@ -1440,6 +1476,31 @@ mod tests {
     }
 
     #[test]
+    fn ended_names_follow_their_tabs() {
+        let mut m = model(&["a", "b"], vec![]);
+        assert!(m.set_ended_name("a", "Alpha"));
+        assert!(!m.set_ended_name("a", "Alpha"), "unchanged");
+        assert!(!m.set_ended_name("nope", "x"), "not in any row");
+        // A client's layout has no names: adopting it keeps ours, for
+        // the tabs it still has.
+        let mut new = model(&["a"], vec![]);
+        new.ungrouped[0].id = m.ungrouped[0].id.clone();
+        m.ended_names.insert("b".into(), "Beta".into());
+        m.adopt(&mut new, 1, true);
+        assert_eq!(
+            new.ended_names,
+            BTreeMap::from([("a".to_string(), "Alpha".to_string())])
+        );
+        // Resumed into a new session: the name now lives on that one.
+        assert!(new.replace_session("a", "a2"));
+        assert!(new.ended_names.is_empty());
+        // Saved with the sidebar.
+        m.prune_ended_names();
+        let back: SidebarModel = toml::from_str(&toml::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back.ended_names.get("a").map(String::as_str), Some("Alpha"));
+    }
+
+    #[test]
     fn replace_session_updates_active_too() {
         let mut m = model(&["old"], vec![]);
         assert!(m.replace_session("old", "new"));
@@ -1513,6 +1574,7 @@ members = ["bosun-gamma"]
         let mut m = SidebarModel {
             ungrouped: vec![row(&["a1", "a2"], 1), row(&["b1"], 0)],
             sections: vec![],
+            ended_names: Default::default(),
         };
         let b = m.ungrouped[1].id.clone();
         assert_eq!(m.move_tab("a2", Some(&b), None), Ok(Some(b.clone())));
@@ -1527,6 +1589,7 @@ members = ["bosun-gamma"]
         let mut m = SidebarModel {
             ungrouped: vec![row(&["a", "x", "y"], 0), row(&["b1", "b2"], 1)],
             sections: vec![],
+            ended_names: Default::default(),
         };
         let b = m.ungrouped[1].id.clone();
         m.move_tab("x", Some(&b), Some(0)).unwrap();
@@ -1541,6 +1604,7 @@ members = ["bosun-gamma"]
         let mut m = SidebarModel {
             ungrouped: vec![con("solo")],
             sections: vec![sec("g1", "Work", &["w1", "w2"])],
+            ended_names: Default::default(),
         };
         let w2 = m.sections[0].members[1].id.clone();
         assert_eq!(m.move_tab("solo", Some(&w2), None), Ok(Some(w2.clone())));
@@ -1557,6 +1621,7 @@ members = ["bosun-gamma"]
                 members: vec![con("w0"), row(&["w1", "t2", "t3"], 1), con("w9")],
                 ..sec("g1", "Work", &[])
             }],
+            ended_names: Default::default(),
         };
         let new_id = m.move_tab("t2", None, None).unwrap().expect("moved");
         let members = &m.sections[0].members;
@@ -1578,6 +1643,7 @@ members = ["bosun-gamma"]
                 members: vec![con("w1"), con("w2")],
                 ..sec("g1", "Work", &[])
             }],
+            ended_names: Default::default(),
         };
         let id = m.move_tab_to_new_row("a2", None, 0).unwrap().unwrap();
         assert_eq!(m.ungrouped[0].id, id);
@@ -1594,6 +1660,7 @@ members = ["bosun-gamma"]
                 members: vec![con("w1"), con("w2")],
                 ..sec("g1", "Work", &[])
             }],
+            ended_names: Default::default(),
         };
         let sid = m.sections[0].id.clone();
         m.move_tab_to_new_row("a2", Some(&sid), 1).unwrap();
@@ -1612,6 +1679,7 @@ members = ["bosun-gamma"]
         let mut m = SidebarModel {
             ungrouped: vec![row(&["a1", "a2"], 0)],
             sections: vec![],
+            ended_names: Default::default(),
         };
         let before = m.clone();
         assert_eq!(
@@ -1630,6 +1698,7 @@ members = ["bosun-gamma"]
         let mut m = SidebarModel {
             ungrouped: vec![row(&["a1", "a2"], 0), con("b")],
             sections: vec![],
+            ended_names: Default::default(),
         };
         let before = m.clone();
         let a = m.ungrouped[0].id.clone();
@@ -1655,6 +1724,7 @@ members = ["bosun-gamma"]
                 members: vec![row(&["k2", "k2b"], 0)],
                 ..sec("g1", "Work", &[])
             }],
+            ended_names: Default::default(),
         };
         let from = m.ungrouped[0].id.clone();
         let into = m.sections[0].members[0].id.clone();
@@ -1674,6 +1744,7 @@ members = ["bosun-gamma"]
         let mut m = SidebarModel {
             ungrouped: vec![row(&["k1", "k1b"], 0), row(&["k2", "k2b"], 1)],
             sections: vec![],
+            ended_names: Default::default(),
         };
         let from = m.ungrouped[0].id.clone();
         let into = m.ungrouped[1].id.clone();
@@ -1684,6 +1755,7 @@ members = ["bosun-gamma"]
         let mut m = SidebarModel {
             ungrouped: vec![con("a"), con("b")],
             sections: vec![],
+            ended_names: Default::default(),
         };
         let a = m.ungrouped[0].id.clone();
         let b = m.ungrouped[1].id.clone();
@@ -1696,6 +1768,7 @@ members = ["bosun-gamma"]
         let mut m = SidebarModel {
             ungrouped: vec![con("a"), con("b")],
             sections: vec![],
+            ended_names: Default::default(),
         };
         let a = m.ungrouped[0].id.clone();
         let before = m.clone();
@@ -1719,6 +1792,7 @@ members = ["bosun-gamma"]
         let mut m = SidebarModel {
             ungrouped: vec![con("a"), con("b")],
             sections: vec![],
+            ended_names: Default::default(),
         };
         let a = m.ungrouped[0].id.clone();
         let b = m.ungrouped[1].id.clone();

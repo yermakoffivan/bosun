@@ -132,7 +132,7 @@ Kills a worktree-backed session (the row's `worktree_path` and `branch`) and rem
 {"t":"cmd","id":5,"op":"rename","session":"bosun-api-1a2b3c4d","display":"API server"}
 ```
 
-Changes the display name. The internal name never changes.
+Changes the display name. The internal name never changes. For a tab whose session has ended (a docked row's, or an exited one), the name is kept on the sidebar instead (`ended_names` in `config.toml`), and the tab comes back under it when it's resumed or restarted.
 
 #### `restart`
 
@@ -367,7 +367,7 @@ This is the state Bosun detects for the session itself. The TUI also shows an id
 {"ungrouped":[
    {"id":"con-1","name":"api","active":"bosun-api-1a2b3c4d",
     "tabs":[{"session":"bosun-api-1a2b3c4d","display":"api","alive":true},
-            {"session":"bosun-api-2-9f8e7d6c","display":"api 2","alive":false}]}],
+            {"session":"bosun-api-2-9f8e7d6c","display":"api 2","alive":false,"recent":12}]}],
  "sections":[
    {"id":"sec-1","name":"Work","collapsed":false,"banner_font":"metalix",
     "defaults":{"path":"~/work","agent":"codex","options":{…}},
@@ -377,7 +377,7 @@ This is the state Bosun detects for the session itself. The TUI also shows an id
                 "parked":{"at":1792130862123,"from_section":"sec-1","from_index":2,"wake_at":1792134462123}}]}]}
 ```
 
-Ungrouped rows come first, then each section's header and rows, the same order as the TUI. Each row has one or more tabs; `active` is the session name of the shown tab. A row's `name` is its label as the TUI shows it: the display name of its active tab (for an exited tab, the name recovered from recents), so it changes when the active tab changes or is renamed. A tab with `alive: false` is a session that has ended; the TUI keeps such rows (as "exited") so they can be restarted, unless `remove_dead_sessions` is on. Its `display` is the best name Bosun can recover from the recents list. `banner_font` is left out when the section uses the global one, and `defaults` when the section has none (see `set_section_defaults`). `role` is `snoozed` or `docked` on the built-in sections parked rows go to (see `park_row`), and a row in one has `parked`: when it was parked (`at`, Unix ms), the section and index it goes back to (`from_section` is absent for the ungrouped rows), and for a snoozed row `wake_at` or `until_needed`.
+Ungrouped rows come first, then each section's header and rows, the same order as the TUI. Each row has one or more tabs; `active` is the session name of the shown tab. A row's `name` is its label as the TUI shows it: the display name of its active tab (for an exited tab, its kept or recovered name, as below), so it changes when the active tab changes or is renamed. A tab with `alive: false` is a session that has ended; the TUI keeps such rows (as "exited") so they can be restarted, unless `remove_dead_sessions` is on. Its `display` is the name it had when its row was docked or was given since, or else the best name Bosun can recover from the recents list, and `recent` is the id of the recents entry it was created from, to restart it from (absent when there's none). `banner_font` is left out when the section uses the global one, and `defaults` when the section has none (see `set_section_defaults`). `role` is `snoozed` or `docked` on the built-in sections parked rows go to (see `park_row`), and a row in one has `parked`: when it was parked (`at`, Unix ms), the section and index it goes back to (`from_section` is absent for the ungrouped rows), and for a snoozed row `wake_at` or `until_needed`.
 
 #### Recents
 

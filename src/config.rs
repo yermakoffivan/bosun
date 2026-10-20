@@ -537,6 +537,7 @@ impl Config {
                 SidebarModel {
                     ungrouped,
                     sections: Vec::new(),
+                    ended_names: Default::default(),
                 }
             }
         };
@@ -1255,6 +1256,7 @@ mod tests {
                 .map(|n| Container::single(n.to_string(), n.to_string()))
                 .collect(),
             sections: Vec::new(),
+            ended_names: Default::default(),
         }
     }
 

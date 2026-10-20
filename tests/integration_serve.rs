@@ -1542,6 +1542,77 @@ fn sidebar_until(c: &mut Conn, what: &str, mut cond: impl FnMut(&Value) -> bool)
 /// finishes; dragging a row into Docked (a client's `sidebar_save`)
 /// docks it too.
 #[test]
+fn serve_docked_rows_keep_their_name_and_can_be_renamed() {
+    let mut fx = fixture();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    assert_eq!(c.recv().expect("snapshot")["t"], "snapshot");
+    let alpha = create_terminal(&mut c, 1, "alpha", "sleep 600");
+    let sidebar = sidebar_with(&mut c, &[&alpha]);
+    let row = row_of(&sidebar, &alpha).unwrap();
+    let docked_tab =
+        |sb: &Value| section_named(sb, "Docked").map(|s| s["members"][0]["tabs"][0].clone());
+
+    // Renamed while live, then docked: the row keeps the new name, not
+    // the one recents has from its creation.
+    let seen = command(
+        &mut c,
+        10,
+        json!({"op": "rename", "session": alpha, "display": "alpha two"}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    sidebar_until(&mut c, "the live rename", |sb| {
+        sb["ungrouped"][0]["tabs"][0]["display"] == "alpha two"
+    });
+    let seen = command(
+        &mut c,
+        11,
+        json!({"op": "park_row", "container_id": row, "role": "docked"}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    let sb = sidebar_until(&mut c, "alpha docked", |sb| {
+        docked_tab(sb).is_some_and(|t| t["alive"] == false)
+    });
+    let tab = docked_tab(&sb).unwrap();
+    assert_eq!(tab["display"], "alpha two", "{tab}");
+    assert!(
+        tab["recent"].is_i64(),
+        "an exited tab says which recent it restarts from: {tab}"
+    );
+
+    // Renaming the docked tab works too, and is kept in config.toml.
+    let seen = command(
+        &mut c,
+        12,
+        json!({"op": "rename", "session": alpha, "display": "alpha three"}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    sidebar_until(&mut c, "the docked rename", |sb| {
+        docked_tab(sb).is_some_and(|t| t["display"] == "alpha three")
+    });
+    let config = std::fs::read_to_string(fx.config_path()).unwrap();
+    assert!(config.contains("alpha three"), "{config}");
+    // A session that isn't anywhere still fails.
+    let seen = command(
+        &mut c,
+        13,
+        json!({"op": "rename", "session": "bosun-nope-1", "display": "x"}),
+    );
+    assert_eq!(seen.last().unwrap()["ok"], false, "{seen:#?}");
+
+    // Undocked, it comes back under that name.
+    let seen = command(&mut c, 14, json!({"op": "unpark_row", "container_id": row}));
+    assert_eq!(seen.last().unwrap()["ok"], true, "{seen:#?}");
+    let sb = sidebar_until(&mut c, "alpha resumed", |sb| {
+        sb["ungrouped"][0]["id"] == row.as_str() && sb["ungrouped"][0]["tabs"][0]["alive"] == true
+    });
+    let tab = &sb["ungrouped"][0]["tabs"][0];
+    assert_eq!(tab["display"], "alpha three", "{tab}");
+    assert!(tab.get("recent").is_none(), "{tab}");
+}
+
+#[test]
 fn serve_dock_and_snooze() {
     let mut fx = fixture();
     let path = fx.start();

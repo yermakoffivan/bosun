@@ -19,7 +19,7 @@ final class ProtocolTests: XCTestCase {
      "sidebar":{"ungrouped":[
         {"id":"con-1","name":"api","active":"bosun-api-1a2b3c4d",
          "tabs":[{"session":"bosun-api-1a2b3c4d","display":"api","alive":true},
-                 {"session":"bosun-api-2-9f8e7d6c","display":"api 2","alive":false}]}],
+                 {"session":"bosun-api-2-9f8e7d6c","display":"api 2","alive":false,"recent":12}]}],
        "sections":[{"id":"sec-1","name":"Work","collapsed":false,"banner_font":"metalix","members":[],
                      "defaults":{"path":"~/work","agent":"codex","options":{"codex":{"session_mode":"continue","yolo":true}}}}]},
      "recents":[{"id":42,"name":"api","path":"/w/api","agent":"claude","args":"","options":{"claude":{"session_mode":"continue","skip_permissions":false,"remote_control":false}},"last_used_at":1792130862123,"use_count":7}],
@@ -50,6 +50,8 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(s.statuses["bosun-web-9c0d1e2f"]?.isHook, true)
         XCTAssertEqual(s.sidebar.ungrouped.first?.tabs.count, 2)
         XCTAssertEqual(s.sidebar.ungrouped.first?.tabs[1].alive, false)
+        XCTAssertEqual(s.sidebar.ungrouped.first?.tabs[1].recent, 12)
+        XCTAssertNil(s.sidebar.ungrouped.first?.tabs[0].recent)
         XCTAssertEqual(s.sidebar.sections.first?.bannerFont, "metalix")
         let d = s.sidebar.sections.first?.defaults
         XCTAssertEqual(d?.path, "~/work")

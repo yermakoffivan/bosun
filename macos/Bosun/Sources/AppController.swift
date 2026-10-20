@@ -1224,15 +1224,18 @@ final class AppController: NSObject, NSWindowDelegate, NSMenuDelegate, NSMenuIte
         daemon.command(.restart(session: s, resume: resume, deferLaunch: false)) { [weak self] in self?.report($0) }
     }
 
-    /// Restart an exited row from the recents entry with its display name.
+    /// Restart an exited row from the recents entry it was created from (the daemon says which; an older
+    /// one doesn't, so then the entry with its display name), under the name it has now.
     func restartExited(_ s: String, resume: Bool) {
         if isAlive(s) { restart(s, resume: resume); return }
         let name = displayName(s)
-        guard let r = daemon.state.recents.first(where: { $0.name == name }) else {
+        let recent = daemon.state.sidebar.container(holding: s)?.tabs.first(where: { $0.session == s })?.recent
+        guard let r = daemon.state.recents.first(where: { recent != nil ? $0.id == recent : $0.name == name }) else {
             root.band.flash("No saved spec for “\(name)”", color: theme.error)
             return
         }
         var spec = r.spec
+        spec.name = name
         spec.resume = resume
         daemon.command(.create(spec: spec, deferLaunch: true)) { [weak self] ack in
             guard let self else { return }

@@ -27,6 +27,7 @@ fn state_with(sessions: Vec<SessionView>) -> AppState {
         sidebar: SidebarModel {
             ungrouped,
             sections: Vec::new(),
+            ended_names: Default::default(),
         },
         ..Default::default()
     }
@@ -188,6 +189,7 @@ fn sections_group_sessions() {
             defaults: None,
             role: None,
         }],
+        ended_names: Default::default(),
     };
     let frame = render(&state, 80, 12);
     insta::assert_snapshot!("sections_group_sessions", frame);

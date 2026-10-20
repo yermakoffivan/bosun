@@ -133,11 +133,14 @@ public struct Tab: Codable, Equatable, Sendable {
     public var session: String
     public var display: String
     public var alive: Bool
+    /// For an exited tab: the recents entry it was created from, to restart it from.
+    public var recent: Int64?
 
-    public init(session: String, display: String = "", alive: Bool = true) {
+    public init(session: String, display: String = "", alive: Bool = true, recent: Int64? = nil) {
         self.session = session
         self.display = display
         self.alive = alive
+        self.recent = recent
     }
 
     public init(from decoder: Decoder) throws {
@@ -145,6 +148,7 @@ public struct Tab: Codable, Equatable, Sendable {
         session = try c.decode(String.self, forKey: .session)
         display = try c.decodeIfPresent(String.self, forKey: .display) ?? ""
         alive = try c.decodeIfPresent(Bool.self, forKey: .alive) ?? false
+        recent = try c.decodeIfPresent(Int64.self, forKey: .recent)
     }
 }
 

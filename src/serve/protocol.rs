@@ -506,6 +506,10 @@ pub struct TabWire {
     /// as "exited" so it can be restarted). Ignored on `sidebar_save`.
     #[serde(default)]
     pub alive: bool,
+    /// For an exited session: the id of the recents entry it was
+    /// created from, to restart it from. Ignored on `sidebar_save`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -886,11 +890,13 @@ impl From<&Recent> for RecentWire {
 impl SidebarWire {
     /// Build the wire sidebar. `display_for` names a tab (live display
     /// name, or the recovered name of an exited session); `alive`
-    /// says whether its tmux session is still there.
+    /// says whether its tmux session is still there; `recent_for` finds
+    /// the recents entry an exited session was created from.
     pub fn from_model(
         model: &SidebarModel,
         display_for: impl Fn(&str) -> String,
         alive: impl Fn(&str) -> bool,
+        recent_for: impl Fn(&str) -> Option<i64>,
     ) -> Self {
         let container = |c: &Container| ContainerWire {
             id: c.id.clone(),
@@ -902,10 +908,14 @@ impl SidebarWire {
             tabs: c
                 .members
                 .iter()
-                .map(|m| TabWire {
-                    session: m.clone(),
-                    display: display_for(m),
-                    alive: alive(m),
+                .map(|m| {
+                    let alive = alive(m);
+                    TabWire {
+                        session: m.clone(),
+                        display: display_for(m),
+                        alive,
+                        recent: if alive { None } else { recent_for(m) },
+                    }
                 })
                 .collect(),
             parked: c.parked.clone(),
@@ -991,9 +1001,12 @@ impl SidebarWire {
                     .collect::<Result<Vec<_>, _>>()?,
             });
         }
+        // Ended tabs' names aren't in a client's layout:
+        // `SidebarModel::adopt` carries them over.
         Ok(SidebarModel {
             ungrouped,
             sections,
+            ended_names: Default::default(),
         })
     }
 }
@@ -1424,6 +1437,7 @@ mod tests {
                     session: session.name.clone(),
                     display: "api".into(),
                     alive: true,
+                    recent: None,
                 }],
                 parked: None,
             }],
@@ -1680,9 +1694,17 @@ mod tests {
         sec.members
             .push(Container::single("bosun-b-2".into(), "b".into()));
         model.sections.push(sec);
-        let wire = SidebarWire::from_model(&model, |n| n.to_uppercase(), |n| n == "bosun-a-1");
+        let wire = SidebarWire::from_model(
+            &model,
+            |n| n.to_uppercase(),
+            |n| n == "bosun-a-1",
+            |_| Some(7),
+        );
         assert_eq!(wire.ungrouped[0].tabs[0].display, "BOSUN-A-1");
         assert!(!wire.sections[0].members[0].tabs[0].alive);
+        // Only an exited tab says which recent it restarts from.
+        assert_eq!(wire.ungrouped[0].tabs[0].recent, None);
+        assert_eq!(wire.sections[0].members[0].tabs[0].recent, Some(7));
         // A row's wire name is its label (the active tab's name), not
         // the stored placeholder; `sidebar_save` keeps the stored one.
         assert_eq!(wire.ungrouped[0].name, "BOSUN-A-1");
@@ -1699,6 +1721,7 @@ mod tests {
             session: s.into(),
             display: String::new(),
             alive: true,
+            recent: None,
         };
         let c = |id: &str, tabs: Vec<TabWire>, active: &str| ContainerWire {
             id: id.into(),

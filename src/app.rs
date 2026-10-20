@@ -414,6 +414,9 @@ impl AppState {
     /// sidebar's missing-row renderer so users see `Raycast` instead
     /// of `bosun-raycast-1e18ae00`.
     pub fn dead_display_for(&self, internal: &str) -> String {
+        if let Some(name) = self.sidebar.ended_names.get(internal) {
+            return name.clone();
+        }
         match self.recent_for_internal(internal) {
             Some(r) => r.name.clone(),
             None => {
@@ -1689,7 +1692,11 @@ impl AppState {
                     // user hit Esc and the data isn't trivially
                     // recoverable from inside the modal flow.
                     if let Some(recent) = self.recent_for_internal(&internal) {
-                        let spec = recent.to_spec();
+                        // Under the name the tab had (see
+                        // `SidebarModel::ended_names`), not necessarily
+                        // the one it was created with.
+                        let mut spec = recent.to_spec();
+                        spec.name = self.dead_display_for(&internal);
                         let display = spec.name.clone();
                         let agent = spec.agent.clone();
                         let title = "Restart from recents?";
@@ -4388,6 +4395,7 @@ mod tests {
             sidebar: SidebarModel {
                 ungrouped,
                 sections: Vec::new(),
+                ended_names: Default::default(),
             },
             ..Default::default()
         }
@@ -5319,6 +5327,7 @@ mod tests {
         s.sidebar = SidebarModel {
             ungrouped: vec![con("a"), b.clone()],
             sections: vec![],
+            ended_names: Default::default(),
         };
         s.selected = 1; // on "b"
 
@@ -5326,6 +5335,7 @@ mod tests {
         let external = SidebarModel {
             ungrouped: vec![b, con("c")],
             sections: vec![section("s1", "work", &["a"])],
+            ended_names: Default::default(),
         };
         s.adopt_external_sidebar(external.clone());
         assert_eq!(
@@ -5354,11 +5364,13 @@ mod tests {
         s.sidebar = SidebarModel {
             ungrouped: vec![con("a"), con("b"), con("c")],
             sections: vec![],
+            ended_names: Default::default(),
         };
         s.selected = 2;
         s.adopt_external_sidebar(SidebarModel {
             ungrouped: vec![con("a")],
             sections: vec![],
+            ended_names: Default::default(),
         });
         assert_eq!(s.selected, 0);
     }
@@ -5379,6 +5391,7 @@ mod tests {
         SidebarModel {
             ungrouped: ungrouped.iter().map(|s| con(s)).collect(),
             sections,
+            ended_names: Default::default(),
         }
     }
 
@@ -5393,6 +5406,7 @@ mod tests {
         s.sidebar = SidebarModel {
             ungrouped: vec![con("solo"), pair],
             sections: vec![section("g1", "proj", &["grouped"])],
+            ended_names: Default::default(),
         };
 
         // Off (the default): every container row keeps its strip.

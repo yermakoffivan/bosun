@@ -495,6 +495,7 @@ impl Daemon {
                 None => self.app.dead_display_for(name),
             },
             |name| live.contains(name),
+            |name| self.app.recent_for_internal(name).map(|r| r.id),
         );
         Published {
             sessions,
@@ -527,6 +528,20 @@ impl Daemon {
                     .into_iter()
                     .filter(|t| self.app.session_by_name(t).is_some())
                     .collect();
+                // The name lives on the session, so keep it for the
+                // docked row: a rename since it was created would
+                // otherwise be lost.
+                let mut named = false;
+                for t in &live {
+                    if let Some(display) =
+                        self.app.session_by_name(t).map(|v| v.display().to_string())
+                    {
+                        named |= self.app.sidebar.set_ended_name(t, &display);
+                    }
+                }
+                if named {
+                    self.save_sidebar_and_history();
+                }
                 if !live.is_empty() {
                     self.app.recently_killed.extend(live.iter().cloned());
                     let _ = self.cmd_tx.send(Command::KillContainer { tabs: live });
@@ -558,12 +573,15 @@ impl Daemon {
             if !still_there || self.app.session_by_name(&dead).is_some() {
                 continue;
             }
+            // The recents entry it was created from, under the name it
+            // had when it was docked or was given since.
             let name = self.app.dead_display_for(&dead);
-            let Some(recent) = self.app.recents.iter().find(|r| r.name == name) else {
+            let Some(recent) = self.app.recent_for_internal(&dead) else {
                 tracing::warn!("undock: no recents entry for {name}, so {dead} stays exited");
                 continue;
             };
             let mut spec = recent.to_spec();
+            spec.name = name;
             spec.container_id = Some(row);
             spec.resume = true;
             self.app.pending_restart_swap = Some(dead);
@@ -1075,6 +1093,20 @@ impl Daemon {
                 );
             }
             CmdOp::Rename { session, display } => match check_text("display", &display, false) {
+                // A tab whose session has ended (a docked row's): there's
+                // no session to rename, so the name is kept on the
+                // sidebar and the tab comes back under it.
+                Ok(()) if self.app.session_by_name(&session).is_none() => {
+                    let result = if self.app.sidebar.set_ended_name(&session, display.trim()) {
+                        self.save_sidebar_and_history();
+                        Ok(())
+                    } else if self.app.dead_display_for(&session) == display.trim() {
+                        Ok(())
+                    } else {
+                        Err(format!("no session or tab {session}"))
+                    };
+                    self.ack_result(client, id, result);
+                }
                 Ok(()) => self.forward(
                     client,
                     id,
