@@ -718,6 +718,10 @@ server owned by the bosun process. Two reasons:
    bindings, or status bar. If you want the opposite — bosun managing
    your main tmux server — set `BOSUN_TMUX_SOCKET=default`.
 
+## Troubleshooting
+
+If new sessions close as soon as they start, it's usually because tmux was updated while Bosun's tmux server was still running the old version: quit Bosun and run `tmux -L bosun kill-server` (it ends the sessions on that server). [docs/troubleshooting.md](docs/troubleshooting.md) has the checks for this and other problems, and how to get a debug log.
+
 ## Development
 
 ```sh

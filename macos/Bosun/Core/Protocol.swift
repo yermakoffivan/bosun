@@ -611,18 +611,22 @@ public struct Snapshot: Codable, Equatable, Sendable {
     public var themeDark: ThemePalette?
     public var themes: [ThemeEntry]
     public var keybindings: KeyBindingsWire?
+    /// Warnings that hold while the daemon runs (an out-of-date tmux server), also sent as `notice`
+    /// before this client connected.
+    public var notices: [String]
 
     enum CodingKeys: String, CodingKey {
-        case seq, server, sessions, statuses, sidebar, recents, config, theme, themes, keybindings
+        case seq, server, sessions, statuses, sidebar, recents, config, theme, themes, keybindings, notices
         case themeLight = "theme_light", themeDark = "theme_dark"
     }
 
     public init(seq: UInt64, server: ServerInfo, sessions: [SessionInfo], statuses: [String: StatusInfo], sidebar: Sidebar,
                 recents: [Recent], config: ConfigView, theme: ThemePalette, themeLight: ThemePalette? = nil,
-                themeDark: ThemePalette? = nil, themes: [ThemeEntry], keybindings: KeyBindingsWire?) {
+                themeDark: ThemePalette? = nil, themes: [ThemeEntry], keybindings: KeyBindingsWire?,
+                notices: [String] = []) {
         self.seq = seq; self.server = server; self.sessions = sessions; self.statuses = statuses; self.sidebar = sidebar
         self.recents = recents; self.config = config; self.theme = theme; self.themeLight = themeLight; self.themeDark = themeDark
-        self.themes = themes; self.keybindings = keybindings
+        self.themes = themes; self.keybindings = keybindings; self.notices = notices
     }
 
     public init(from decoder: Decoder) throws {
@@ -639,6 +643,7 @@ public struct Snapshot: Codable, Equatable, Sendable {
         themeDark = try c.decodeIfPresent(ThemePalette.self, forKey: .themeDark)
         themes = try c.decodeIfPresent([ThemeEntry].self, forKey: .themes) ?? []
         keybindings = try c.decodeIfPresent(KeyBindingsWire.self, forKey: .keybindings)
+        notices = try c.decodeIfPresent([String].self, forKey: .notices) ?? []
     }
 }
 

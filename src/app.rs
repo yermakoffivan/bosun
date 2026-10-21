@@ -1314,6 +1314,9 @@ impl AppState {
                 self.pending_ops.clear();
                 self.pending_create = None;
             }
+            AppMsg::Notice { message, .. } => {
+                self.warning = Some(message);
+            }
             AppMsg::Fatal(w) => {
                 self.warning = Some(w);
                 self.quit = true;

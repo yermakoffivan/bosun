@@ -1029,6 +1029,44 @@ fn serve_turn_timers_survive_a_daemon_restart() {
     c.until("kill ack", |v| is_ack(v, 2));
 }
 
+/// A session whose shell exits as it starts (as with a tmux server the
+/// installed tmux can't use, issue #21) gets a notice pointing at the
+/// troubleshooting page instead of just vanishing; one that stays up
+/// gets none.
+#[test]
+fn serve_warns_when_a_new_session_closes_by_itself() {
+    let mut fx = fixture();
+    let path = fx.start();
+    let mut c = Conn::connect(&path);
+    c.send(json!({"t": "hello", "protocol": 1}));
+    assert_eq!(c.recv().expect("snapshot")["t"], "snapshot");
+
+    fx.tmux(&["set-option", "-g", "default-command", "exit 0"]);
+    create_terminal(&mut c, 1, "gone", "");
+    let seen = c.until("the closed notice", |v| {
+        v["t"] == "notice"
+            && v["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("closed as soon as it started"))
+    });
+    let message = seen.last().unwrap()["message"].as_str().unwrap();
+    assert!(message.starts_with("gone closed"), "{message}");
+    assert!(message.contains("docs/troubleshooting.md"), "{message}");
+
+    fx.tmux(&["set-option", "-gu", "default-command"]);
+    let name = create_terminal(&mut c, 2, "stays", "");
+    std::thread::sleep(Duration::from_millis(2600));
+    c.send(json!({"t": "cmd", "id": 3, "op": "kill", "session": name}));
+    let seen = c.until("kill ack", |v| is_ack(v, 3));
+    assert!(
+        !seen.iter().any(|v| v["t"] == "notice"
+            && v["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("closed as soon as it started"))),
+        "{seen:?}"
+    );
+}
+
 /// Create a `terminal` session through the daemon and return its tmux
 /// name. `args` is the command typed into its shell (empty: none).
 fn create_terminal(c: &mut Conn, id: u64, name: &str, args: &str) -> String {

@@ -52,6 +52,7 @@ use crate::tmux::attach::{
 use crate::tmux::control::Notification;
 use crate::tmux::control_client::ControlClient;
 use crate::tmux::detector::{DetectContext, DetectorRegistry, Status};
+use crate::tmux::health;
 use crate::tmux::session::SessionView;
 use crate::tmux::status_bar::{self, BarSession};
 use crate::tmux::{CreateSpec, SessionMetadata, TmuxClient};
@@ -276,6 +277,22 @@ pub fn spawn(
             last_self_heal: std::time::Instant::now(),
         };
 
+        // A server left running from before a tmux update can't always
+        // run new sessions (issue #21). Checked before the monitor below
+        // starts a server, so only a server that was already there is
+        // compared.
+        if let Some(message) = health::server_version_warning(socket.as_deref()).await {
+            tracing::warn!("{} ({})", message, health::TROUBLESHOOTING_URL);
+            let _ = evt_tx.send(AppMsg::Notice {
+                message,
+                standing: true,
+            });
+        }
+        // Sessions just created, with their display name and when, until
+        // they've stayed up for `health::STARTUP_GRACE`. One that closes
+        // by itself before then gets a warning instead of just vanishing.
+        let mut starting: Vec<(String, String, std::time::Instant)> = Vec::new();
+
         // Start the control-mode monitor subprocess. The guard is
         // held for the lifetime of the actor — dropping it on exit
         // kills the subprocess. `notifs` is the receive side of a
@@ -469,6 +486,7 @@ pub fn spawn(
                     launch_hooks = prepare_launch_hooks(on);
                 }
                 Command::KillSession(internal) => {
+                    starting.retain(|(s, _, _)| *s != internal);
                     match client.kill_session(&internal).await {
                         Ok(()) => {
                             // If we killed the focused session, drop
@@ -504,6 +522,7 @@ pub fn spawn(
                     branch,
                     merge,
                 } => {
+                    starting.retain(|(s, _, _)| *s != internal);
                     handle_kill_remove_worktree(
                         &*client,
                         &internal,
@@ -538,6 +557,7 @@ pub fn spawn(
                     // failure on one doesn't abort the rest. The
                     // sidebar reconcile after the final refresh
                     // drops the now-tab-less container.
+                    starting.retain(|(s, _, _)| !tabs.contains(s));
                     let mut failed = Vec::new();
                     for tab in &tabs {
                         if let Err(e) = client.kill_session(tab).await {
@@ -796,6 +816,11 @@ pub fn spawn(
                     match create_session(&*client, &config, &launch_hooks, spec.clone(), defer_launch).await {
                         Ok(internal_name) => {
                             focused = Some(internal_name.clone());
+                            starting.push((
+                                internal_name.clone(),
+                                spec.name.clone(),
+                                std::time::Instant::now(),
+                            ));
                             // Save the recent (on the resolved spec —
                             // so if "Bosun" became "Bosun 2", the
                             // recents store remembers "Bosun 2").
@@ -1004,6 +1029,12 @@ pub fn spawn(
                     // detection. See the comment on `preview_tick`
                     // above for why this lives inside the actor
                     // rather than in a separate task.
+                    if starting
+                        .iter()
+                        .any(|(_, _, at)| at.elapsed() >= health::STARTUP_GRACE)
+                    {
+                        check_started(&*client, &mut starting, &evt_tx).await;
+                    }
                     let _ = do_refresh(
                         &*client,
                         &config,
@@ -1112,6 +1143,37 @@ pub fn spawn(
         // `globals` drops here → uninstall_globals runs.
         drop(globals);
     })
+}
+
+/// Warn about each session in `starting` that's past
+/// `health::STARTUP_GRACE` and no longer there: it closed by itself, as
+/// a shell does when the tmux server can't run it (issue #21). Those
+/// still in their grace period stay in the list.
+async fn check_started(
+    client: &dyn TmuxClient,
+    starting: &mut Vec<(String, String, std::time::Instant)>,
+    evt_tx: &mpsc::UnboundedSender<AppMsg>,
+) {
+    let Ok(live) = client.list_sessions().await else {
+        return;
+    };
+    starting.retain(|(internal, display, at)| {
+        if at.elapsed() < health::STARTUP_GRACE {
+            return true;
+        }
+        if !live.iter().any(|s| s.name == *internal) {
+            tracing::warn!(
+                "{} closed as soon as it started ({})",
+                internal,
+                health::TROUBLESHOOTING_URL
+            );
+            let _ = evt_tx.send(AppMsg::Notice {
+                message: health::closed_at_start(display),
+                standing: false,
+            });
+        }
+        false
+    });
 }
 
 /// Kill a worktree-backed session and clean up its git worktree.

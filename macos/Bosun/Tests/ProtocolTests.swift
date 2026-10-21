@@ -66,6 +66,18 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(s.theme.panelAlt, "#434c5e")
         XCTAssertEqual(s.themes.last?.source, "user")
         XCTAssertNil(s.keybindings)
+        XCTAssertEqual(s.notices, [])
+    }
+
+    /// Standing notices (an out-of-date tmux server) ride in the snapshot, so a client that connected
+    /// after they were sent still shows them.
+    func testSnapshotNoticesArePassedOnAsNotices() throws {
+        let json = Self.snapshotJSON.replacingOccurrences(of: #""some_future_field""#,
+                                                          with: #""notices":["tmux server is old"],"some_future_field""#)
+        guard case .snapshot(let s) = try decode(json) else { return XCTFail("not a snapshot") }
+        XCTAssertEqual(s.notices, ["tmux server is old"])
+        var state = BosunState()
+        XCTAssertEqual(state.apply(.snapshot(s)), .applied([.snapshot, .notice("tmux server is old")]))
     }
 
     func testDeltasDecode() throws {

@@ -324,6 +324,11 @@ pub struct Snapshot {
     pub themes: Vec<ThemeEntry>,
     #[serde(default)]
     pub keybindings: KeybindingsWire,
+    /// Warnings that hold for as long as the daemon runs, such as a tmux
+    /// server older than `tmux -V`. Each was also sent as a `notice`,
+    /// but a client that connected later missed it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<String>,
 }
 
 /// The navigation shortcuts from `[keybindings]` in `config.toml`, as
@@ -1491,6 +1496,7 @@ mod tests {
             theme_dark: Some(theme.clone()),
             themes: themes.clone(),
             keybindings: KeybindingsWire::default(),
+            notices: vec!["tmux server is old".into()],
         })));
         round_trip_server(ServerMsg::Sessions {
             seq: 2,

@@ -334,7 +334,7 @@ What the new-session form collects:
  "theme_light":{…},"theme_dark":{…},"themes":[…],"keybindings":{…}}
 ```
 
-The whole state. `server.tmux_socket` is the `-L` socket name terminal views attach with (`tmux -L <socket> attach -t =<session>`); it's absent when Bosun uses tmux's default socket.
+The whole state. `server.tmux_socket` is the `-L` socket name terminal views attach with (`tmux -L <socket> attach -t =<session>`); it's absent when Bosun uses tmux's default socket. `notices` comes only when there's something to say: warnings that hold for as long as the daemon runs, such as a tmux server still running an older tmux than `tmux -V`, which can stop new sessions from starting. Each was also sent as a `notice` when it arose, but a client that connected later missed that, so show them the way you show a `notice`.
 
 #### Sessions
 
@@ -478,7 +478,7 @@ The daemon picks up changes to `config.toml` made elsewhere (the TUI's theme pic
 {"t":"notice","seq":12,"message":"created bosun-api-1a2b3c4d"}
 ```
 
-A message for a person, the same text the TUI shows in its status bar: confirmations and errors from Bosun's own work. Show it as a toast or ignore it. Messages caused by a command are also listed in that command's `ack`.
+A message for a person, the same text the TUI shows in its status bar: confirmations and errors from Bosun's own work, and warnings no command asked for, such as "api closed as soon as it started. See docs/troubleshooting.md" for a new session whose shell exited straight away. Show it as a toast or ignore it. Messages caused by a command are also listed in that command's `ack`; the unprompted warnings never are.
 
 ### `client_session` and `client_detached`
 

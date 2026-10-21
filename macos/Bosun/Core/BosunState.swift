@@ -56,7 +56,7 @@ public struct BosunState: Sendable {
         if case .snapshot(let s) = msg {
             install(s)
             live = true
-            return .applied([.snapshot])
+            return .applied([.snapshot] + s.notices.map { .notice($0) })
         }
         guard let q = msg.seq else { return .none }
         if let last = seq, q != last + 1 {

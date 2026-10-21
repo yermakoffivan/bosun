@@ -4,6 +4,14 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.8] — 2026-10-21
+
+### Added
+
+- **A warning when a new session closes by itself.** If a session's shell exits as soon as it starts, Bosun now says "*name* closed as soon as it started. See docs/troubleshooting.md", in the TUI's status bar and Bosun for Mac's notices, instead of the session just vanishing (#21).
+- **A warning when Bosun's tmux server is older than the installed tmux.** Updating tmux leaves a running server on the old version, and the new tmux may not be able to run sessions on it. Bosun compares the two when it starts and, if they differ, says how to restart the server if new sessions close. Bosun for Mac shows it too, even though its daemon starts before the app connects: the snapshot now carries `notices`.
+- **[docs/troubleshooting.md](docs/troubleshooting.md):** what to check when sessions close as they start, how to test Bosun's tmux server without Bosun, and how to get a debug log from the TUI or from `bosun serve`. Thanks to @attilaolah for suggesting it.
+
 ## [2.2.7] — 2026-10-20
 
 ### Fixed

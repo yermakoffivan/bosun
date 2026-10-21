@@ -343,6 +343,10 @@ struct Daemon {
     /// For each row snoozed until it needs you, the tabs that already
     /// needed you (see `wake_snoozed`).
     snooze_baseline: HashMap<String, std::collections::HashSet<String>>,
+    /// Standing notices from the actor (`AppMsg::Notice`), carried in
+    /// every snapshot: the one about an out-of-date tmux server comes
+    /// before the app has connected.
+    standing: Vec<String>,
 }
 
 impl Daemon {
@@ -384,6 +388,7 @@ impl Daemon {
             resumes: VecDeque::new(),
             resuming: false,
             snooze_baseline: HashMap::new(),
+            standing: Vec::new(),
             config,
             store,
             client,
@@ -803,6 +808,7 @@ impl Daemon {
             theme_dark: p.theme_dark,
             themes: p.themes,
             keybindings: p.keybindings,
+            notices: self.standing.clone(),
         }))
     }
 
@@ -1651,6 +1657,16 @@ impl Daemon {
                 let msg = ServerMsg::Notice {
                     seq: self.next_seq(),
                     message: text,
+                };
+                self.broadcast(&msg);
+            }
+            AppMsg::Notice { message, standing } => {
+                if standing {
+                    self.standing.push(message.clone());
+                }
+                let msg = ServerMsg::Notice {
+                    seq: self.next_seq(),
+                    message,
                 };
                 self.broadcast(&msg);
             }

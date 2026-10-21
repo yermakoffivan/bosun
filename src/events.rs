@@ -429,6 +429,12 @@ pub enum AppMsg {
     AttachEnded { name: String },
     /// A non-fatal error to surface in the status bar.
     Warn(String),
+    /// A warning about something no command asked for, such as a
+    /// session that closed by itself. Unlike `Warn` it doesn't end an
+    /// operation in progress. `standing` ones describe how things are
+    /// for as long as Bosun runs, so `bosun serve` also sends them to
+    /// every client that connects later.
+    Notice { message: String, standing: bool },
     /// A fatal error — bail out of the event loop.
     Fatal(String),
     /// Explicit shutdown request (Ctrl-C, SIGTERM).
