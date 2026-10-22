@@ -57,6 +57,11 @@ jobs:
           fi
           echo "Tag ${GITHUB_REF_NAME} matches Cargo version ${CARGO_VERSION}."
 
+      # The release body is the tag's block from CHANGELOG.md (grouped by app:
+      # Both, TUI, Bosun for Mac), so a missing block stops the release here.
+      - name: Verify CHANGELOG.md has notes for the tag
+        run: scripts/release-notes.sh "${GITHUB_REF_NAME}" > /dev/null
+
   build:
     name: Build ${{ matrix.target }}
     needs: verify
@@ -131,10 +136,16 @@ jobs:
         with:
           path: artifacts
 
+      - name: Release notes from CHANGELOG.md
+        run: scripts/release-notes.sh "${GITHUB_REF_NAME}" > release-notes.md
+
+      # GitHub puts the body first and its generated "Full Changelog" compare
+      # link after it.
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
           files: artifacts/**/*.tar.gz
+          body_path: release-notes.md
           generate_release_notes: true
           draft: false
         env:

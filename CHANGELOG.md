@@ -4,9 +4,13 @@ All notable changes to bosun are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+From 2.2.0 on, each version is grouped by app: **Both** for changes to the TUI and Bosun for Mac alike, **TUI** for the terminal app only, and **Bosun for Mac** for the Mac app and `bosun serve`, the daemon it runs on. A version with nothing for the TUI says so under **TUI**.
+
 ## [2.2.8] — 2026-10-21
 
-### Added
+### Both
+
+#### Added
 
 - **A warning when a new session closes by itself.** If a session's shell exits as soon as it starts, Bosun now says "*name* closed as soon as it started. See docs/troubleshooting.md", in the TUI's status bar and Bosun for Mac's notices, instead of the session just vanishing (#21).
 - **A warning when Bosun's tmux server is older than the installed tmux.** Updating tmux leaves a running server on the old version, and the new tmux may not be able to run sessions on it. Bosun compares the two when it starts and, if they differ, says how to restart the server if new sessions close. Bosun for Mac shows it too, even though its daemon starts before the app connects: the snapshot now carries `notices`.
@@ -14,25 +18,44 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [2.2.7] — 2026-10-20
 
-### Fixed
+### Both
+
+#### Fixed
+
+- **A Claude turn that starts a background agent keeps running until the agent reports back.** Before, Bosun marked the session done as soon as Claude ended its turn, then the agent's own tool calls flipped it back to running and restarted the working timer, so a session busy for seven minutes could show 2m. Now the turn carries on, with "background agent" in Bosun for Mac's pane header and the timer counting from your prompt, until the agent's report has been dealt with and Claude finishes with nothing left at work. Background shells such as a dev server don't hold the turn open. The count is kept on the pane as `@bosun_background`.
+
+### Bosun for Mac
+
+#### Fixed
 
 - **Working timers survive a daemon restart.** `bosun serve` kept each turn's start only in memory, so restarting it (an update, say) set every running session's timer in Bosun for Mac back to <1m. It now keeps the start on the tmux session as `@bosun_turn_at` and carries on from it.
 - **Docked rows can be renamed, and keep their name.** In Bosun for Mac, renaming a docked row (or another tab whose session has ended) let you type a name, but Return did nothing. Now the name is kept with the sidebar and the row comes back under it when it's undocked, restarted or resumed. Docking also kept only the name a session was created with, so a row renamed and then docked came back under its old name; docking now keeps the name it has.
-- **A Claude turn that starts a background agent keeps running until the agent reports back.** Before, Bosun marked the session done as soon as Claude ended its turn, then the agent's own tool calls flipped it back to running and restarted the working timer, so a session busy for seven minutes could show 2m. Now the turn carries on, with "background agent" in Bosun for Mac's pane header and the timer counting from your prompt, until the agent's report has been dealt with and Claude finishes with nothing left at work. Background shells such as a dev server don't hold the turn open. The count is kept on the pane as `@bosun_background`.
 
 ## [2.2.6] — 2026-10-19
 
-### Added
+### TUI
+
+Nothing in this release changes the TUI.
+
+### Bosun for Mac
+
+#### Added
 
 - **Folder suggestions in Bosun for Mac's new-session sheet.** Typing in Path lists the folders the path could go on to under the field, as Finder's Go to Folder does, with hidden ones once you type a dot. Down and Up walk the list, Return or a click takes a folder and lists what's in it, Right at the end of the text completes as far as the matches agree (as in the TUI), and Esc closes the list. Return with nothing highlighted still creates the session.
 
-### Fixed
+#### Fixed
 
 - **Tab goes through every field of Bosun for Mac's new-session sheet**, in the same order as the TUI's form: Name, Path, the worktree box, Branch, Agent, Arguments, Session and the agent's options, wrapping round. Before, it only stopped at the text fields unless keyboard navigation was on in System Settings. On the agent picker and the Session row, Left and Right change the choice, and Space ticks a box.
 
 ## [2.2.5] — 2026-10-18
 
-### Added
+### TUI
+
+Nothing in this release changes the TUI, apart from showing the Snoozed and Docked sections that Bosun for Mac creates.
+
+### Bosun for Mac
+
+#### Added
 
 - **Read and unread done turns in Bosun for Mac.** A done turn is unread (a filled dot in the done colour) until you've read it, then it shows as a hollow ring in the same colour, with "done · read" in the pane header, so you can tell a finished turn you've seen from one waiting for you, and from an idle session. Reading it means having its pane as the active pane of the front window for two seconds once you've used the keyboard, mouse or trackpad in Bosun since it finished (so a turn that finishes in front of you while you're away stays unread), or choosing **Mark as Read** from a row's or tab's right-click menu (a row marks all its done tabs). Read turns leave the header's done count and their notification, the next turn is unread again, and read marks survive a relaunch.
 - **A working timer in Bosun for Mac.** A running session shows how long its turn has been going on its sidebar row (`<1m`, `4m`, `1h 5m`) and in its pane header ("running · 4m"). The turn counts from the prompt and carries on through permission prompts until the agent is done.
@@ -46,91 +69,127 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`started_at`, `create`'s `section` and `set_section_defaults` in `bosun serve`.** Status entries carry `started_at` (when the current turn started) while running or waiting, `create` takes an optional `section` id for the new row, and `set_section_defaults` stores a section's starting values for new sessions, sent in the section's `defaults`. See `docs/protocol.md`.
 - **Terminal and interface fonts in Bosun for Mac.** Settings → Fonts has two sets. **Terminal font** and its size default to your Ghostty config, and can be any installed fixed-width family and any size from 8 to 32 pt. **Interface font** and its size default to the system font at 13 pt (as before), and can be any installed family from 11 to 16 pt. The interface font is used in the sidebar, pane headers, the title bar and the session palette, and sidebar rows and pane headers grow with it. Both apply to every window and terminal as you change them.
 
-### Changed
+#### Changed
 
 - **Bosun for Mac's Settings window has tabs.** General, Appearance, Fonts and Notifications sit in the window's toolbar, as in other Mac apps, and the window takes the height of the tab shown and opens on the last one you used.
 - **Section headers in Bosun for Mac show their row count while open too**, not only when collapsed, and a section with no rows stays closed until a row goes in.
 
-### Fixed
+#### Fixed
 
 - **Cmd+click on a relative path asks about the pane's own session.** Bosun for Mac resolved `src/app.rs:42` against the directory of whatever pane the terminal's tmux client was on. A client can be on another session for a moment (moved by a binding, on its way back), and then the path was looked up in the wrong directory and nothing opened. It now asks tmux about the terminal's own session, which is what the pane shows.
 - **Theme previews merge reliably with many terminals open.** Colour changes within 80 ms of the previous one are merged into one, but the 80 ms counted from the start of the previous update; with enough terminals that update alone takes longer, so previews went through one by one. It now counts from when the update is done.
 
 ## [2.2.4] — 2026-10-17
 
-### Added
+### TUI
+
+Nothing in this release changes the TUI.
+
+### Bosun for Mac
+
+#### Added
 
 - **File links open in your editor, at the line.** Bosun for Mac's Settings has a Files section: choose the editor that Cmd+click on a path opens files in (it lists Zed, VS Code, Cursor, Windsurf, VSCodium, Sublime Text, Xcode and BBEdit when they're on your PATH, or takes any command), and `src/app.rs:42:7` opens at that line and column. It's the same `editor` setting in `config.toml` that the TUI's `e` key runs. Without one, files open with the default app for their type as before, and folders still open in Finder.
 - **`editor` in `bosun serve`.** The setting is in `config.settings`, `apply_setting` changes it (`null` unsets it), and an edit made elsewhere arrives as a `config` delta. See `docs/protocol.md`.
 - **A real-input test for Bosun for Mac (`--realtest`).** It drives the app with real mouse events through the window server, checking sidebar drags, pane drags and focus following the pointer (including after Settings, another app, the palette, a rename and a sheet). The other test modes post events inside the app and couldn't see 2.2.3's drag bug; this one fails on a build with it. It moves the pointer, so it only runs when you start it. See `macos/Bosun/README.md`.
 
-### Changed
+#### Changed
 
 - **Rename is a double-click in Bosun for Mac.** A double-click on a row's or tab's name renames it, and Rename is in the right-click menu as before. A single click on the selected row's name no longer starts a rename, so clicking the row on screen to get back to it doesn't drop you into the name field.
 - **Dev and demo runs of Bosun for Mac leave your window frame alone.** Their defaults are your real ones, so a window opened by `dev.sh` used to save its size and place over yours.
 
-### Fixed
+#### Fixed
 
 - **More time for tmux to say a pane's directory.** For a Cmd+click on a relative path, the app asks tmux for the pane's current directory; it now waits up to three seconds instead of one (off the main thread, so nothing stalls) before falling back to the session's first directory.
 
 ## [2.2.3] — 2026-10-17
 
-### Added
+### TUI
+
+Nothing in this release changes the TUI.
+
+### Bosun for Mac
+
+#### Added
 
 - **Drops at a position inside a row in Bosun for Mac.** A row or a tab dragged over another row's tabs lands where you let go: the top half of a tab puts it before that tab and the bottom half after, with the line showing where. The middle of a row's own line still adds it after the row's tabs, and the bottom of a row's last tab still means "after this row". A tab dragged out of its row now goes wherever you drop it (between rows, among the ungrouped rows, or into a section) instead of always right after its old row, and dropping it on its own row's tabs reorders it. With a filter on, a dragged-out tab still goes right after its old row, since the filtered list doesn't show real positions.
 - **`merge_rows` and `move_tab` take a position in `bosun serve`.** `merge_rows` has an optional `index` among the target row's tabs, and `move_tab` with `"container_id": null` takes an optional `index` and `section` to place the new row. Without them both work as before. See `docs/protocol.md`.
 
-### Fixed
+#### Fixed
 
 - **Dragging in the Bosun for Mac sidebar.** Since 2.2.1 a row or tab picked up in the sidebar stopped following the pointer: the drop line showed once and the drag then ended on its own. The new-window tear-off passed AppKit's drag-moved callback on to NSTableView, which doesn't have one, and the error ended every drag on its first move.
 
 ## [2.2.2] — 2026-10-17
 
-### Changed
+### Both
+
+#### Changed
 
 - **Passthrough is on in Bosun's tmux server.** Bosun now sets `allow-passthrough on` on its own server, so programs in a session can reach the real terminal: image viewers that wrap the kitty graphics protocol for tmux (`kitten icat`, `timg -pk`, yazi) now draw in Bosun for Mac, Ghostty or kitty instead of being dropped by tmux. Only Bosun's own server is changed; with `tmux_socket = "default"` your tmux keeps its own setting. A server started before this version picks it up the next time Bosun creates a session there.
+
+### Bosun for Mac
+
+#### Changed
+
 - **A Bosun for Mac screenshot in the README**, staged by `macos/Bosun/dev.sh demo`: a made-up project played by a script in place of the agents, so a retake never shows real sessions.
 
 ## [2.2.1] — 2026-10-17
 
-### Added
+### Both
+
+#### Added
+
+- **Thirteen more themes.** `kanagawa-wave`, `kanagawa-lotus`, `everforest-dark`, `everforest-light`, `flexoki-dark`, `flexoki-light`, `monokai-pro`, `oxocarbon`, `catppuccin-latte`, `rose-pine-dawn`, `tokyonight-day` and `poimandres`, plus a `bosun` house theme in the app icon's navy, cream and mint. That makes 28 (17 dark, 11 light); `opencode` is still the default. The theme picker scrolls when the terminal is too short to show them all.
+
+#### Changed
+
+- **Weak spots in the existing themes.** Selected rows on `github-light`, `ayu-light` and `solarized-light` were almost the panel colour; muted text in `one-light`, `solarized-light`, `one-dark-pro`, `nord`, `dracula`, `tokyonight`, `ayu-mirage` and `quiet-light` was hard to read, and `one-dark-pro`'s text was dull. `gruvbox-dark`'s panel and panel_alt were the wrong way round, and `rose-pine`'s done colour matched its accent. All are lifted one step. Copies of these themes in your own themes directory are unchanged.
+
+### Bosun for Mac
+
+#### Added
 
 - **Bosun for Mac.** A native app (AppKit and libghostty) for the same sessions as the TUI, running over `bosun serve`. Each sidebar row is a workspace whose tabs open as split panes of real terminals, and the keyboard always stays in the active terminal, so typing or dropping a file never lands in the sidebar by mistake. Cmd+Return zooms a pane; Cmd+N opens another window, and a row dragged out of the sidebar (or a pane dragged out by its header) opens in a window of its own. Cmd+K jumps to any session, Cmd+F filters the sidebar, and notifications and the Dock badge tell you when an agent is waiting or done. It's signed and notarized, for Apple silicon on macOS 15 or later: `brew install --cask yetidevworks/bosun/bosun-app` (it installs the `bosun` formula too). See `macos/Bosun/README.md`.
 - **`get_theme` in `bosun serve`.** Reads any theme's palette without changing anything, so the Mac app's Light and Dark theme popups preview each theme as you move through them. See `docs/protocol.md`.
 - **A light and a dark theme for Bosun for Mac.** Two new `config.toml` keys, `theme_light` and `theme_dark`, name the themes the Mac app shows while macOS is in Light and Dark mode, switching as the appearance changes. Either can be left out to use `theme`. The TUI can't tell the macOS appearance, so it keeps using `theme` as before, and it now keeps both keys when it saves `config.toml` instead of dropping them.
 - **`bosun serve` sends the light/dark pair.** `theme_light` and `theme_dark` are settings that `apply_setting` can change (`null` unsets one), and their palettes come in the snapshot and in a new `theme_pair` delta, so a client can switch the moment the appearance changes. Setting them never changes `theme`. See `docs/protocol.md`.
-- **Thirteen more themes.** `kanagawa-wave`, `kanagawa-lotus`, `everforest-dark`, `everforest-light`, `flexoki-dark`, `flexoki-light`, `monokai-pro`, `oxocarbon`, `catppuccin-latte`, `rose-pine-dawn`, `tokyonight-day` and `poimandres`, plus a `bosun` house theme in the app icon's navy, cream and mint. That makes 28 (17 dark, 11 light); `opencode` is still the default. The theme picker scrolls when the terminal is too short to show them all.
 - **Terminal colours in theme files.** A theme can carry an optional `[terminal]` table (background, foreground, cursor, selection and a 16-colour palette), which `bosun serve` sends with the theme as an optional `terminal` field (no protocol version bump; see `docs/protocol.md`). Every bundled theme has one, and your own themes can too. The TUI ignores it.
 - **Terminals follow the Bosun theme in Bosun for Mac.** It is now on by default, and the first launch with this version switches it on for everyone once, with a note in the title band. Settings > Theme has **Follow the Bosun theme** and **Use my Ghostty config**; choose the second after that and it sticks. The colours come from the theme's own `[terminal]` table, then the Ghostty counterpart, then a generated palette whose colours are now lifted to read on the background. Your Ghostty config file is never changed. Previewing themes from the TUI recolours the terminals at most about 12 times a second.
 
-### Changed
+#### Changed
 
 - **Remove from Sidebar in Bosun for Mac takes one step.** It's always in a row's and a tab's right-click menu (and Session → Remove Row from Sidebar). With sessions still running it asks once, "Kill and Remove", and kills them before taking the row out; a row with nothing running goes straight away. On a tab, only that tab goes. Before, a live row needed Kill… first, and only then showed Remove from Sidebar.
-- **Weak spots in the existing themes.** Selected rows on `github-light`, `ayu-light` and `solarized-light` were almost the panel colour; muted text in `one-light`, `solarized-light`, `one-dark-pro`, `nord`, `dracula`, `tokyonight`, `ayu-mirage` and `quiet-light` was hard to read, and `one-dark-pro`'s text was dull. `gruvbox-dark`'s panel and panel_alt were the wrong way round, and `rose-pine`'s done colour matched its accent. All are lifted one step. Copies of these themes in your own themes directory are unchanged.
 
-### Fixed
+#### Fixed
 
 - **First launch of the Mac app showed another theme.** Before the daemon's snapshot arrived, the app drew a palette from an older opencode. It now matches `themes/opencode.toml`.
 
 ## [2.2.0] — 2026-10-16
 
-### Added
+### Both
+
+#### Added
 
 - **Claude Code reports its own status.** Claude sessions now tell Bosun when they're working, waiting for you (and on what, e.g. `permission: Bash`, a question or plan approval), done or idle, through hooks Bosun passes with `--settings` at launch. Your own `~/.claude/settings.json` is never edited, and your own hooks keep running alongside. Existing sessions pick this up on their next restart. The old detectors stay as a cross-check, e.g. when you interrupt Claude with Esc. Turn it off with **agent status hooks** in the settings panel (`s`), `agent_hooks = false` in `config.toml`, or `BOSUN_AGENT_HOOKS=0`. Other agents keep the existing detection for now, because none of them offers a way to add hooks without changing your own config.
-- **`bosun serve`.** A background daemon that runs Bosun's session engine behind a Unix socket, for graphical clients such as the upcoming Mac app. The protocol is described in `docs/protocol.md`.
-- **Merge rows into tabs.** A row's tabs can now be regrouped without restarting anything: the Mac app can merge one row into another (its tabs become the other row's tabs) or move a tab out into a row of its own. The TUI shows the result straight away and keeps it across tmux restarts.
 
-### Changed
+#### Changed
 
 - **Faster tmux commands.** Bosun now sends its tmux commands over one long-lived control-mode connection instead of starting a `tmux` process for each one. Navigating starts about 80% fewer processes, and common commands take well under a millisecond instead of about 5 ms. Set `BOSUN_TMUX_CONTROL=0` to go back to the old behaviour.
 - **Checked against tmux 3.4**, the version Ubuntu 24.04 and Debian ship. The new command connection never starts a tmux server of its own now: on 3.4, the short-lived server its attach used to start could make Bosun's first command after starting the tmux server (the first launch after a reboot, say) fail with "server exited unexpectedly". The integration tests now pass on tmux 3.4 as well as 3.8.
 
-### Fixed
+#### Fixed
 
 - **Claude Code 2.1.30x status.** Newer Claude builds name their process `2.1.301` instead of `2_1_220`, show whimsical working verbs ("Photosynthesizing…") and keep the `✳` title while they work, so Bosun stopped recognising Claude panes and a working session could read as waiting. Bosun now recognises both process names and any `-ing… (elapsed)` working line, retires a hook's running state on Claude's `Interrupted` line instead of its title, and shows a session as working when Claude carries on after a Stop hook said done (for example because another Stop hook told it to continue).
 - **No stray `^L` after a launch.** Starting or restarting an agent used to send a Ctrl-L a moment after the agent appeared, to force a repaint. It often arrived before the agent was ready to read keys, so the terminal echoed a literal `^L` into the agent's prompt. Bosun now types only the launch command.
 - **Plain shells read as idle, not waiting.** A terminal session sitting at its shell prompt showed as waiting for half a minute after every keystroke or prompt redraw, so a waiting badge didn't reliably mean an agent needed you. A session whose foreground process is a shell now reads as idle; a command you start from it (a build, a REPL) still shows as running while it works.
 - **Two Bosun processes on one tmux server no longer undo each other.** A Bosun that's still running now picks up section changes made by another one instead of reverting them on its next save, and quitting one no longer removes the shared tmux key bindings (C-q, Shift+Left/Right, M-O, prefix 1–9) while another is still running.
+
+### Bosun for Mac
+
+#### Added
+
+- **`bosun serve`.** A background daemon that runs Bosun's session engine behind a Unix socket, for graphical clients such as the upcoming Mac app. The protocol is described in `docs/protocol.md`.
+- **Merge rows into tabs.** A row's tabs can now be regrouped without restarting anything: the Mac app can merge one row into another (its tabs become the other row's tabs) or move a tab out into a row of its own. The TUI shows the result straight away and keeps it across tmux restarts.
 
 ## [2.1.16] — 2026-10-05
 
